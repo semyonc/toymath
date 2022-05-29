@@ -1,0 +1,6 @@
+__pycache__
+.DS_Store
+*.ipynb
+.pytest_cache
+.idea
+parser.out
