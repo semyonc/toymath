@@ -34,6 +34,7 @@ class LaTexWriter(object):
         '\\textrm': 'write_text',
         '\\textsf': 'write_text',
         '\\texttt': 'write_text',
+        '\\dashv': 'write_binaryop'
     }
 
     re_prefix = re.compile(r'\\')
@@ -109,7 +110,8 @@ class LaTexWriter(object):
                 and not self._probe(sym, '\\atop') \
                 and not self._probe(sym, '\\atopwithdelims') \
                 and not self._probe(sym, '\\brace') \
-                and not self._probe(sym, '\\brack'):
+                and not self._probe(sym, '\\brack') \
+                and not self._probe(sym, '\\dashv') :
             self.write_subformula(sym)
 
     def write_subformula(self, sym):
@@ -192,9 +194,15 @@ class LaTexWriter(object):
                     self.write_scalar(sym)
             else:
                 if isinstance(sym, Symbol):
-                    self.writeString(sym.name)
+                    self.write_symbol(sym)
                 else:
                     self.write_term(sym)
+
+    def write_symbol(self, sym):
+        if sym.name.startswith('#'):
+            self.writeString("\\#\\text{" + sym.name[1:] + "}")
+        else:
+            self.writeString(sym.name)
 
     def write_scalar(self, sym):
         self.head = sym
@@ -324,7 +332,7 @@ class LaTexWriter(object):
         self.writeString('\'')
 
     def write_text(self, f):
-        self.writeString(f.sym.name);
+        self.writeString(f.sym.name)
         self.writeString('{')
         self.output.write(f.args[0])
         self.writeString('}')

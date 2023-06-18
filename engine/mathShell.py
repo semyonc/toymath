@@ -1,12 +1,31 @@
 # -*- coding: utf-8 -*-
 
-from notation import Notation
+from notation import Notation, Symbol
 from LatexParser import MathParser
 from processor import MathProcessor
 from LatexWriter import LaTexWriter
 
-from IPython.display import HTML
+from IPython.display import HTML, Javascript
 from engine import display
+
+
+def split_lines(self, code):
+    bracket = 0
+    buffer = ''
+    for codePoint in code:
+        if codePoint == '{':
+            bracket += 1
+        elif codePoint == '}':
+            bracket -= 1
+        elif codePoint == '\n' and bracket == 0:
+            yield buffer
+            buffer = ''
+            continue
+        elif codePoint == '\r':
+            continue
+        buffer += codePoint
+    if buffer != '':
+        yield buffer
 
 
 class MathShell(object):
@@ -44,21 +63,27 @@ class MathShell(object):
     def set_trace(self, trace_mode):
         self.trace = trace_mode
 
-    def exec(self, code, execution_count, add_to_history=False):
+    def exec(self, code, execution_count, add_to_history=False, cell_id=None):
+        lines = [line for line in split_lines(self, code)]
+        for index, line in enumerate(lines):
+            last = index == len(lines) - 1
+            self.exec_stmt(line, execution_count, add_to_history and last, last)
+
+    def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False
         self.trace = self.trace_mode
         self.trace_output = ''
         try:
             sym = self.parser.parse(code)
             outsym, notation = self.process(sym, self.parsedNotation)
-            if not outsym == Notation.NONE:
+            if not outsym == Notation.NONE and do_output:
                 output = self.output(outsym, notation, execution_count, add_to_history)
                 if self.echo_mode or self.current_echo:
                     output = self.output(sym, self.parsedNotation, execution_count, False) + ' \\Rightarrow ' + output
                 display(HTML('$' + output + '$'))
         except Exception as e:
             if self.trace:
-                display(HTML('$\\color{red}{\\text{Error: }\\textit{' + e.args[0] + '}}$'))
+                display(HTML('$\\color{red}{\\text2{Error: }\\textit{' + e.args[0] + '}}$'))
             else:
                 raise
         if self.trace and self.trace_output != '':
@@ -74,3 +99,6 @@ class MathShell(object):
         writer = LaTexWriter(notation)
         result = writer(outsym)
         return result
+
+    def clear(self):
+        self.processor.prologModel.clear()

@@ -38,6 +38,7 @@ class Replicator(object):
         'sgroup': 'enter_sgroup',
         '\\array': 'enter_array',
         '\\cases': 'enter_array',
+        '\\dashv': 'enter_binaryop'
     }
 
     def __init__(self, notation, output_notation):
@@ -110,6 +111,9 @@ class Replicator(object):
         if res is not None:
             return res
         res = self._probe(sym, '\\brack')
+        if res is not None:
+            return res
+        res = self._probe(sym, '\\dashv')
         if res is not None:
             return res
         return self.enter_subformula(sym)

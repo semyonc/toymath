@@ -111,7 +111,9 @@ class MathLexer(object):
         'operatorname',
         'limits',
         'nolimits',
-        'Box'
+        'Box',
+        'dashv',
+        'gets'
      )
           
      # Declare the state
@@ -153,7 +155,7 @@ class MathLexer(object):
 
              
      def t_LITERAL(self, t):
-         r'\\[A-Za-z]+|[A-Za-z]|\#\w+' 
+         r'\\[A-Za-z]+|[A-Za-z]|\#\w+|\#\#' 
          val = t.value
          if val[0] == '\\':
            if val[1:] in MathLexer.tokens:

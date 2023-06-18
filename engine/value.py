@@ -117,6 +117,7 @@ class IntegerValue(Value):
             return IntegerValue(-self.val)
         return self
 
+
 class FloatValue(Value):
     """FloatValue"""
 
@@ -141,7 +142,7 @@ class FloatValue(Value):
             if len(parts) > 1:
                 num = int(parts[1])
                 denom = 10 ** len(parts[1])
-                res = res.add(FloatValue(num, denom))
+                res = res.add(FracValue(num, denom))
             return res
         return None
 

@@ -5,20 +5,25 @@ Created on Sun Dec 27 15:39:04 2020
 
 @author: semyonc
 """
+from typing import TypeVar
 from collections import defaultdict
 import json
+
+SYMBOL = TypeVar('SYMBOL', bound='Symbol')
+NOTATION = TypeVar('NOTATION', bound='Notation')
 
 
 class Symbol(object):
     """ Symbol """
     autonum = 1
 
-    def __init__(self, name=None):
+    def __init__(self, name=None, **kwargs):
         if name is None:
             self.name = f'_n{Symbol.autonum}'
             Symbol.autonum += 1
         else:
             self.name = name
+        self.props = kwargs
 
     def __str__(self):
         return self.name
@@ -77,6 +82,16 @@ class Func(object):
             return f'{self.sym.__repr__()} {props}[{args}]'
 
 
+class Rule(object):
+    """ Rule """
+
+    def __init__(self, name, pattern, action, **kwargs):
+        self.name = name
+        self.pattern = pattern
+        self.action = action
+        self.props = kwargs
+
+
 def issym(sym, name):
     return isinstance(sym, Symbol) and sym.name in name
 
@@ -103,6 +118,7 @@ class Notation(object):
     FUNC = Symbol('func')
     NONE = Symbol('none')
     DOT3 = Symbol('...')
+    DASHV = Symbol('\\dashv')
 
     comparer = (
         '=',
@@ -209,6 +225,10 @@ class Notation(object):
     def join(self, notation):
         for sym, f in notation.rel.items():
             self.rel[sym] = f
+
+    def assign(self, notation):
+        self.clear()
+        self.join(notation)
 
     def repf(self, sym, func):
         if sym is None:

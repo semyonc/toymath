@@ -37,6 +37,7 @@ class MathKernel(Kernel):
         'name': 'LaTex',
         'mimetype': 'text/plain',
         'file_extension': '.tex',
+        'pygments_lexer': 'pygments.lexers.markup.TexLexer'
     }
     banner = "Toy math kernel"
     svgimage = '''<svg viewBox="-40 0 512 512" width="12px" xmlns="http://www.w3.org/2000/svg"><path d="m271 512h-191c-44.113281 0-80-35.886719-80-80v-271c0-44.113281 35.886719-80 80-80h191c44.113281 0 80 35.886719 80 80v271c0 44.113281-35.886719 80-80 80zm-191-391c-22.054688 0-40 17.945312-40 40v271c0 22.054688 17.945312 40 40 40h191c22.054688 0 40-17.945312 40-40v-271c0-22.054688-17.945312-40-40-40zm351 261v-302c0-44.113281-35.886719-80-80-80h-222c-11.046875 0-20 8.953125-20 20s8.953125 20 20 20h222c22.054688 0 40 17.945312 40 40v302c0 11.046875 8.953125 20 20 20s20-8.953125 20-20zm0 0"/></svg>'''
@@ -72,7 +73,7 @@ class MathKernel(Kernel):
         return MathKernel.copySpan.format(str(base64.b64encode(latex_bytes), 'ascii'))
 
     def do_execute(self, code, silent, store_history=True,
-                   user_expressions=None, allow_stdin=False):
+                   user_expressions=None, allow_stdin=False, *, cell_id=None):
         # Set the ability for the kernel to get standard-in:
         self._allow_stdin = allow_stdin
         # Create a default response:
@@ -84,7 +85,7 @@ class MathKernel(Kernel):
             'user_expressions': {},
         }
         try:
-            self.mathShell.exec(code, self.execution_count, store_history)
+            self.mathShell.exec(code, self.execution_count, store_history, cell_id=cell_id)
             return kernel_resp
         except Exception as e:
             self.Error(e)

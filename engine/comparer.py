@@ -89,34 +89,24 @@ def dot3(sym, notation):
     return sym == Notation.DOT3
 
 
-def index_variable(params):
-    for sym in params:
-        p = params[sym]
-        if p.typ == NotationParam.Index:
-            return p
-    return None
-
-
 class NotationComparer(object):
     """NotationComparer"""
 
-    def __init__(self, sym, notation, params):
+    def __init__(self, sym, notation):
         self.sym = sym
         self.notation = notation
-        self.params = dict(map(create_parameter, params))
-        self.index = index_variable(self.params)
 
-    def compare_index(self, f1, notation1, f2, notation2, subst, ctx):
-        if not self.compare(f1.args[0], notation1, f2.args[0], notation2, subst, ctx):
+    def compare_index(self, f1, notation1, subst1, f2, notation2, subst2, ctx):
+        if not self.compare(f1.args[0], notation1, subst1, f2.args[0], notation2, subst2, ctx):
             return False
         for i in range(4):
             if isalambda(ctx) and not ctx(i):
                 continue
-            if not self.compare(f1.args[1][i], notation1, f2.args[1][i], notation2, subst, Notation.INDEX):
+            if not self.compare(f1.args[1][i], notation1, subst1, f2.args[1][i], notation2, subst2, Notation.INDEX):
                 return False
         return True
 
-    def compare(self, a, notation1, b, notation2, subst, ctx=None):
+    def compare(self, a, notation1, subst1, b, notation2, subst2, ctx=None):
         if ctx == Notation.S_LIST:
             f1 = notation1.getf(a, Notation.PLUS)
             if f1 is not None:
@@ -129,62 +119,83 @@ class NotationComparer(object):
                 f1 = notation1.get(a)
                 f2 = notation2.get(b)
                 if f1 is None or f2 is None:
-                    return self.equal(a, notation1, b, subst)
+                    return self.equal(a, notation1, subst1, b, notation2, subst2)
                 if f1 is not None and f2 is not None and f1.sym == f2.sym:
                     if f1.sym == Notation.INDEX:
-                        return self.compare_index(f1, notation1, f2, notation2, subst, ctx)
+                        return self.compare_index(f1, notation1, subst1, f2, notation2, subst2, ctx)
                     else:
-                        return self.compare(f1.args, notation1, f2.args, notation2, subst, f1.sym)
+                        return self.compare(f1.args, notation1, subst1, f2.args, notation2, subst2, f1.sym)
                 else:
                     return False
             else:
                 if isinstance(a, list) or isinstance(a, tuple):
                     a = list(filter(lambda t: t not in Notation.styles, a))
                     b = list(filter(lambda t: t not in Notation.styles, b))
-                    if ctx in [Notation.S_LIST, Notation.P_LIST] and \
-                            not any(dot3(arg, notation2) for arg in b):
-                        for x in a:
-                            found = False
-                            for y in b:
-                                if self.compare(x, notation1, y, notation2, subst, ctx):
-                                    b.remove(y)
-                                    found = True
-                                    break
-                            if not found:
+                    if ctx in [Notation.S_LIST, Notation.P_LIST]:
+                        if any(dot3(arg, notation2) for arg in b):
+                            return self.matchdot3(a, notation1, subst1, b, notation2, subst2, ctx)
+                        else:
+                            for x in a:
+                                found = False
+                                for y in b:
+                                    if self.compare(x, notation1, subst1, y, notation2, subst2, ctx):
+                                        b.remove(y)
+                                        found = True
+                                        break
+                                if not found:
+                                    return False
+                            return True
+                    else:
+                        if len(a) != len(b):
+                            return False
+                        for (x, y) in zip(a, b):
+                            if not self.compare(x, notation1, subst1, y, notation2, subst2, ctx):
                                 return False
                         return True
-                    else:
-                        i = 0
-                        j = 0
-                        n = 1
-                        match = 0
-                        while i < len(a) and j < len(b):
-                            y = b[j]
-                            if match == 0 and j < len(b) - 1 and dot3(b[j + 1], notation2):
-                                n = 1
-                                match = 1
-                            elif match == 1 and dot3(y, notation2):
-                                match = 2
-                                j += 1
-                                continue
-                            if self.index is not None:
-                                subst[self.index.sym] = IntegerValue(n)
-                            if not self.compare(a[i], notation1, y, notation2, subst, ctx):
-                                return False
-                            i += 1
-                            if match > 0:
-                                n += 1
-                                if match == 1:
-                                    j += 1
-                            else:
-                                n = 1
-                                j += 1
-                        return i == len(a) and (j == len(b) or match > 0)
-                else:
-                    return a == b
-        return self.equal(a, notation1, b, subst)
+        return self.equal(a, notation1, subst1, b, notation2, subst2)
 
-    def equal(self, sym1, notation, sym2, subst):
+    def matchdot3(self, a, notation1, subst1, b, notation2, subst2, ctx):
+        i = 0
+        j = 0
+        n = 1
+        match = 0
+        while i < len(a) and j < len(b):
+            y = b[j]
+            if match == 0 and j < len(b) - 1 and dot3(b[j + 1], notation2):
+                n = 1
+                match = 1
+            elif match == 1 and dot3(y, notation2):
+                match = 2
+                j += 1
+                continue
+            if not self.compare(a[i], notation1, subst1, y, notation2, subst2, ctx):
+                return False
+            i += 1
+            if match > 0:
+                n += 1
+                if match == 1:
+                    j += 1
+            else:
+                n = 1
+                j += 1
+        return i == len(a) and (j == len(b) or match > 0)
+
+    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2):
+        return sym1 == sym2
+
+    def match(self, sym, notation, ctx=None):
+        subst = defaultdict()
+        if self.compare(sym, notation, defaultdict(), self.sym, self.notation, subst, ctx):
+            return subst
+        return None
+
+
+class NotationParametrizedComparer(NotationComparer):
+    def __init__(self, sym, notation, params):
+        super().__init__(sym, notation)
+        self.params = dict(map(create_parameter, params))
+
+    def equal(self, sym1, notation1, _, sym2, notation2, subst):
         if isinstance(sym2, Symbol):
             param = self.params.get(sym2, None)
             if param is not None:
@@ -192,13 +203,13 @@ class NotationComparer(object):
                 if typ == NotationParam.Value and not isinstance(sym1, Value):
                     return False
                 elif typ == NotationParam.Term:
-                    scanner = Scanner(notation)
+                    scanner = Scanner(notation1)
                     scanner.write_formula(sym1)
                     if len(scanner.terms) > 1:
                         return False
                     elif len(scanner.terms) == 1:
                         sym1 = scanner.terms[0]
-                elif typ == NotationParam.Var and notation.get(sym1) is not None:
+                elif typ == NotationParam.Var and notation1.get(sym1) is not None:
                     return False
                 elif typ == NotationParam.N and not isinstance(sym1, IntegerValue):
                     return False
@@ -214,20 +225,90 @@ class NotationComparer(object):
                     return subst[sym2.name] != sym1
         return sym1 == sym2
 
-    def match(self, sym, notation, ctx=None):
-        subst = defaultdict()
-        if self.compare(sym, notation, self.sym, self.notation, subst, ctx):
-            return subst
-        return None
+
+def isVariable(sym):
+    return isinstance(sym, Symbol) and (sym.name[0] == '#' or sym.name.isupper())
 
 
-def pattern(expr, params=[]):
+class UnifyComparer(NotationComparer):
+    def __init__(self, sym, notation, subst=None):
+        super().__init__(sym, notation)
+        if subst is None:
+            subst = defaultdict()
+        self.subst = subst
+
+    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2):
+        if isVariable(sym1) or isVariable(sym2):
+            value1 = sym1
+            if isVariable(sym1):
+                if sym1.name in subst1:
+                    value1 = subst1[sym1.name]
+                else:
+                    value1 = None
+            value2 = sym2
+            if isVariable(sym2):
+                if sym2.name in subst2:
+                    value2 = subst2[sym2.name]
+                else:
+                    value2 = None
+            if isVariable(sym1):
+                if sym1.name in subst1:
+                    if value2 is not None and subst1[sym1.name] != value2:
+                        return False
+                if sym1.name != "##" and value2 is not None:
+                    subst1[sym1.name] = value2
+            if isVariable(sym2):
+                if sym2.name in subst2:
+                    if value1 is not None and subst2[sym2.name] != value1:
+                        return False
+                if sym2.name != "##" and value1 is not None:
+                    subst2[sym2.name] = value1
+            return True
+        return sym1 == sym2
+
+    def matchdot3(self, a, notation1, subst1, b, notation2, subst2, ctx):
+        i = 0
+        j = 0
+        match = 0
+        tail = []
+        while i < len(a) and j < len(b):
+            y = b[j]
+            if match == 0 and j < len(b) - 1 and dot3(b[j + 1], notation2):
+                match = 1
+            elif match == 1 and dot3(y, notation2):
+                match = 2
+                j += 1
+                continue
+            if match == 2:
+                tail.append(a[i])
+            elif not self.compare(a[i], notation1, subst1, y, notation2, subst2, ctx):
+                return False
+            i += 1
+            if match > 0:
+                if match == 1:
+                    j += 1
+            else:
+                j += 1
+        if match == 2:
+            if not self.compare(tail, notation1, subst1, b[j], notation2, subst2, ctx):
+                return False
+        return i == len(a) and j == len(b) - 1
+
+    def unify(self, sym, notation, subst=None, ctx=None):
+        if subst is None:
+            subst = defaultdict()
+        return self.compare(sym, notation, subst, self.sym, self.notation, self.subst, ctx)
+
+
+def pattern(expr, params=None):
+    if params is None:
+        params = []
     notation = Notation()
     p = MathParser(notation)
     sym = p.parse(expr)
-    return NotationComparer(sym, notation, params)
+    return NotationParametrizedComparer(sym, notation, params)
 
 
 def s_equal(sym1, notation1, sym2, notation2, ctx=None):
-    comparer = NotationComparer(sym2, notation2, [])
+    comparer = NotationComparer(sym2, notation2)
     return comparer.match(sym1, notation1, ctx) is not None

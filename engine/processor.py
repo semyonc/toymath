@@ -71,9 +71,10 @@ class Calculator(Replacer):
     abbreviated_minus = comparer.pattern('(+x)', ['x'])
     abbreviated_plus = comparer.pattern('(-x)', ['x'])
 
-    def __init__(self, notation, output_notation, actions):
+    def __init__(self, notation, output_notation, actions, prologModel):
         super(Calculator, self).__init__(notation, output_notation)
         self.actions = actions
+        self.prologModel = prologModel
 
     def enter_command(self, sym, f):
         action_name = f.sym.name[:-1]
@@ -342,6 +343,33 @@ class MathProcessor(object):
     def __init__(self, **kwargs):
         self.trace = None
         self.actions = register_actions()
+        from prolog import PrologModel
+        self.prologModel = PrologModel()
+
+    # create True in Notation
+    @staticmethod
+    def create_true(notation):
+        return notation.setf(Symbol('\\textit'), (str(True),))
+
+    def process_rule(self, sym, notation):
+        from prolog import get_operator, Term, Rule
+        f = notation.getf(sym, Notation.DASHV)
+        if f is not None and \
+                get_operator(f.args[0], notation) is not None:
+            goals = []
+            f2 = notation.getf(f.args[1], Notation.C_LIST)
+            if f2 is not None:
+                for g in f2.args:
+                    goals.append(Term(sym=g, notation=notation))
+            else:
+                goals.append(Term(sym=f.args[1], notation=notation))
+            self.prologModel.add_rule(Rule(Term(sym=f.args[0], notation=notation), goals=goals))
+            return MathProcessor.create_true(notation)
+        f = get_operator(sym, notation)
+        if f is not None:
+            self.prologModel.add_rule(Rule(Term(sym=sym, notation=notation)))
+            return MathProcessor.create_true(notation)
+        return None
 
     def __call__(self, sym, notation, execution_history, history):
         if self.trace is not None:
@@ -351,9 +379,12 @@ class MathProcessor(object):
         sym = preprocessor(sym)
         notation = output_notation
         output_notation = Notation()
+        parse_res = self.process_rule(sym, notation)
+        if parse_res is not None:
+            return parse_res, notation
         index = 1
         while True:
-            calculator = Calculator(notation, output_notation, self.actions)
+            calculator = Calculator(notation, output_notation, self.actions, self.prologModel)
             outs = calculator(sym)
             if comparer.s_equal(outs, output_notation, sym, notation):
                 break

@@ -3,6 +3,11 @@ from replicator import Replicator
 from comparer import pattern, NotationParam
 
 
+def chainexpr(oper, notation, sym):
+    inner = notation.setf(oper, (None, (sym,)))
+    return notation.setf(Notation.GROUP, (inner,), br='{}')
+
+
 class Mul(object):
     arity = 1
     MUL = Symbol('mul!')
@@ -24,10 +29,6 @@ class Mul(object):
         if f is not None:
             return f.args
         return [sym]
-
-    def eval(self, oper, notation, sym):
-        inner = notation.setf(oper, (None, (sym,)))
-        return notation.setf(Notation.GROUP, (inner,), br='{}')
 
     def is_eval(self, notation, sym):
         f = notation.getf(sym, Notation.GROUP)
@@ -72,11 +73,11 @@ class Mul(object):
             return sym
         if len(f.args) > 2:
             rest = notation.setf(Notation.P_LIST, tuple(f.args[1:]))
-            inner = self.eval(self.MUL, notation, rest)
+            inner = chainexpr(self.MUL, notation, rest)
             outer = notation.setf(Notation.P_LIST, (f.args[0], inner))
-            return self.eval(self.MULEX, notation, outer)
+            return chainexpr(self.MULEX, notation, outer)
         if self.is_eval(notation, f.args[0]) or self.is_eval(notation, f.args[1]):
-            return self.eval(self.MULEX, notation, entry_sym)
+            return chainexpr(self.MULEX, notation, entry_sym)
         res = []
         x = self.extract(notation, f.args[0])
         y = self.extract(notation, f.args[1])
@@ -85,13 +86,13 @@ class Mul(object):
             if x != [f.args[0]]:
                 res.append(f.args[0])
             else:
-                res.append(self.eval(self.MUL, notation, f.args[0]))
+                res.append(chainexpr(self.MUL, notation, f.args[0]))
             if y != [f.args[1]]:
                 res.append(f.args[1])
             else:
-                res.append(self.eval(self.MUL, notation, f.args[1]))
+                res.append(chainexpr(self.MUL, notation, f.args[1]))
             outer = notation.setf(Notation.P_LIST, tuple(res))
-            return self.eval(self.MULEX, notation, outer)
+            return chainexpr(self.MULEX, notation, outer)
         for a in x:
             for b in y:
                 p = processor.get_factor(a)
