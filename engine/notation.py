@@ -107,6 +107,8 @@ class Notation(object):
     C_LIST = Symbol('c-list')
     S_LIST = Symbol('s-list')
     P_LIST = Symbol('p-list')
+    A_LIST = Symbol('a-list')
+    O_LIST = Symbol('o-list')
     SLASH = Symbol('/')
     STAR = Symbol('*')
     INDEX = Symbol('index')
@@ -124,6 +126,9 @@ class Notation(object):
     NONE = Symbol('none')
     DOT3 = Symbol('...')
     DASHV = Symbol('\\dashv')
+    NEG = Symbol('\\neg')
+    LOR = Symbol('\\lor')
+    LAND = Symbol('\\land')
 
     comparer = (
         '=',

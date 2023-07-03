@@ -22,7 +22,7 @@ class MathParser(object):
          return self.yacc.parse(input, lexer=MathLexer())
 
      def p_formula(self, p):
-         'formula : subformula'
+         'formula : logical-expr'
          p[0] = p[1]
 
      def p_formula_command_0(self, p):
@@ -74,13 +74,49 @@ class MathParser(object):
                   | '|'
                   | open
                   | close'''
+         p[0] = p[1]     
+         
+     def p_logical_expr(self, p):
+         'logical-expr : and-expr'
          p[0] = p[1]
+         
+     def  p_logical_expr_or(self, p):
+         'logical-expr : logical-expr lor and-expr'
+         f = self.notation.getf(p[1], Notation.O_LIST)
+         if f is None:
+            p[0] = self.notation.setf(Notation.O_LIST, [p[1], p[3]])
+         else:
+            f.args.append(p[3])
+            p[0] = p[1]
+        
+     def p_and_expr(self, p):
+         'and-expr : not-expr'
+         p[0] = p[1]
+         
+     def p_and_expr_not(self, p):
+         'and-expr : and-expr land not-expr'
+         f = self.notation.getf(p[1], Notation.A_LIST)
+         if f is None:
+            p[0] = self.notation.setf(Notation.A_LIST, [p[1], p[3]])
+         else:
+            f.args.append(p[3])
+            p[0] = p[1]
 
+         
+     def p_not_expr(self, p):
+         'not-expr : subformula'
+         p[0] = p[1]
+         
+     def p_not_expr_not(self, p):
+         'not-expr : neg subformula'
+         p[0] = self.notation.setf(Notation.NEG, (p[2],))
+         
+         
      def p_subformula(self, p):
          'subformula : comma-list'
          p[0] = p[1]
 
-     def p_subformula_comparison(self, p):
+     def p_subformula_expr_comparer(self, p):
          'subformula : additive-expr comparer comma-list'
          p[0] = self.notation.setf(Symbol('comp', op=p[2]),(p[1],p[3]))
 

@@ -112,7 +112,30 @@ class Replicator(object):
         res = self._probe(sym, '\\brack')
         if res is not None:
             return res
-        return self.enter_subformula(sym)
+        return self.enter_or_expr_list(sym)
+
+    def enter_or_expr_list(self, sym):
+        f = self.notation.getf(sym, Notation.O_LIST)
+        if f is not None:
+            with self._enter(sym, f):
+                return self.enter_olist(sym, f)
+        else:
+            return self.enter_and_expr_list(sym)
+
+    def enter_and_expr_list(self, sym):
+        f = self.notation.getf(sym, Notation.A_LIST)
+        if f is not None:
+            with self._enter(sym, f):
+                return self.enter_alist(sym, f)
+        else:
+            return self.enter_not_expr(sym)
+
+    def enter_not_expr(self, sym):
+        f = self.notation.getf(sym, Notation.NEG)
+        if f is not None:
+            return self.enter_neg_expr(sym, f)
+        else:
+            return self.enter_subformula(sym)
 
     def enter_subformula(self, sym):
         f = self.notation.getf(sym, Notation.COMP)
@@ -275,6 +298,17 @@ class Replicator(object):
     def enter_prime(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym), Func(Notation.PRIME, (self.enter_term(f.args[0]),)))
 
+    def enter_neg_expr(self, sym, f):
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_subformula(f.args[0]),)))
+
+    def enter_olist(self, sym, f):
+        args = self.build_list(f, self.enter_and_expr_list)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, args))
+
+    def enter_alist(self, sym, f):
+        args = self.build_list(f, self.enter_not_expr)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, args))
+
     def enter_subformula_comparison(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym,
                                                                 (self.enter_additive_expr(f.args[0]),
@@ -388,3 +422,5 @@ class Replicator(object):
 
     def enter_collist(self, collist):
         return [self.enter_subformula(col) for col in collist]
+
+

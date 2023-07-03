@@ -110,6 +110,37 @@ class LaTexWriter(object):
                 and not self._probe(sym, '\\atopwithdelims') \
                 and not self._probe(sym, '\\brace') \
                 and not self._probe(sym, '\\brack'):
+            self.write_or_expr_list(sym)
+
+    def write_or_expr_list(self, sym):
+        self.head = sym
+        f = self.notation.getf(sym, Notation.O_LIST)
+        if f is not None:
+            for i, expr in enumerate(f.args):
+                if i > 0:
+                    self.writeString('\\lor')
+                self.write_and_expr_list(expr)
+        else:
+            self.write_and_expr_list(sym)
+
+    def write_and_expr_list(self, sym):
+        self.head = sym
+        f = self.notation.getf(sym, Notation.A_LIST)
+        if f is not None:
+            for i, expr in enumerate(f.args):
+                if i > 0:
+                    self.writeString('\\land')
+                self.write_not_expr(expr)
+        else:
+            self.write_not_expr(sym)
+
+    def write_not_expr(self, sym):
+        self.head = sym
+        f = self.notation.getf(sym, Notation.NEG)
+        if f is not None:
+            self.writeString('\\neg')
+            self.write_subformula(f.args[0])
+        else:
             self.write_subformula(sym)
 
     def write_subformula(self, sym):

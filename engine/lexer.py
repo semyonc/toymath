@@ -113,6 +113,8 @@ class MathLexer(object):
         'nolimits',
         'Box',
         'gets',
+        'lor',
+        'land',
         'neg'
      )
           
