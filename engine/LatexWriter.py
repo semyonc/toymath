@@ -33,8 +33,7 @@ class LaTexWriter(object):
         '\\textit': 'write_text',
         '\\textrm': 'write_text',
         '\\textsf': 'write_text',
-        '\\texttt': 'write_text',
-        '\\dashv': 'write_binaryop'
+        '\\texttt': 'write_text'
     }
 
     re_prefix = re.compile(r'\\')
@@ -110,8 +109,7 @@ class LaTexWriter(object):
                 and not self._probe(sym, '\\atop') \
                 and not self._probe(sym, '\\atopwithdelims') \
                 and not self._probe(sym, '\\brace') \
-                and not self._probe(sym, '\\brack') \
-                and not self._probe(sym, '\\dashv') :
+                and not self._probe(sym, '\\brack'):
             self.write_subformula(sym)
 
     def write_subformula(self, sym):
@@ -193,14 +191,13 @@ class LaTexWriter(object):
                 else:
                     self.write_scalar(sym)
             else:
-                if isinstance(sym, Symbol):
-                    self.write_symbol(sym)
-                else:
-                    self.write_term(sym)
+                self.write_term(sym)
 
     def write_symbol(self, sym):
         if sym.name.startswith('#'):
             self.writeString("\\#\\text{" + sym.name[1:] + "}")
+        elif sym.name.startswith('_'):
+            self.writeString("\\_\\textit{" + sym.name[1:] + "}")
         else:
             self.writeString(sym.name)
 
@@ -230,7 +227,10 @@ class LaTexWriter(object):
         if f is not None:
             self.write_prime(f)
         else:
-            self.write_raw_term(sym)
+            if isinstance(sym, Symbol):
+                self.write_symbol(sym)
+            else:
+                self.write_raw_term(sym)
 
     def write_index_item(self, sym):
         f = self.notation.getf(sym, Notation.GROUP)
@@ -400,9 +400,9 @@ class LaTexWriter(object):
 
     def write_sqrt(self, f):
         self.writeString('\\sqrt')
-        if 'root' in f.sym.props:
+        if len(f.args) > 1:
             self.writeString('[')
-            self.writeString(str(f.sym.props['root']))
+            self.write_subformula(f.args[1])
             self.writeString(']')
         self.write_expr(f.args[0])
 

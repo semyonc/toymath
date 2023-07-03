@@ -37,8 +37,7 @@ class Replicator(object):
         'vgroup': 'enter_vgroup',
         'sgroup': 'enter_sgroup',
         '\\array': 'enter_array',
-        '\\cases': 'enter_array',
-        '\\dashv': 'enter_binaryop'
+        '\\cases': 'enter_array'
     }
 
     def __init__(self, notation, output_notation):
@@ -111,9 +110,6 @@ class Replicator(object):
         if res is not None:
             return res
         res = self._probe(sym, '\\brack')
-        if res is not None:
-            return res
-        res = self._probe(sym, '\\dashv')
         if res is not None:
             return res
         return self.enter_subformula(sym)
@@ -361,7 +357,12 @@ class Replicator(object):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_expr(f.args[0]),)))
 
     def enter_sqrt(self, sym, f):
-        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_expr(f.args[0]),)))
+        if len(f.args) == 1:
+            return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_expr(f.args[0]),)))
+        else:
+            return self.output_notation.repf(self.mapsym(sym),
+                                             Func(f.sym, (self.enter_expr(f.args[0]),
+                                                          self.enter_subformula(f.args[1]),)))
 
     def enter_buildrel(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),

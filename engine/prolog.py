@@ -28,12 +28,20 @@ def get_operator(sym: SYMBOL, notation: NOTATION):
     return None
 
 
-def unify(term1: TERM, subst1: Dict[str, Any], term2: TERM, subst2: Dict[str, Any]) -> bool:
+def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
+          term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION) -> bool:
     if term1.pred != term2.pred or term1.arity != term2.arity:
         return False
-    comparer = UnifyComparer(term1.sym, term1.notation, subst1)
+    notation = term1.notation.clone()
+    notation.join(input_notation)
+    comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
     if not comparer.unify(term2.sym, term2.notation, subst2):
         return False
+    for key in subst2:
+        value = subst2[key]
+        if notation.get(value) is not None and output_notation.get(value) is None:
+            Replicator(notation, output_notation)(value)
+
     return True
 
 
@@ -197,7 +205,7 @@ class PrologModel(object):
 
     # Adoptaition of https://www.openbookproject.net/py4fun/prolog/prolog1.py
     # https://www.openbookproject.net/py4fun/prolog/prolog1.html
-    def search(self, term: TERM, trace: bool = False) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+    def search(self, term: TERM, trace: bool = False, maxiters: int = 100) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         global goalid
         goalid = 0
         if trace: print("\nsearch %s" % term.expr)
@@ -205,7 +213,9 @@ class PrologModel(object):
         goal = Goal(rule, term.notation.clone())  # target is the single goal
         if trace: print("stack %s" % goal)
         stack = [goal]
-        while stack:
+        iters = 0
+        while stack and iters < maxiters:
+            iters += 1
             c = stack.pop()  # Next state to consider
             if trace: print("  pop %s" % c)
             if c.inx >= len(c.rule.goals):  # Is this one finished?
@@ -214,9 +224,8 @@ class PrologModel(object):
                     yield c.env, c.notation
                     continue
                 parent = copy.deepcopy(c.parent)  # Otherwise resume parent goal
-                unify(c.rule.head,
-                      c.env, parent.rule.goals[parent.inx], parent.env)
-                parent.notation.join(c.notation)
+                unify(c.rule.head, c.env, c.notation,
+                      parent.rule.goals[parent.inx], parent.env, parent.notation)
                 parent.inx = parent.inx + 1  # advance to next goal in body
                 if trace: print("stack %s" % parent)
                 stack.append(parent)  # let it wait its turn
@@ -234,8 +243,7 @@ class PrologModel(object):
                     if rule.head.pred != term.pred or rule.head.arity != term.arity:
                         continue
                     child = Goal(rule, c.notation, parent=c)  # A possible subgoal
-                    ans = unify(term, c.env, rule.head, child.env)
+                    ans = unify(term, c.env, c.notation, rule.head, child.env, child.notation)
                     if ans:  # if unifies, stack it up
                         if trace: print("stack %s" % child)
-                        child.notation.join(rule.head.notation)
                         stack.append(child)

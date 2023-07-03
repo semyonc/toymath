@@ -20,9 +20,11 @@ class Symbol(object):
     def __init__(self, name=None, **kwargs):
         if name is None:
             self.name = f'_n{Symbol.autonum}'
+            self.auto = True
             Symbol.autonum += 1
         else:
             self.name = name
+            self.auto = False
         self.props = kwargs
 
     def __str__(self):
@@ -39,6 +41,9 @@ class Symbol(object):
 
     def __repr__(self):
         return self.name
+
+    def __deepcopy__(self, memodict={}):
+        return self
 
 
 class Func(object):
@@ -206,6 +211,10 @@ class Notation(object):
                 '\\Upsilon', '\\upsilon', '\\Gamma', '\\varGamma', '\\Xi', '\\xi', '\\kappa', '\\varkappa')
     p_oper = ('\\sum', '\\lim', '\\int', '\\prod', '\\intop', '\\coprod', '\\intop', '\\iint', '\\iiint',
               '\\iiiint', '\\idotsint', '\\oint', '\\projlim', '\\varprojlim')
+
+    variables = ('x', 'y', 'z', 't', 'a', 'b', 'c', 'd', 'e', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
+                 's', 'u', 'v', 'w', 'h', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J',
+                 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'U', 'V', 'W', 'X', 'Y', 'Z')
 
     def __init__(self):
         self.rel = defaultdict()

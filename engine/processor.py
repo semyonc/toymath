@@ -353,16 +353,19 @@ class MathProcessor(object):
 
     def process_rule(self, sym, notation):
         from prolog import get_operator, Term, Rule
-        f = notation.getf(sym, Notation.DASHV)
-        if f is not None and \
-                get_operator(f.args[0], notation) is not None:
+        f = notation.getf(sym, Notation.P_LIST)
+        if f is not None and len(f.args) == 3 and \
+                get_operator(f.args[0], notation) is not None and \
+                f.args[1] == Symbol('\\dashv'):
             goals = []
-            f2 = notation.getf(f.args[1], Notation.C_LIST)
+            f2 = notation.getf(f.args[2], Notation.GROUP)
             if f2 is not None:
-                for g in f2.args:
-                    goals.append(Term(sym=g, notation=notation))
+                f2 = notation.getf(f2.args[0], Notation.C_LIST)
+                if f2 is not None:
+                    for g in f2.args:
+                        goals.append(Term(sym=g, notation=notation))
             else:
-                goals.append(Term(sym=f.args[1], notation=notation))
+                goals.append(Term(sym=f.args[2], notation=notation))
             self.prologModel.add_rule(Rule(Term(sym=f.args[0], notation=notation), goals=goals))
             return MathProcessor.create_true(notation)
         f = get_operator(sym, notation)

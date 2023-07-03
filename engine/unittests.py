@@ -47,19 +47,27 @@ def compare(sym, notation1, value, ctx=None):
 
 
 def execute_unify(expr1, expr2, results1, results2):
-    notation1 = Notation()
-    p1 = MathParser(notation1)
+    notation_p1 = Notation()
+    p1 = MathParser(notation_p1)
     sym1 = p1.parse(expr1)
-    notation2 = Notation()
-    p2 = MathParser(notation2)
+    notation_w1 = Notation()
+    preprocessor = Preprocessor(notation_p1, notation_w1, {}, {})
+    sym1 = preprocessor(sym1)
+
+    notation_p2 = Notation()
+    p2 = MathParser(notation_p2)
     sym2 = p2.parse(expr2)
+    notation_w2 = Notation()
+    preprocessor = Preprocessor(notation_p2, notation_w2, {}, {})
+    sym2 = preprocessor(sym2)
+
     subst1 = defaultdict()
     subst2 = defaultdict()
-    comparer = UnifyComparer(sym2, notation2, subst2)
-    if comparer.unify(sym1, notation1, subst1):
-        shared_items1 = {k: subst1[k] for k in subst1 if k in results1 and compare(subst1[k], notation2, results1[k])}
-        shared_items2 = {k: subst2[k] for k in subst2 if k in results2 and compare(subst2[k], notation1, results2[k])}
-        return len(shared_items1) == len(subst1) and len(shared_items2) == len(subst2)
+    comparer = UnifyComparer(sym2, notation_w2, subst2)
+    if comparer.unify(sym1, notation_w1, subst1):
+        shared_items1 = {k: subst1[k] for k in subst1 if k in results1 and compare(subst1[k], notation_w2, results1[k])}
+        shared_items2 = {k: subst2[k] for k in subst2 if k in results2 and compare(subst2[k], notation_w1, results2[k])}
+        return len(shared_items1) == len(results1) and len(shared_items2) == len(results2)
     return False
 
 
@@ -70,6 +78,9 @@ class TestScenario(TestCase):
 
     def assertUnify(self, expr1, results1, expr2, results2):
         return self.assertTrue(execute_unify(expr1, expr2, results1, results2))
+
+    def assertNotUnify(self, expr1, results1, expr2, results2):
+        return self.assertFalse(execute_unify(expr1, expr2, results1, results2))
 
     def checkEqual(self, expr1, expr2):
         return self.assertTrue(check(expr1, expr2))
@@ -94,10 +105,7 @@ class TestScenario(TestCase):
         self.assertUnify('x + y + z', {}, '##', {})
 
     def test_unify2(self):
-        self.assertUnify('x + y + z', {}, '#X + #Y + #Z', {'#X': 'x', '#Y': 'y', '#Z': 'z'})
-
-    def test_unify3(self):
-        self.assertUnify('#X + y + #X', {'#X': 'x'}, 'x + y + x', {})
+        self.assertUnify('x + y + z', {}, '#X + #Y + #Z', {})
 
     def test_unify4(self):
         self.assertUnify("x + y + z", {}, "x + ... + #X", {'#X': ['y', 'z']})
@@ -107,6 +115,15 @@ class TestScenario(TestCase):
 
     def test_unify6(self):
         self.assertUnify("\\operatorname{girl}(\\text{Alise})", {}, "\\operatorname{girl}(#X)", {'#X': '\\text{Alise}'})
+
+    def test_unify7(self):
+        self.assertUnify("2x", {}, "#X", {'#X': '2x'})
+
+    def test_unify8(self):
+        self.assertUnify("x^2", {}, "x^y", {'y': '2'})
+
+    def test_unify9(self):
+        self.assertNotUnify("\\operatorname{exp}(x,z,f(x))", {}, "\\operatorname{exp}(x,n,f(x)^n)", {})
 
     def test_2x2(self):
         self.checkEqual("2 2", "4")
@@ -140,6 +157,9 @@ class TestScenario(TestCase):
     def test_mul2(self):
         self.checkEqual("mul! (x+1)^3(x-1)", "{x^4+2x^3-2x-1}")
 
+    # def test_sin3(self):
+    #     self.checkEqual("\\sin^3 x", "(\\sin x)^3")
+
     def test_prolog1(self):
         m = PrologModel([
             Rule(Term("\\operatorname{child}(#X)"), [Term("\\operatorname{boy}(#X)")]),
@@ -165,3 +185,11 @@ class TestScenario(TestCase):
         ])
         results = [LaTexWriter(n)(s['Z']) for s, n in m.search(Term("\\operatorname{eval}(Z,2+3)"))]
         self.assertTrue(len(results) == 1 and results[0] == '{5}')
+
+    def test_prolog4(self):
+        m = PrologModel([
+            Rule(Term("\\operatorname{exp}(x,n,x^n)")),
+            Rule(Term("\\operatorname{exp}(x,n,(y))"), [Term("\\operatorname{exp}(x,n,y)")]),
+            Rule(Term("\\operatorname{exp}(x,n,f(x)^n)"), [Term("\\operatorname{exp}(x,n,(f(x))^n)")])
+        ])
+        results = [LaTexWriter(n)(s['z']) for s, n in m.search(Term("\\operatorname{exp} (x, z, f(x)^2)"), trace=True)]

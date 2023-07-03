@@ -119,7 +119,7 @@ class NotationComparer(object):
                 f1 = notation1.get(a)
                 f2 = notation2.get(b)
                 if f1 is None or f2 is None:
-                    return self.equal(a, notation1, subst1, b, notation2, subst2)
+                    return self.equal(a, notation1, subst1, b, notation2, subst2, ctx)
                 if f1 is not None and f2 is not None and f1.sym == f2.sym:
                     if f1.sym == Notation.INDEX:
                         return self.compare_index(f1, notation1, subst1, f2, notation2, subst2, ctx)
@@ -152,7 +152,7 @@ class NotationComparer(object):
                             if not self.compare(x, notation1, subst1, y, notation2, subst2, ctx):
                                 return False
                         return True
-        return self.equal(a, notation1, subst1, b, notation2, subst2)
+        return self.equal(a, notation1, subst1, b, notation2, subst2, ctx)
 
     def matchdot3(self, a, notation1, subst1, b, notation2, subst2, ctx):
         i = 0
@@ -180,7 +180,7 @@ class NotationComparer(object):
                 j += 1
         return i == len(a) and (j == len(b) or match > 0)
 
-    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2):
+    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2, ctx):
         return sym1 == sym2
 
     def match(self, sym, notation, ctx=None):
@@ -195,7 +195,7 @@ class NotationParametrizedComparer(NotationComparer):
         super().__init__(sym, notation)
         self.params = dict(map(create_parameter, params))
 
-    def equal(self, sym1, notation1, _, sym2, notation2, subst):
+    def equal(self, sym1, notation1, _, sym2, notation2, subst, ctx):
         if isinstance(sym2, Symbol):
             param = self.params.get(sym2, None)
             if param is not None:
@@ -227,7 +227,7 @@ class NotationParametrizedComparer(NotationComparer):
 
 
 def isVariable(sym):
-    return isinstance(sym, Symbol) and (sym.name[0] == '#' or sym.name.isupper())
+    return isinstance(sym, Symbol) and (sym.name.startswith("#") or sym.name in Notation.variables)
 
 
 class UnifyComparer(NotationComparer):
@@ -237,7 +237,44 @@ class UnifyComparer(NotationComparer):
             subst = defaultdict()
         self.subst = subst
 
-    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2):
+    # def equal(self, sym1, notation1, subst1, sym2, notation2, subst2, ctx):
+    #     if subst1 is not None \
+    #             and (isVariable(sym1) or isVariable(sym2)):
+    #         value1 = sym1
+    #         l_notation = notation1
+    #         if isVariable(sym1):
+    #             if sym1.name in subst1:
+    #                 value1 = subst1[sym1.name]
+    #                 l_notation = notation2
+    #             else:
+    #                 value1 = None
+    #         value2 = sym2
+    #         r_notation = notation2
+    #         if isVariable(sym2):
+    #             if sym2.name in subst2:
+    #                 value2 = subst2[sym2.name]
+    #                 r_notation = notation1
+    #             else:
+    #                 value2 = None
+    #         if value1 is not None and value2 is not None:
+    #             if not self.compare(value1, l_notation, None, value2, r_notation, None, ctx):
+    #                 return False
+    #         if isVariable(sym1) and subst1 is not None:
+    #             if sym1.name != "##" and sym1.name not in subst1:
+    #                 if value2 is not None:
+    #                     subst1[sym1.name] = value2
+    #                 else:
+    #                     subst1[sym1.name] = sym2
+    #         if isVariable(sym2) and subst2 is not None:
+    #             if sym2.name != "##" and sym2.name not in subst2:
+    #                 if value1 is not None:
+    #                     subst2[sym2.name] = value1
+    #                 else:
+    #                     subst2[sym2.name] = sym1
+    #         return True
+    #     return sym1 == sym2
+
+    def equal(self, sym1, notation1, subst1, sym2, notation2, subst2, ctx):
         if isVariable(sym1) or isVariable(sym2):
             value1 = sym1
             if isVariable(sym1):
@@ -251,16 +288,13 @@ class UnifyComparer(NotationComparer):
                     value2 = subst2[sym2.name]
                 else:
                     value2 = None
+            if value1 is not None and value2 is not None:
+                if value1 != value2 and not self.compare(value1, notation1, subst1, value2, notation2, subst2, ctx):
+                    return False
             if isVariable(sym1):
-                if sym1.name in subst1:
-                    if value2 is not None and subst1[sym1.name] != value2:
-                        return False
                 if sym1.name != "##" and value2 is not None:
                     subst1[sym1.name] = value2
             if isVariable(sym2):
-                if sym2.name in subst2:
-                    if value1 is not None and subst2[sym2.name] != value1:
-                        return False
                 if sym2.name != "##" and value1 is not None:
                     subst2[sym2.name] = value1
             return True

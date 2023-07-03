@@ -25,10 +25,6 @@ class MathParser(object):
          'formula : subformula'
          p[0] = p[1]
 
-     def p_formula_dashv(self, p):
-        '''formula : operator dashv comma-list'''
-        p[0] = self.notation.setf(Notation.DASHV, (p[1], p[3]))
-
      def p_formula_command_0(self, p):
          'formula : COMMAND'
          p[0] = self.notation.setf(Symbol(p[1]), (None,()))
@@ -258,7 +254,7 @@ class MathParser(object):
                       | SP1
                       | SP2
                       | SP3
-                      | SP4
+                      | SP4                      
                       | WS'''
         p[0] = Symbol(p[1])
 
@@ -284,16 +280,13 @@ class MathParser(object):
          p[0] = self.notation.setf(Symbol(p[1]), (p[2],))
 
      def p_expression_sqrt_long(self, p):
-        '''expression : sqrt '[' int ']'  expression'''
-        p[0] = self.notation.setf(Symbol(p[1],root=p[3]), (p[5],))
+        '''expression : sqrt '[' subformula ']'  expression'''
+        p[0] = self.notation.setf(Symbol(p[1]), (p[5],p[3]))
 
      def p_expression_buildrel(self, p):
         'expression : buildrel subformula over expression'
         p[0] = self.notation.setf(Symbol(p[1]),(p[2],p[4]))
 
-     def p_int(self, p):
-        'int : DIGIT'
-        p[0] = p[1]
 
      def p_unary_operator(self, p):
          '''unary-op : acute
@@ -366,7 +359,7 @@ class MathParser(object):
      def p_scalar_group(self, p):
          '''scalar : '(' comma-list ')' '''
          p[0] = self.notation.setf(Notation.GROUP,(p[2],), br='()')
-
+         
      def p_scalar_group_b(self, p):
          '''scalar : LBR expression RBR '''
          p[0] = self.notation.setf(Notation.S_GROUP, (p[2],), br='{}')

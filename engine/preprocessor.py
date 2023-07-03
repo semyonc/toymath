@@ -49,45 +49,74 @@ class Preprocessor(Replacer):
     def anyname(sym, names):
         return any(isinstance(sym, Symbol) and sym.name == t for t in names)
 
-    def transform_plist(self, sym, args):
+    def transform_prefix(self, plist):
         res = []
         i = 0
-        while i < len(args):
-            if i < len(args) - 1:
-                if isinstance(args[i], IntegerValue) and isinstance(args[i + 1], FracValue):
-                    res.append(addition(args[i].get_frac(), args[i + 1]))
+        while i < len(plist):
+            if i < len(plist) - 1:
+                if isinstance(plist[i], IntegerValue) and isinstance(plist[i + 1], FracValue):
+                    res.append(addition(plist[i].get_frac(), plist[i + 1]))
                     i += 2
                     continue
-                if issym(args[i], ["d"]) and issym(args[i + 1], ['x', 'y', 'z', 't']):
-                    res.append(Symbol(args[i].name + args[i + 1].name))
+                if issym(plist[i], ["d"]) and issym(plist[i + 1], ['x', 'y', 'z', 't']):
+                    res.append(Symbol(plist[i].name + plist[i + 1].name))
                     i += 2
                     continue
-                pri = args[i]
+                pri = plist[i]
                 index_f = self.output_notation.getf(pri, Notation.INDEX)
                 limits_f = self.output_notation.getf(pri, Notation.LIMITS)
                 if index_f is not None and index_f.args[1][0] is None and index_f.args[1][1] is None:
                     pri = index_f.args[0]
                 if limits_f is not None:
                     pri = limits_f.args[0]
-                sec = args[i + 1]
+                sec = plist[i + 1]
                 group_f = self.output_notation.getf(sec, Notation.GROUP)
                 if group_f is not None:
                     sec = group_f.args[0]
                 if self.anyname(pri, Notation.unary_f):
-                    res.append(self.output_notation.setf(Notation.FUNC, (args[i], sec), fmt='unary'))
+                    res.append(self.output_notation.setf(Notation.FUNC, (plist[i], sec), fmt='unary'))
                     i += 2
                     continue
                 if group_f is not None and self.anyname(pri, Notation.common_f):
-                    res.append(self.output_notation.setf(Notation.FUNC, (args[i], sec)))
+                    res.append(self.output_notation.setf(Notation.FUNC, (plist[i], sec)))
                     i += 2
                     continue
                 if group_f is None and self.anyname(pri, Notation.p_oper):
                     res.append(self.output_notation.setf(Notation.FUNC,
-                                                         (args[i], self.transform_plist(None, args[i + 1:])),
+                                                         (plist[i], self.transform_plist(None, plist[i + 1:])),
                                                          fmt='oper'))
                     break
-            res.append(args[i])
+            res.append(plist[i])
             i += 1
+        return res
+
+    def transform_suffix(self, plist):
+        res = []
+        i = 0
+        while i < len(plist):
+            if i < len(plist) - 1:
+                pri = plist[i]
+                index1_f = self.output_notation.getf(pri, Notation.INDEX)
+                if index1_f is not None:
+                    pri = index1_f.args[0]
+                sec = plist[i + 1]
+                index2_f = self.output_notation.getf(sec, Notation.INDEX)
+                if index2_f is not None and self.anyname(pri, Notation.common_f):
+                    sec = index2_f.args[0]
+                    group_f = self.output_notation.getf(index2_f.args[0], Notation.GROUP)
+                    if group_f is not None:
+                        sec = group_f.args[0]
+                    res.append(self.output_notation.setf(Notation.INDEX,
+                        (self.output_notation.setf(Notation.FUNC, (plist[i], sec)), index2_f.args[1])))
+                    i += 2
+                    continue
+            res.append(plist[i])
+            i += 1
+        return res
+
+    def transform_plist(self, sym, args):
+        res = self.transform_prefix(args)
+        res = self.transform_suffix(res)
         if len(res) == 1:
             return res[0]
         return self.output_notation.repf(sym, Func(Notation.P_LIST, res))

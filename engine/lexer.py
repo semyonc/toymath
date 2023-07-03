@@ -112,8 +112,8 @@ class MathLexer(object):
         'limits',
         'nolimits',
         'Box',
-        'dashv',
-        'gets'
+        'gets',
+        'neg'
      )
           
      # Declare the state
@@ -121,7 +121,7 @@ class MathLexer(object):
        ('text','exclusive'),
      )
      
-     literals = ('&','^','_','{','}','~','|','(',')',',','/','*','+','-','[',']','=', '.')
+     literals = ('&','^','_','{','}','~','|','(',')',',','/','*','+','-','[',']','=', '.', ':')
     
      # Regular expression rules for simple tokens
      t_LBR    = r'\\{'
@@ -195,6 +195,16 @@ class MathLexer(object):
          r'\[\[\-?\d+\]\]'
          t.value = int(t.value[2:-2])
          return t    
+     
+     def t_ASSIGN(self, t):
+         r'{:=}'
+         t.type = 'LITERAL'
+         return t
+     
+     def t_excl(self, t):
+         r'!'
+         t.type = 'LITERAL'
+         return t
               
      def t_error(self, t):
          raise Exception("Illegal character '%s'" % t.value[0])
