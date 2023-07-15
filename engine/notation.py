@@ -129,6 +129,7 @@ class Notation(object):
     NEG = Symbol('\\neg')
     LOR = Symbol('\\lor')
     LAND = Symbol('\\land')
+    EXCL_MARK = Symbol('!')
 
     comparer = (
         '=',
@@ -239,6 +240,12 @@ class Notation(object):
     def join(self, notation):
         for sym, f in notation.rel.items():
             self.rel[sym] = f
+
+    def concate(self, notation):
+        res = Notation()
+        res.join(self)
+        res.join(notation)
+        return res
 
     def assign(self, notation):
         self.clear()

@@ -351,29 +351,6 @@ class MathProcessor(object):
     def create_true(notation):
         return notation.setf(Symbol('\\textit'), (str(True),))
 
-    def process_rule(self, sym, notation):
-        from prolog import get_operator, Term, Rule
-        f = notation.getf(sym, Notation.P_LIST)
-        if f is not None and len(f.args) == 3 and \
-                get_operator(f.args[0], notation) is not None and \
-                f.args[1] == Symbol('\\dashv'):
-            goals = []
-            f2 = notation.getf(f.args[2], Notation.GROUP)
-            if f2 is not None:
-                f2 = notation.getf(f2.args[0], Notation.C_LIST)
-                if f2 is not None:
-                    for g in f2.args:
-                        goals.append(Term(sym=g, notation=notation))
-            else:
-                goals.append(Term(sym=f.args[2], notation=notation))
-            self.prologModel.add_rule(Rule(Term(sym=f.args[0], notation=notation), goals=goals))
-            return MathProcessor.create_true(notation)
-        f = get_operator(sym, notation)
-        if f is not None:
-            self.prologModel.add_rule(Rule(Term(sym=sym, notation=notation)))
-            return MathProcessor.create_true(notation)
-        return None
-
     def __call__(self, sym, notation, execution_history, history):
         if self.trace is not None:
             self.trace(sym, notation, 0)
@@ -382,7 +359,7 @@ class MathProcessor(object):
         sym = preprocessor(sym)
         notation = output_notation
         output_notation = Notation()
-        parse_res = self.process_rule(sym, notation)
+        parse_res = self.prologModel.parse_rule(sym, notation)
         if parse_res is not None:
             return parse_res, notation
         index = 1

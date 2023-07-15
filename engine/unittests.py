@@ -188,8 +188,15 @@ class TestScenario(TestCase):
 
     def test_prolog4(self):
         m = PrologModel([
-            Rule(Term("\\operatorname{exp}(x,n,x^n)")),
-            Rule(Term("\\operatorname{exp}(x,n,(y))"), [Term("\\operatorname{exp}(x,n,y)")]),
-            Rule(Term("\\operatorname{exp}(x,n,f(x)^n)"), [Term("\\operatorname{exp}(x,n,(f(x))^n)")])
+            Rule(Term("\\operatorname{exp}(x,n,\\sin^n x)"), [Term("\\operatorname{exp}(x,n,(\\sin x)^n)")]),
+            Rule(Term("\\operatorname{exp}(x,n,x^n)"), [Term("\\operatorname{val}(n)")]),
+            Rule(Term("\\operatorname{exp}(x,1,y)"), [Term("{\\neg \\operatorname{exp}(x,n,y)}"), Term("!")])
         ])
-        results = [LaTexWriter(n)(s['z']) for s, n in m.search(Term("\\operatorname{exp} (x, z, f(x)^2)"), trace=True)]
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,x)"))]
+        self.assertTrue(len(results) == 1 and results[0] == '{1}')
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,x^2)"))]
+        self.assertTrue(len(results) == 1 and results[0] == '{2}')
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,f(x)^3)"))]
+        self.assertTrue(len(results) == 1 and results[0] == '{3}')
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,\\sin^5 x)"))]
+        self.assertTrue(len(results) == 1 and results[0] == '{5}')

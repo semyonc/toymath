@@ -30,15 +30,15 @@ class MathParser(object):
          p[0] = self.notation.setf(Symbol(p[1]), (None,()))
 
      def p_formula_command_1(self, p):
-         'formula : COMMAND subformula'
+         'formula : COMMAND logical-expr'
          p[0] = self.notation.setf(Symbol(p[1]), (None,(p[2],)))
 
      def p_formula_command_1_param(self, p):
-         '''formula : COMMAND '[' comma-list ']' subformula'''
+         '''formula : COMMAND '[' comma-list ']' logical-expr'''
          p[0] = self.notation.setf(Symbol(p[1]), (p[3],(p[5],)))
 
      def p_formula_command_2(self, p):
-         'formula : COMMAND subformula Box subformula'
+         'formula : COMMAND logical-expr Box logical-expr'
          p[0] = self.notation.setf(Symbol(p[1]), (None,(p[2],p[4])))
 
      def p_formula_command_2_param(self, p):

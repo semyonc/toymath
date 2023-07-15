@@ -78,7 +78,7 @@ class LaTexWriter(object):
         f = self.notation.get(sym)
         if f is not None and f.sym.name.endswith('!'):
             if f.sym.name in ['closure!', 'track!']:
-                self.write_subformula(f.args[1][0])
+                self.write_or_expr_list(f.args[1][0])
             else:
                 self.writeString('\\mathop{')
                 self.writeString(f.sym.name)
@@ -89,10 +89,10 @@ class LaTexWriter(object):
                     self.writeString('}')
                 if len(f.args[1]) > 0:
                     self.writeString('\\space')
-                    self.write_subformula(f.args[1][0])
+                    self.write_or_expr_list(f.args[1][0])
                     if len(f.args[1]) == 2:
                         self.writeString('\\,\\Box\\,')
-                        self.write_subformula(f.args[1][1])
+                        self.write_or_expr_list(f.args[1][1])
             return True
         return False
 
