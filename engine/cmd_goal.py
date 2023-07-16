@@ -1,9 +1,10 @@
 from IPython.display import HTML
 from engine import display
 from notation import Symbol, Notation
-from prolog import Term
+from engine.processor import MathProcessor
 from LatexWriter import LaTexWriter
 from engine import get_mathshell
+
 
 def printenv(env, notation):
     writer = LaTexWriter(notation)
@@ -18,17 +19,18 @@ def printenv(env, notation):
 class ExecuteGoal(object):
     arity = 1
 
-    def exec(self, processor, sym, f):
+    def exec(self, processor, _, f):
         if f.args[0] is not None:
             raise AttributeError(f'The dump command does not define any attributes')
         sym = processor.enter_subformula(f.args[1][0])
-        term = Term(sym=sym, notation=processor.output_notation)
-        flag = False
-        for env, notation in processor.prologModel.search(term, trace=get_mathshell().trace):
-            flag = True
-            display(HTML(printenv(env, notation)))
-        if flag:
-            return processor.output_notation.setf(Symbol('\\textit'), (str(True),))
+        goals = processor.prologModel.parse_goals(sym, processor.output_notation)
+        if goals:
+            flag = False
+            for env, notation in processor.prologModel.search(goals, trace=get_mathshell().trace):
+                flag = True
+                display(HTML(printenv(env, notation)))
+            if flag:
+                return MathProcessor.create_true(processor.output_notation)
         return Notation.NONE
 
 

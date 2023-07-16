@@ -8,7 +8,7 @@ from engine.processor import MathProcessor
 from engine.replicator import Replicator
 from notation import Notation, NOTATION, Symbol, SYMBOL
 from preprocessor import Preprocessor
-from comparer import UnifyComparer, isVariable
+from comparer import NotationComparer, UnifyComparer, isVariable, expand_group
 from replacer import Replacer
 
 RULE = TypeVar('RULE', bound='Rule')
@@ -67,6 +67,14 @@ def termeval(term: TERM, notation: NOTATION, env) -> bool:
     return False
 
 
+def setvar(name, env: Dict[str, Any], sym: Any, notation: NOTATION) -> bool:
+    if name not in env or \
+            NotationComparer(sym, notation).match(expand_group(env[name], notation), notation) is not None:
+        env[name] = sym
+        return True
+    return False
+
+
 class SymbolWalker(Replicator):
     """SymbolWalker"""
 
@@ -113,8 +121,9 @@ class Term(object):
             p = MathParser(temp_notation)
             sym = p.parse(expr)
             preprocessor = Preprocessor(temp_notation, self.notation, {}, {})
-            self.expr = expr
             self.sym = preprocessor(sym)
+            writer = LaTexWriter(self.notation)
+            self.expr = writer(self.sym)
         else:
             writer = LaTexWriter(notation)
             self.expr = writer(sym)
@@ -202,74 +211,182 @@ class PrologModel(object):
     """PrologModel"""
 
     def __init__(self, rules: List[Rule] = None, callbacks: Dict[SYMBOL, Callable] = None):
-        if rules is None:
-            rules = []
-        self.rules = rules
         if callbacks is None:
             callbacks = {}
         self.callbacks = callbacks
+        self.rules = []
         self.add_default_callbacks()
+        if rules is not None:
+            self.rules = self.rules + rules
 
     def add_rule(self, rule: Rule):
         self.rules.append(rule)
 
-    def add_callback(self, sym: Union[SYMBOL, str], cb: Callable):
-        if isinstance(sym, str):
-            sym = Symbol(sym)
-        self.callbacks[sym] = cb
+    def add_callback(self, name: str, arity: int, cb: Callable):
+        self.rules.append(Rule(Term(f'\\operatorname{{{name}}}({",".join([f"#S{i}" for i in range(arity)])})')))
+        self.callbacks[name] = cb
 
     def clear(self):
         self.rules.clear()
+        self.add_default_callbacks()
 
     def __repr__(self):
         return '\n'.join([repr(t) for t in self.rules])
 
-    def parse_rule(self, sym, notation):
+    @staticmethod
+    def parse_goals(sym, notation):
+        goals = []
+        f2 = notation.getf(sym, Notation.GROUP)
+        if f2 is not None:
+            f2 = notation.getf(f2.args[0], Notation.A_LIST)
+            if f2 is not None:
+                for g in f2.args:
+                    goals.append(Term(sym=g, notation=notation))
+        if not goals:
+            goals.append(Term(sym=sym, notation=notation))
+        return goals
+
+    @staticmethod
+    def parse_rule(sym, notation):
         f = notation.getf(sym, Notation.P_LIST)
         if f is not None and len(f.args) == 3 and \
                 get_operator(f.args[0], notation) is not None and \
                 f.args[1] == Symbol('\\dashv'):
-            goals = []
-            f2 = notation.getf(f.args[2], Notation.GROUP)
-            if f2 is not None:
-                f2 = notation.getf(f2.args[0], Notation.A_LIST)
-                if f2 is not None:
-                    for g in f2.args:
-                        goals.append(Term(sym=g, notation=notation))
-            if not goals:
-                goals.append(Term(sym=f.args[2], notation=notation))
-            self.add_rule(Rule(Term(sym=f.args[0], notation=notation), goals=goals))
-            return MathProcessor.create_true(notation)
+            goals = PrologModel.parse_goals(f.args[2], notation)
+            return Rule(Term(sym=f.args[0], notation=notation), goals=goals)
         f = get_operator(sym, notation)
         if f is not None:
-            self.add_rule(Rule(Term(sym=sym, notation=notation)))
+            return Rule(Term(sym=sym, notation=notation))
+        return None
+
+    def parse_and_add_rule(self, sym, notation):
+        rule = self.parse_rule(sym, notation)
+        if rule is not None:
+            self.add_rule(rule)
             return MathProcessor.create_true(notation)
         return None
 
     def add_default_callbacks(self):
-        self.add_callback('val', self.callback_val)
+        self.add_callback('val', 1, self.callback_val)
+        self.add_callback('len', 2, self.callback_len)
+        self.add_callback('anyf', 3, self.callback_anyf)
+        self.add_callback('index', 3, self.callback_index)
+        self.add_callback('slist', 3, self.callback_slist)
+        self.add_callback('plist', 3, lambda notation, env: self.callback_list(notation, env, Notation.P_LIST))
+        self.add_callback('clist', 3, lambda notation, env: self.callback_list(notation, env, Notation.C_LIST))
 
     @staticmethod
-    def callback_val(term: Term, notation: Notation, env: Dict[str, Any]) -> bool:
-        return all(name in env for name in term.variables)
+    def callback_val(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            yield env, notation
 
-    #@staticmethod
-    #def callback_unary_function(term: Term, notation: Notation, env: Dict[str, Any]) -> bool:
+    @staticmethod
+    def callback_len(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            sym = env['#S0']
+            f = notation.get(sym)
+            if f is not None:
+                if setvar('#S1', env, len(f.args), notation):
+                    yield env, notation
+            else:
+                length = 0
+                if sym != Notation.EMPTYSET:
+                    length = 1
+                if setvar('#S1', env, length, notation):
+                    yield env, notation
 
+    @staticmethod
+    def callback_anyf(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            notation = notation.clone()
+            env = copy.deepcopy(env)
+            f = notation.getf(env['#S0'], Notation.FUNC)
+            if f is not None:
+                if setvar('#S1', env, f.args[0], notation) and setvar('#S2', env, f.args[1], notation):
+                    yield env, notation
+        elif '#S1' in env and '#S2' in env:
+            env['#S0'] = notation.setf(Notation.FUNC, (env['#S1'], env['#S2']))
+            yield env, notation
+
+    @staticmethod
+    def callback_index(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            notation = notation.clone()
+            env = copy.deepcopy(env)
+            f = notation.getf(env['#S0'], Notation.INDEX)
+            if f is not None:
+                if setvar('#S1', env, f.args[0], notation):
+                    sym = notation.setf(Notation.INDEX, (Symbol('a'), f.args[1]))
+                    if setvar('#S2', env, sym, notation):
+                        yield env, notation
+        elif '#S1' in env and '#S2' in env:
+            f = notation.getf(env['#S2'], Notation.INDEX)
+            if f is not None:
+                env['#S0'] = notation.setf(Notation.INDEX, (env['#S1'], f.args[1]))
+                yield env, notation
+
+    @staticmethod
+    def callback_slist(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            notation = notation.clone()
+            env = copy.deepcopy(env)
+            head = env['#S0']
+            if head != Notation.EMPTYSET:
+                f = notation.getf(expand_group(head, notation), Notation.S_LIST)
+                if f is not None:
+                    head = expand_group(f.args[0], notation)
+                f1 = notation.getf(head, Notation.PLUS)
+                if f1 is not None:
+                    head = expand_group(f1.args[0], notation)
+                if setvar('#S1', env, head, notation):
+                    tail = Notation.EMPTYSET
+                    if f is not None and len(f.args) > 1:
+                        tail = f.args[1:]
+                        f2 = notation.getf(tail[0], Notation.PLUS)
+                        if f2 is not None:
+                            tail[0] = expand_group(f2.args[0], notation)
+                        if len(tail) == 1:
+                            tail = tail[0]
+                        else:
+                            tail = notation.setf(Notation.S_LIST, tail)
+                    if setvar('#S2', env, tail, notation):
+                        yield env, notation
+
+    @staticmethod
+    def callback_list(notation: NOTATION, env: Dict[str, Any],
+                      listsym: SYMBOL) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+        if '#S0' in env:
+            notation = notation.clone()
+            env = copy.deepcopy(env)
+            head = env['#S0']
+            if head != Notation.EMPTYSET:
+                f = notation.getf(expand_group(env['#S0'], notation), listsym)
+                if f is not None:
+                    head = expand_group(f.args[0], notation)
+                if setvar('#S1', env, head, notation):
+                    tail = Notation.EMPTYSET
+                    if f is not None and len(f.args) > 1:
+                        tail = f.args[1:]
+                        if len(tail) == 1:
+                            tail = tail[0]
+                        else:
+                            tail = notation.setf(listsym, tail)
+                    if setvar('#S2', env, tail, notation):
+                        yield env, notation
 
     # Adoptaition of https://www.openbookproject.net/py4fun/prolog/prolog1.py
     # https://www.openbookproject.net/py4fun/prolog/prolog1.html
     def search(self,
-               term: TERM, notation: NOTATION = None,
+               goals: List[Term], notation: NOTATION = None,
                trace: bool = False,
                maxiters: int = 100,
                env: Dict[str, Any] = None,
                exlusions: List[Rule] = None) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         global goalid
-        if trace: print("\nsearch %s" % term.expr)
-        rule = Rule(Term('\\operatorname{got}(#Goal)'), [term])  # Anything-just get a rule object
+        if trace: print("\nsearch %s" % [repr(g) for g in goals])
+        rule = Rule(Term('\\operatorname{got}(#Goal)'), goals)  # Anything-just get a rule object
         if notation is None:
-            notation = term.notation
+            notation = Notation()
         goal = Goal(rule, notation, env=env)  # target is the single goal
         stack = [goal]
         if exlusions is None:
@@ -285,19 +402,28 @@ class PrologModel(object):
                     if trace: print("  find solution %s" % c.repr_env())
                     yield c.env, c.notation
                     continue
-                parent = copy.deepcopy(c.parent)  # Otherwise resume parent goal
-                unify(c.rule.head, c.env, c.notation,
-                      parent.rule.goals[parent.inx], parent.env, parent.notation)
-                parent.inx = parent.inx + 1  # advance to next goal in body
-                if trace: print("stack %s" % parent)
-                stack.append(parent)  # let it wait its turn
+                if c.rule.head.pred.name in self.callbacks:
+                    for env, notation in self.callbacks[c.rule.head.pred.name](c.notation, c.env):
+                        parent = copy.deepcopy(c.parent)  # Generate callback goals
+                        unify(c.rule.head, env, notation,
+                              parent.rule.goals[parent.inx], parent.env, parent.notation)
+                        parent.inx = parent.inx + 1
+                        if trace: print("stack %s" % parent)
+                        stack.append(parent)  # let it wait its turn
+                else:
+                    parent = copy.deepcopy(c.parent)  # Otherwise resume parent goal
+                    unify(c.rule.head, c.env, c.notation,
+                          parent.rule.goals[parent.inx], parent.env, parent.notation)
+                    parent.inx = parent.inx + 1  # advance to next goal in body
+                    if trace: print("stack %s" % parent)
+                    stack.append(parent)  # let it wait its turn
                 continue
             # No. more to do with this goal.
             term = c.rule.goals[c.inx]  # What we want to solve
-            if term.negated: # negation: recursive search
+            if term.negated:  # negation: recursive search
                 term = Term(sym=term.sym, notation=term.notation)
                 notation = c.notation.concate(term.notation)
-                ans = not any(self.search(term, notation, trace, maxiters - iters, c.env, exlusions + [c.rule]))
+                ans = not any(self.search([term], notation, trace, maxiters - iters, c.env, exlusions + [c.rule]))
                 if ans:
                     if trace: print("  negation %s" % c)
                     c.inx = c.inx + 1
@@ -315,12 +441,6 @@ class PrologModel(object):
                         if trace: print("  eval %s" % term.expr)
                         c.inx = c.inx + 1
                         stack.append(c)
-            elif term.pred in self.callbacks:  # call callback
-                ans = self.callbacks[term.pred](term, c.notation, c.env)
-                if ans:
-                    if trace: print("  callback %s" % term.expr)
-                    c.inx = c.inx + 1
-                    stack.append(c)
             else:
                 for rule in self.rules:  # Walk down the rule database
                     if rule.head.pred != term.pred or rule.head.arity != term.arity:

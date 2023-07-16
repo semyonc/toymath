@@ -3,12 +3,16 @@ from engine import display
 from notation import Notation
 
 
-def dump(rules):
+def dump(model):
     res = '<table>'
-    for rule in rules:
+    count = 0
+    for rule in model.rules:
+        if rule.head.pred.name in model.callbacks:
+            continue
         res += f'<tr><td>${rule.__repr__()}$</td></tr>'
+        count += 1
     res += "</table>"
-    res += f'<p><i>{len(rules)} rules(s) in database</i></p>'
+    res += f'<p><i>{count} rules(s) in database</i></p>'
     return res
 
 
@@ -18,7 +22,7 @@ class PrintRules(object):
     def exec(self, processor, sym, f):
         if f.args[0] is not None:
             raise AttributeError(f'The dump command does not define any attributes')
-        display(HTML(dump(processor.prologModel.rules)))
+        display(HTML(dump(processor.prologModel)))
         return Notation.NONE
 
 

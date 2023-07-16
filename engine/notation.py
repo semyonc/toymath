@@ -130,6 +130,7 @@ class Notation(object):
     LOR = Symbol('\\lor')
     LAND = Symbol('\\land')
     EXCL_MARK = Symbol('!')
+    EMPTYSET = Symbol('\\emptyset')
 
     comparer = (
         '=',

@@ -71,10 +71,10 @@ class Calculator(Replacer):
     abbreviated_minus = comparer.pattern('(+x)', ['x'])
     abbreviated_plus = comparer.pattern('(-x)', ['x'])
 
-    def __init__(self, notation, output_notation, actions, prologModel):
+    def __init__(self, notation, output_notation, actions=None, model=None):
         super(Calculator, self).__init__(notation, output_notation)
         self.actions = actions
-        self.prologModel = prologModel
+        self.prologModel = model
 
     def enter_command(self, sym, f):
         action_name = f.sym.name[:-1]
@@ -359,7 +359,7 @@ class MathProcessor(object):
         sym = preprocessor(sym)
         notation = output_notation
         output_notation = Notation()
-        parse_res = self.prologModel.parse_rule(sym, notation)
+        parse_res = self.prologModel.parse_and_add_rule(sym, notation)
         if parse_res is not None:
             return parse_res, notation
         index = 1

@@ -157,9 +157,6 @@ class TestScenario(TestCase):
     def test_mul2(self):
         self.checkEqual("mul! (x+1)^3(x-1)", "{x^4+2x^3-2x-1}")
 
-    # def test_sin3(self):
-    #     self.checkEqual("\\sin^3 x", "(\\sin x)^3")
-
     def test_prolog1(self):
         m = PrologModel([
             Rule(Term("\\operatorname{child}(#X)"), [Term("\\operatorname{boy}(#X)")]),
@@ -167,23 +164,23 @@ class TestScenario(TestCase):
             Rule(Term("\\operatorname{girl}(\\text{Alise})")),
             Rule(Term("\\operatorname{boy}(\\text{Alex})"))
         ])
-        results = [LaTexWriter(n)(s['#Q']) for s, n in m.search(Term("\\operatorname{child}(#Q)"))]
+        results = [LaTexWriter(n)(s['#Q']) for s, n in m.search([Term("\\operatorname{child}(#Q)")])]
         self.assertTrue(len(results) == 2 and '\\text{Alise}' in results and '\\text{Alex}' in results)
 
     def test_prolog2(self):
         m = PrologModel([
             Rule(Term("\\operatorname{power}(#Z,#X,#Y)"), [Term("#Z = #X^#Y")]),
         ])
-        results = [LaTexWriter(n)(s['#Y']) for s, n in m.search(Term("\\operatorname{power}(x^2,#X,#Y)"))]
+        results = [LaTexWriter(n)(s['#Y']) for s, n in m.search([Term("\\operatorname{power}(x^2,#X,#Y)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{2}')
-        results = [LaTexWriter(n)(s['#Y']) for s, n in m.search(Term("\\operatorname{power}(x^(-y),#X,#Y)"))]
+        results = [LaTexWriter(n)(s['#Y']) for s, n in m.search([Term("\\operatorname{power}(x^(-y),#X,#Y)")])]
         self.assertTrue(len(results) == 1 and results[0] == '(-y)')
 
     def test_prolog3(self):
         m = PrologModel([
             Rule(Term("\\operatorname{eval}(Z,X)"), [Term("Z \\gets X")]),
         ])
-        results = [LaTexWriter(n)(s['Z']) for s, n in m.search(Term("\\operatorname{eval}(Z,2+3)"))]
+        results = [LaTexWriter(n)(s['Z']) for s, n in m.search([Term("\\operatorname{eval}(Z,2+3)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{5}')
 
     def test_prolog4(self):
@@ -192,11 +189,20 @@ class TestScenario(TestCase):
             Rule(Term("\\operatorname{exp}(x,n,x^n)"), [Term("\\operatorname{val}(n)")]),
             Rule(Term("\\operatorname{exp}(x,1,y)"), [Term("{\\neg \\operatorname{exp}(x,n,y)}"), Term("!")])
         ])
-        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,x)"))]
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search([Term("\\operatorname{exp} (x,n,x)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{1}')
-        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,x^2)"))]
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search([Term("\\operatorname{exp} (x,n,x^2)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{2}')
-        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,f(x)^3)"))]
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search([Term("\\operatorname{exp} (x,n,f(x)^3)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{3}')
-        results = [LaTexWriter(n)(s['n']) for s, n in m.search(Term("\\operatorname{exp} (x,n,\\sin^5 x)"))]
+        results = [LaTexWriter(n)(s['n']) for s, n in m.search([Term("\\operatorname{exp} (x,n,\\sin^5 x)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{5}')
+
+    def test_prolog5(self):
+        m = PrologModel([])
+        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{slist} (2x+y-2z, {2x}, #T)")])]
+        self.assertTrue(len(results) == 1 and results[0] == 'y-{2}z')
+        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, #T, ##)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{2}')
+        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, 2, #T)")])]
+        self.assertTrue(len(results) == 1 and results[0] == 'xy')
