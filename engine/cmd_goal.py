@@ -4,6 +4,7 @@ from notation import Symbol, Notation
 from engine.processor import MathProcessor
 from LatexWriter import LaTexWriter
 from engine import get_mathshell
+from value import IntegerValue
 
 
 def printenv(env, notation):
@@ -20,13 +21,16 @@ class ExecuteGoal(object):
     arity = 1
 
     def exec(self, processor, _, f):
+        maxiters = 100
         if f.args[0] is not None:
-            raise AttributeError(f'The dump command does not define any attributes')
+            if not isinstance(f.args[0], IntegerValue):
+                raise AttributeError(f'The goal attribute can be only integer')
+            maxiters = f.args[0].val
         sym = processor.enter_subformula(f.args[1][0])
         goals = processor.prologModel.parse_goals(sym, processor.output_notation)
         if goals:
             flag = False
-            for env, notation in processor.prologModel.search(goals, trace=get_mathshell().trace):
+            for env, notation in processor.prologModel.search(goals, maxiters=maxiters, trace=get_mathshell().trace):
                 flag = True
                 display(HTML(printenv(env, notation)))
             if flag:

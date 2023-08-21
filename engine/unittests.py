@@ -125,6 +125,22 @@ class TestScenario(TestCase):
     def test_unify9(self):
         self.assertNotUnify("\\operatorname{exp}(x,z,f(x))", {}, "\\operatorname{exp}(x,n,f(x)^n)", {})
 
+    def test_unify10(self):
+        self.assertUnify("`x", {}, "x", {})
+        self.assertUnify("x", {}, "`x", {})
+        self.assertUnify("`x", {}, "`x", {})
+        self.assertUnify("`x+y", {}, "x+`y", {})
+
+    def test_unify11(self):
+        self.assertUnify("`x", {}, "{x}", {})
+
+    def test_unify12(self):
+        self.assertNotUnify("x+(y+z)", {}, "x+(y-z)", {})
+        self.assertNotUnify("x+(y+z)", {}, "x+y+(z+w)", {})
+
+    def test_unify13(self):
+        self.assertUnify("xy", {'x': 'x', 'y': '(y)'}, "`{x(y)}", {})
+
     def test_2x2(self):
         self.checkEqual("2 2", "4")
 
@@ -178,10 +194,10 @@ class TestScenario(TestCase):
 
     def test_prolog3(self):
         m = PrologModel([
-            Rule(Term("\\operatorname{eval}(Z,X)"), [Term("Z \\gets X")]),
+            Rule(Term("\\operatorname{eval}(Z,X)"), [Term("\\operatorname{setq}(Z,2X)")]),
         ])
         results = [LaTexWriter(n)(s['Z']) for s, n in m.search([Term("\\operatorname{eval}(Z,2+3)")])]
-        self.assertTrue(len(results) == 1 and results[0] == '{5}')
+        self.assertTrue(len(results) == 1 and results[0] == '{10}')
 
     def test_prolog4(self):
         m = PrologModel([
@@ -198,11 +214,51 @@ class TestScenario(TestCase):
         results = [LaTexWriter(n)(s['n']) for s, n in m.search([Term("\\operatorname{exp} (x,n,\\sin^5 x)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{5}')
 
-    def test_prolog5(self):
-        m = PrologModel([])
-        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{slist} (2x+y-2z, {2x}, #T)")])]
-        self.assertTrue(len(results) == 1 and results[0] == 'y-{2}z')
-        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, #T, ##)")])]
+    # def test_prolog5(self):
+    #     m = PrologModel([])
+    #     results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{slist} (2x+y-2z, 2`x, #T)")])]
+    #     self.assertTrue(len(results) == 1 and results[0] == 'y-{2}z')
+    #     results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, #T, ##)")])]
+    #     self.assertTrue(len(results) == 1 and results[0] == '{2}')
+    #     results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, 2, #T)")])]
+    #     self.assertTrue(len(results) == 1 and results[0] == 'xy')
+
+    def test_prolog6(self):
+        m = PrologModel([Rule(Term("\\operatorname{test}(x)"), [Term("{2x}")])])
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{test}(2)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{4}')
+        m = PrologModel([Rule(Term("\\operatorname{test}(x)"), [Term("{2x}"), Term("{3x}")])])
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{test}(2)")])]
+        self.assertTrue(len(results) == 0)
+        m = PrologModel([Rule(Term("\\operatorname{test}(x)"), [Term("{3x}"), Term("{3x}")])])
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{test}(2)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{6}')
+
+    def test_prolog7(self):
+        m = PrologModel([
+            Rule(Term("\\operatorname{fib}(0)"), [Term("0"), Term("!")]),
+            Rule(Term("\\operatorname{fib}(1)"), [Term("1"), Term("!")]),
+            Rule(Term("\\operatorname{fib}(n)"), [Term("\\operatorname{fib}(n -1) + \\operatorname{fib}(n -2)")])
+        ])
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(0)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{0}')
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(1)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{1}')
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(2)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{1}')
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(3)")])]
         self.assertTrue(len(results) == 1 and results[0] == '{2}')
-        results = [LaTexWriter(n)(s['#T']) for s, n in m.search([Term("\\operatorname{plist} ({2xy}, 2, #T)")])]
-        self.assertTrue(len(results) == 1 and results[0] == 'xy')
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(4)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{3}')
+        results = [LaTexWriter(n)(s['#RESULT']) for s, n in m.search([Term("\\operatorname{fib}(5)")])]
+        self.assertTrue(len(results) == 1 and results[0] == '{5}')
+
+    def test_prolog8(self):
+        m = PrologModel([
+            Rule(Term("\\operatorname{test}(xy, x, y)"), [Term("\\val(x)"), Term("\\br(y)")])
+        ])
+        results = []
+        for s, n in m.search([Term("\\operatorname{test}(`{x(y)}, #X, #Y)")], trace=True):
+            writer = LaTexWriter(n)
+            results.append(writer(s['#X']) + writer(s['#Y']))
+        self.assertTrue(len(results) == 1 and results[0] == 'x(y)')

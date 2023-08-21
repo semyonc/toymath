@@ -1,5 +1,6 @@
 from IPython.display import HTML
 from engine import display
+from engine import get_mathshell
 
 
 def dump(outsym, notation):
@@ -19,6 +20,7 @@ class DumpNotation(object):
     def exec(self, processor, sym, f):
         if f.args[0] is not None:
             raise AttributeError(f'The dump command does not define any attributes')
+        get_mathshell().set_show_quotes(True)
         sym = processor.enter_subformula(f.args[1][0])
         display(HTML(dump(sym, processor.output_notation)))
         return sym

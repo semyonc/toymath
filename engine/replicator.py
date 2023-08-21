@@ -218,7 +218,8 @@ class Replicator(object):
                 return self.enter_scalar(sym)
         else:
             if isinstance(sym, Symbol):
-                return self.enter_symbol(sym)
+                with self._enter(sym, None):
+                    return self.enter_symbol(sym)
             else:
                 return self.enter_term(sym)
 
@@ -357,7 +358,7 @@ class Replicator(object):
         return self.output_notation.repf(self.mapsym(sym), f)
 
     def enter_backref(self, sym, f):
-        return self.output_notation.repf(self.mapsym(sym), f)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_subformula(f.args[0]),)))
 
     def enter_above(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym,

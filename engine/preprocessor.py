@@ -2,6 +2,7 @@ from replacer import Replacer
 from replicator import Replicator
 from notation import Func, issym
 from value import *
+from comparer import isVariable
 
 
 class Importer(Replicator):
@@ -26,8 +27,13 @@ class Preprocessor(Replacer):
         self.history = history
 
     def enter_backref(self, sym, f):
-        refs = self.execution_history[f.args[0]]
-        input_notation = self.history[refs]
+        key = str(f.args[0])
+        if key not in self.execution_history:
+            return super(Preprocessor, self).enter_backref(sym, f)
+        refs = self.execution_history[key]
+        input_notation = self.notation
+        if refs in self.history:
+            input_notation = self.history[refs]
         repl = Importer(input_notation, self.output_notation)
         linked_sym = repl.enter_subformula(refs)
         return self.subst(sym, linked_sym, self.context())
@@ -41,13 +47,31 @@ class Preprocessor(Replacer):
 
     def enter_group(self, sym, f):
         outs = self.enter_formula(f.args[0])
-        if isinstance(outs, Value):
-            return outs
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (outs,), **f.props))
 
     @staticmethod
     def anyname(sym, names):
         return any(isinstance(sym, Symbol) and sym.name == t for t in names)
+
+    @staticmethod
+    def funcname(sym):
+        return isinstance(sym, Symbol) and sym.name.startswith('\\') and sym.name not in Notation.reserved
+
+    def extract_args(self, args):
+        ret = []
+        for i, arg in enumerate(args):
+            f = self.output_notation.getf(arg, Notation.GROUP)
+            if f is not None:
+                if i == 0:
+                    ret.append(arg)
+                break
+            if self.anyname(arg, Notation.unary_f) or \
+                    self.anyname(arg, Notation.common_f) or \
+                    self.anyname(arg, Notation.p_oper) or \
+                    self.funcname(arg):
+                break
+            ret.append(arg)
+        return ret
 
     def transform_prefix(self, plist):
         res = []
@@ -74,9 +98,13 @@ class Preprocessor(Replacer):
                 if group_f is not None:
                     sec = group_f.args[0]
                 if self.anyname(pri, Notation.unary_f):
-                    res.append(self.output_notation.setf(Notation.FUNC, (plist[i], sec), fmt='unary'))
-                    i += 2
-                    continue
+                    args = self.extract_args(plist[i + 1:])
+                    if len(args) > 1:
+                        sec = self.output_notation.setf(Notation.P_LIST, tuple(args))
+                    if len(args) > 0:
+                        res.append(self.output_notation.setf(Notation.FUNC, (plist[i], sec), fmt='unary'))
+                        i += 1 + len(args)
+                        continue
                 if group_f is not None and self.anyname(pri, Notation.common_f):
                     res.append(self.output_notation.setf(Notation.FUNC, (plist[i], sec)))
                     i += 2
@@ -86,6 +114,11 @@ class Preprocessor(Replacer):
                                                          (plist[i], self.transform_plist(None, plist[i + 1:])),
                                                          fmt='oper'))
                     break
+                if group_f is not None and self.funcname(pri):
+                    res.append(self.output_notation.setf(Notation.FUNC, (Symbol(pri.name[1:]), sec),
+                                                         fmt='operatorname'))
+                    i += 2
+                    continue
             res.append(plist[i])
             i += 1
         return res
@@ -107,7 +140,8 @@ class Preprocessor(Replacer):
                     if group_f is not None:
                         sec = group_f.args[0]
                     res.append(self.output_notation.setf(Notation.INDEX,
-                        (self.output_notation.setf(Notation.FUNC, (plist[i], sec)), index2_f.args[1])))
+                                                         (self.output_notation.setf(Notation.FUNC, (plist[i], sec)),
+                                                          index2_f.args[1])))
                     i += 2
                     continue
             res.append(plist[i])
@@ -122,5 +156,5 @@ class Preprocessor(Replacer):
         return self.output_notation.repf(sym, Func(Notation.P_LIST, res))
 
     def enter_plist(self, sym, f):
-        args = self.build_list(f, self.enter_additive_expr)
+        args = self.build_list(f, self.enter_expr)
         return self.transform_plist(self.mapsym(sym), args)

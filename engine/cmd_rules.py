@@ -6,11 +6,13 @@ from notation import Notation
 def dump(model):
     res = '<table>'
     count = 0
-    for rule in model.rules:
-        if rule.head.pred.name in model.callbacks:
+    for sym in model.rules:
+        if sym.name in model.callbacks:
             continue
-        res += f'<tr><td>${rule.__repr__()}$</td></tr>'
-        count += 1
+        rules = model.rules[sym]
+        for rule in reversed(rules):
+            res += f'<tr><td>$${rule.__repr__()}$$</td></tr>'
+            count += 1
     res += "</table>"
     res += f'<p><i>{count} rules(s) in database</i></p>'
     return res

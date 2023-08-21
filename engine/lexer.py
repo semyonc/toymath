@@ -22,7 +22,8 @@ class MathLexer(object):
         'DIMEN',
         'LBR',
         'RBR',
-        'REF',
+        'BREF',
+        'EREF',
         'NEGSP',
         'SP1',
         'SP2',
@@ -123,7 +124,7 @@ class MathLexer(object):
        ('text','exclusive'),
      )
      
-     literals = ('&','^','_','{','}','~','|','(',')',',','/','*','+','-','[',']','=', '.', ':')
+     literals = ('&','^','_','{','}','~','|','(',')',',','/','*','+','-','[',']','=', '.', ':', '`')
     
      # Regular expression rules for simple tokens
      t_LBR    = r'\\{'
@@ -135,6 +136,9 @@ class MathLexer(object):
      t_SP3     = r'\\>'
      t_SP4     = r'\\;'
      t_WS      = r'\\(?=\s)'
+     
+     t_BREF    = r'\[\['
+     t_EREF    = r'\]\]'
              
      t_text_ignore = ' {'         
 
@@ -192,11 +196,6 @@ class MathLexer(object):
      def t_text_error(self, t):
          t.lexer.skip(1)
          
-     def t_REF(self, t):
-         #r'!-?\d+'
-         r'\[\[\-?\d+\]\]'
-         t.value = int(t.value[2:-2])
-         return t    
      
      def t_ASSIGN(self, t):
          r'{:=}'

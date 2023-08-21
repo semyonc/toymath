@@ -353,15 +353,15 @@ class MathParser(object):
      def p_scalar_term(self, p):
          'scalar : term'
          p[0] = p[1]
-
+         
      def p_scalar_digit(self, p):
          'scalar : DIGIT'
 
          p[0] = p[1]
 
      def p_scalar_ref(self, p):
-         'scalar : REF'
-         p[0] = self.notation.setf(Notation.REF, (p[1],))
+         '''scalar : BREF expression EREF'''
+         p[0] = self.notation.setf(Notation.REF, (p[2],))
 
      def p_scalar_text(self, p):
          '''scalar : text TEXT
@@ -375,6 +375,10 @@ class MathParser(object):
      def p_term_literal(self, p):
          'term : LITERAL'
          p[0] = Symbol(p[1])
+         
+     def p_term_quoted_literal(self, p):
+         '''term : '`' LITERAL'''
+         p[0] = Symbol(p[2], quoted=True)         
 
      def p_open(self, p):
          '''open : '('
@@ -391,10 +395,18 @@ class MathParser(object):
      def p_scalar_formula(self, p):
          '''scalar : '{' formula '}' '''
          p[0] = self.notation.setf(Notation.GROUP, (p[2],), br='{}')
+         
+     def p_scalar_quoted_formula(self, p):
+         '''scalar : '`' '{' formula '}' '''
+         p[0] = self.notation.setf(Notation.GROUP, (p[3],), br='{}', quoted=True)
 
      def p_scalar_group(self, p):
          '''scalar : '(' comma-list ')' '''
          p[0] = self.notation.setf(Notation.GROUP,(p[2],), br='()')
+         
+     def p_scalar_quoted_group(self, p):
+         '''scalar : '`' '(' comma-list ')' '''
+         p[0] = self.notation.setf(Notation.GROUP,(p[3],), br='()', quoted=True)
          
      def p_scalar_group_b(self, p):
          '''scalar : LBR expression RBR '''

@@ -83,6 +83,9 @@ class IntegerValue(Value):
     def __hash__(self):
         return self.val.__hash__()
 
+    def __str__(self):
+        return str(self.val)
+
     def __repr__(self):
         if self.val < 0:
             return '{' + str(-self.val) + '}'

@@ -4,6 +4,7 @@ from notation import Notation, Symbol
 from LatexParser import MathParser
 from processor import MathProcessor
 from LatexWriter import LaTexWriter
+from prolog import PrologModel
 
 from IPython.display import HTML, Javascript
 from engine import display
@@ -34,7 +35,7 @@ class MathShell(object):
         self.history = {}
         self.parsedNotation = Notation()
         self.parser = MathParser(self.parsedNotation)
-        self.processor = MathProcessor()
+        self.processor = MathProcessor(model=PrologModel())
         self.processor.trace = self.trace_step
         self.history = {}
         self.execution_history = {}
@@ -43,6 +44,7 @@ class MathShell(object):
         self.trace = False
         self.trace_mode = False
         self.trace_output = None
+        self.show_quotes = False
 
     def trace_step(self, sym, notation, index):
         if self.trace:
@@ -63,6 +65,9 @@ class MathShell(object):
     def set_trace(self, trace_mode):
         self.trace = trace_mode
 
+    def set_show_quotes(self, show_quotes):
+        self.show_quotes = show_quotes
+
     def exec(self, code, execution_count, add_to_history=False, cell_id=None):
         lines = [line for line in split_lines(self, code)]
         for index, line in enumerate(lines):
@@ -73,6 +78,7 @@ class MathShell(object):
         self.current_echo = False
         self.trace = self.trace_mode
         self.trace_output = ''
+        self.show_quotes = False
         try:
             sym = self.parser.parse(code)
             outsym, notation = self.process(sym, self.parsedNotation)
@@ -94,9 +100,9 @@ class MathShell(object):
 
     def output(self, outsym, notation, execution_count, add_to_history):
         if add_to_history:
-            self.execution_history[execution_count] = outsym
+            self.execution_history[str(execution_count)] = outsym
             self.history[outsym] = notation
-        writer = LaTexWriter(notation)
+        writer = LaTexWriter(notation, show_quotes=self.show_quotes)
         result = writer(outsym)
         return result
 

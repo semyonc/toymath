@@ -131,6 +131,9 @@ class Notation(object):
     LAND = Symbol('\\land')
     EXCL_MARK = Symbol('!')
     EMPTYSET = Symbol('\\emptyset')
+    QUOTE = Symbol('quote')
+    RESULT = Symbol('#RESULT')
+    SETQ = Symbol('setq')
 
     comparer = (
         '=',
@@ -222,6 +225,9 @@ class Notation(object):
     variables = ('x', 'y', 'z', 't', 'a', 'b', 'c', 'd', 'e', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
                  's', 'u', 'v', 'w', 'h', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J',
                  'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'U', 'V', 'W', 'X', 'Y', 'Z')
+
+    reserved = ('\\dashv',)
+
 
     def __init__(self):
         self.rel = defaultdict()

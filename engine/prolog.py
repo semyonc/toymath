@@ -6,9 +6,9 @@ from engine.LatexWriter import LaTexWriter
 from engine.LatexParser import MathParser
 from engine.processor import MathProcessor
 from engine.replicator import Replicator
-from notation import Notation, NOTATION, Symbol, SYMBOL
+from notation import Notation, NOTATION, Symbol, SYMBOL, Func
 from preprocessor import Preprocessor
-from comparer import NotationComparer, UnifyComparer, isVariable, expand_group
+from comparer import UnifyComparer, isVariable, expand_group
 from replacer import Replacer
 
 RULE = TypeVar('RULE', bound='Rule')
@@ -28,51 +28,107 @@ def get_operator(sym: SYMBOL, notation: NOTATION):
     return None
 
 
-def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
-          term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION) -> bool:
-    if term1.pred != term2.pred or term1.arity != term2.arity:
-        return False
-
-    notation = input_notation.concate(term1.notation)
-    comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
-    if not comparer.unify(term2.sym, term2.notation, subst2):
-        return False
-
+def replicate(notation: NOTATION, output_notation: NOTATION, subst2: Dict[str, Any]) -> None:
     for key in subst2:
         value = subst2[key]
         if notation.get(value) is not None and output_notation.get(value) is None:
-            Replicator(notation, output_notation)(value)
+            subst2[key] = PrologReplicator(notation, output_notation)(value)
 
+
+def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
+          term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION) -> bool:
+
+    notation = input_notation.concate(term1.notation)
+    comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
+    if term2.pred is not None:
+        if term1.pred != term2.pred or term1.arity != term2.arity:
+            return False
+        if not comparer.unify(term2.sym, term2.notation, subst2):
+            return False
+
+    if Notation.RESULT.name in subst1:
+        if term2.pred == Notation.SETQ:  # setq: assign result
+            if not comparer.equal(Notation.RESULT, notation, subst1, term2.args[0],
+                                  term2.notation, subst2, ctx=None):
+                return False
+        else:  # other: use result
+            if not comparer.equal(Notation.RESULT, notation, subst1, Notation.RESULT, term2.notation, subst2, ctx=None):
+                return False
+
+    replicate(notation, output_notation, subst2)
     return True
-
-
-def termeval(term: TERM, notation: NOTATION, env) -> bool:
-    sym = term.sym
-    f = term.notation.getf(sym, Notation.COMP)
-    if f is not None:
-        output_notation = term.notation.clone()
-        replacer = SymbolReplacer(term.notation, output_notation, notation, env)
-        sym1 = replacer(f.args[0])
-        sym2 = replacer(f.args[1])
-        if f.sym.props['op'] == '=':
-            comparer = UnifyComparer(sym1, output_notation, env)
-            if comparer.unify(sym2, output_notation, env):
-                return True
-        elif f.sym.props['op'] == "\\gets" and isVariable(sym1):
-            processor = MathProcessor()
-            outsym, output_notation2 = processor(sym2, output_notation, {}, {})
-            notation.join(output_notation2)
-            env[sym1.name] = outsym
-            return True
-    return False
 
 
 def setvar(name, env: Dict[str, Any], sym: Any, notation: NOTATION) -> bool:
     if name not in env or \
-            NotationComparer(sym, notation).match(expand_group(env[name], notation), notation) is not None:
+            UnifyComparer(sym, notation).unify(env[name], notation) is not None:
         env[name] = sym
         return True
     return False
+
+
+def transform(t_sym: SYMBOL, t_notation: NOTATION, parent: GOAL, targets: List[SYMBOL]) -> RULE:
+    placeholders = []
+    output_notation = t_notation.clone()
+    for n, oper in enumerate(targets):
+        subst = Symbol('#R' + str(n + 1))
+        placeholders.append(subst)
+        output_notation.repf(oper, Func(Notation.GROUP, (subst,), br='()'))
+    goals = []
+    for n, oper in enumerate(targets):
+        notation = Notation()
+        Replicator(t_notation, notation)(oper)
+        c_list = notation.setf(Notation.C_LIST, (placeholders[n], oper))
+        setq = notation.setf(Notation.FUNC, (Notation.SETQ, c_list), fmt='operatorname')
+        term = Term(sym=setq, notation=notation)
+        goals.append(term)
+    notation = Notation()
+    term = Term(sym=t_sym, notation=output_notation)
+    goals.append(term)
+    c_list = notation.setf(Notation.C_LIST, tuple(placeholders))
+    oper = notation.setf(Notation.FUNC, (parent.rule.head.pred, c_list), fmt='operatorname')
+    return Rule(Term(sym=oper, notation=notation), goals=goals)
+
+
+# Run a term without operator
+def run(term: TERM, env, notation: NOTATION, parent: GOAL, stack, trace) -> None:
+    output_notation = term.notation.clone()
+    replacer = SymbolReplacer(term.notation, output_notation, notation, env)
+    f = term.notation.getf(term.sym, Notation.COMP)
+    if f is not None:  # comparing
+        sym1 = f.args[0]
+        sym2 = f.args[1]
+        if f.sym.props['op'] == '=':
+            comparer = UnifyComparer(replacer(sym1), output_notation, env)
+            if comparer.unify(replacer(sym2), output_notation, env):
+                if trace: print("  unify %s" % term.expr)
+                parent.inx = parent.inx + 1
+                stack.append(parent)
+    else:  # evaluating
+        processor = MathProcessor()
+        outsym, output_notation2 = processor(replacer(term.sym), output_notation, {}, {})
+        walker = OperatorWalker(output_notation2)
+        targets = walker.resolve(outsym)
+        if not targets:  # expression has no operators
+            comparer = UnifyComparer(Notation.RESULT, output_notation, env)
+            if comparer.equal(Notation.RESULT, output_notation, env, outsym, output_notation2, None):
+                replicate(output_notation2, notation, env)
+                if trace: print("  eval %s" % term.expr)
+                parent.inx = parent.inx + 1
+                stack.append(parent)
+        else:  # expression has operators: create subgoals and reevaluate
+            rule = transform(outsym, output_notation2, parent, targets)
+            child = Goal(rule, parent.notation, parent=parent)
+            if trace: print("  stack %s" % child)
+            stack.append(child)
+
+
+class PrologReplicator(Replicator):
+    def __init__(self, notation: NOTATION, output_notation: NOTATION):
+        super().__init__(notation, output_notation)
+
+    def mapsym(self, sym):
+        return Symbol()
 
 
 class SymbolWalker(Replicator):
@@ -107,8 +163,48 @@ class SymbolReplacer(Replacer):
             replacer = self.mapping[sym.name]
             if isinstance(replacer, Symbol) and self.output_notation.get(replacer) is None:
                 replacer = Replicator(self.outer_notation, self.output_notation)(replacer)
-            return self.subst(sym, replacer, self.context_sym())
+            return self.subst(sym, replacer, self.context())
         return super().enter_symbol(sym)
+
+
+class OperatorWalker(Replicator):
+    """OperatorWalker"""
+
+    def __init__(self, notation: NOTATION):
+        super().__init__(notation, Notation())
+        self._stack = []
+        self.relations = {}
+
+    def enter_func(self, sym, f):
+        clear = False
+        if f.props.get('fmt', '') == 'operatorname':
+            parent = self._stack[-1] if len(self._stack) > 0 else None
+            if parent in self.relations:
+                self.relations[parent].append(sym)
+            else:
+                self.relations[parent] = [sym]
+            self._stack.append(sym)
+            clear = True
+        ret = super().enter_func(sym, f)
+        if clear:
+            self._stack.pop()
+        return ret
+
+    def resolve(self, sym):
+        self.enter_formula(sym)
+        ret = []
+
+        def traverse(parent):
+            if parent in self.relations:
+                for child in self.relations[parent]:
+                    if traverse(child):
+                        ret.append(child)
+                return False
+            else:
+                return True
+
+        traverse(None)
+        return ret
 
 
 class Term(object):
@@ -125,12 +221,13 @@ class Term(object):
             writer = LaTexWriter(self.notation)
             self.expr = writer(self.sym)
         else:
-            writer = LaTexWriter(notation)
+            writer = LaTexWriter(notation, show_quotes=True)
             self.expr = writer(sym)
             replicator = Replicator(notation, self.notation)
             self.sym = replicator(sym)
         self.pred = None
         self.arity = -1
+        self.args = None
         self.negated = False
         self.parse_operator()
         walker = SymbolWalker(self.notation)
@@ -151,7 +248,12 @@ class Term(object):
                 f = get_operator(self.sym, self.notation)
                 if f is not None:
                     self.pred = f.args[0]
-                    self.arity = len(f.args) - 1
+                    f_args = self.notation.getf(f.args[1], Notation.C_LIST)
+                    if f_args is not None:
+                        self.args = f_args.args
+                    else:
+                        self.args = [f.args[1]]
+                    self.arity = len(self.args)
 
     def __repr__(self):
         return self.expr
@@ -163,16 +265,17 @@ class Term(object):
 class Rule(object):
     """Rule"""
 
-    def __init__(self, head: TERM, goals: GOALS = None):
+    def __init__(self, head: TERM, goals: GOALS = None, **kwargs):
         self.head = head
         if goals is None:
             goals = []
         self.goals = goals
+        self.props = kwargs
 
     def __repr__(self):
         if len(self.goals) == 0:
             return repr(self.head)
-        return repr(self.head) + ' \\dashv ' + '\\land'.join([repr(e) for e in self.goals])
+        return repr(self.head) + ' \\dashv ' + ',\\,'.join([repr(e) for e in self.goals])
 
 
 class Callback(object):
@@ -199,7 +302,7 @@ class Goal(object):
         self.inx = 0
 
     def repr_env(self):
-        writer = LaTexWriter(self.notation)
+        writer = LaTexWriter(self.notation, show_quotes=True)
         return "{" + ','.join([f'\'{k}\'={writer(v)}' for k, v in self.env.items()]) + "}"
 
     def __repr__(self):
@@ -211,19 +314,28 @@ class PrologModel(object):
     """PrologModel"""
 
     def __init__(self, rules: List[Rule] = None, callbacks: Dict[SYMBOL, Callable] = None):
+        self.root = Term('\\operatorname{got}(#Goal)')
+        self.eval = Term('\\operatorname{eval}(##)')
+        self.setq = Term('\\operatorname{setq}(##,##)')
         if callbacks is None:
             callbacks = {}
         self.callbacks = callbacks
-        self.rules = []
+        self.rules = {}
         self.add_default_callbacks()
         if rules is not None:
-            self.rules = self.rules + rules
+            for r in rules:
+                self.add_rule(r)
 
     def add_rule(self, rule: Rule):
-        self.rules.append(rule)
+        sym = rule.head.pred
+        rules = self.rules.get(sym)
+        if rules is None:
+            rules = []
+            self.rules[sym] = rules
+        rules.insert(0, rule)  # for FIFO order of rules resolution
 
     def add_callback(self, name: str, arity: int, cb: Callable):
-        self.rules.append(Rule(Term(f'\\operatorname{{{name}}}({",".join([f"#S{i}" for i in range(arity)])})')))
+        self.add_rule(Rule(Term(f'\\operatorname{{{name}}}({",".join([f"#S{i}" for i in range(arity)])})')))
         self.callbacks[name] = cb
 
     def clear(self):
@@ -238,7 +350,7 @@ class PrologModel(object):
         goals = []
         f2 = notation.getf(sym, Notation.GROUP)
         if f2 is not None:
-            f2 = notation.getf(f2.args[0], Notation.A_LIST)
+            f2 = notation.getf(f2.args[0], Notation.C_LIST)
             if f2 is not None:
                 for g in f2.args:
                     goals.append(Term(sym=g, notation=notation))
@@ -268,32 +380,14 @@ class PrologModel(object):
 
     def add_default_callbacks(self):
         self.add_callback('val', 1, self.callback_val)
-        self.add_callback('len', 2, self.callback_len)
+        self.add_callback('br', 1, self.callback_br)
         self.add_callback('anyf', 3, self.callback_anyf)
         self.add_callback('index', 3, self.callback_index)
-        self.add_callback('slist', 3, self.callback_slist)
-        self.add_callback('plist', 3, lambda notation, env: self.callback_list(notation, env, Notation.P_LIST))
-        self.add_callback('clist', 3, lambda notation, env: self.callback_list(notation, env, Notation.C_LIST))
 
     @staticmethod
     def callback_val(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         if '#S0' in env:
             yield env, notation
-
-    @staticmethod
-    def callback_len(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
-        if '#S0' in env:
-            sym = env['#S0']
-            f = notation.get(sym)
-            if f is not None:
-                if setvar('#S1', env, len(f.args), notation):
-                    yield env, notation
-            else:
-                length = 0
-                if sym != Notation.EMPTYSET:
-                    length = 1
-                if setvar('#S1', env, length, notation):
-                    yield env, notation
 
     @staticmethod
     def callback_anyf(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
@@ -326,53 +420,18 @@ class PrologModel(object):
                 yield env, notation
 
     @staticmethod
-    def callback_slist(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
+    def callback_br(notation: NOTATION, env: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         if '#S0' in env:
-            notation = notation.clone()
-            env = copy.deepcopy(env)
-            head = env['#S0']
-            if head != Notation.EMPTYSET:
-                f = notation.getf(expand_group(head, notation), Notation.S_LIST)
+            sym = env['#S0']
+            while True:
+                f = notation.getf(sym, Notation.QUOTE)
                 if f is not None:
-                    head = expand_group(f.args[0], notation)
-                f1 = notation.getf(head, Notation.PLUS)
-                if f1 is not None:
-                    head = expand_group(f1.args[0], notation)
-                if setvar('#S1', env, head, notation):
-                    tail = Notation.EMPTYSET
-                    if f is not None and len(f.args) > 1:
-                        tail = f.args[1:]
-                        f2 = notation.getf(tail[0], Notation.PLUS)
-                        if f2 is not None:
-                            tail[0] = expand_group(f2.args[0], notation)
-                        if len(tail) == 1:
-                            tail = tail[0]
-                        else:
-                            tail = notation.setf(Notation.S_LIST, tail)
-                    if setvar('#S2', env, tail, notation):
-                        yield env, notation
-
-    @staticmethod
-    def callback_list(notation: NOTATION, env: Dict[str, Any],
-                      listsym: SYMBOL) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
-        if '#S0' in env:
-            notation = notation.clone()
-            env = copy.deepcopy(env)
-            head = env['#S0']
-            if head != Notation.EMPTYSET:
-                f = notation.getf(expand_group(env['#S0'], notation), listsym)
-                if f is not None:
-                    head = expand_group(f.args[0], notation)
-                if setvar('#S1', env, head, notation):
-                    tail = Notation.EMPTYSET
-                    if f is not None and len(f.args) > 1:
-                        tail = f.args[1:]
-                        if len(tail) == 1:
-                            tail = tail[0]
-                        else:
-                            tail = notation.setf(listsym, tail)
-                    if setvar('#S2', env, tail, notation):
-                        yield env, notation
+                    sym = f.args[0]
+                    continue
+                break
+            f = notation.getf(sym, Notation.GROUP)
+            if f is not None and setvar('#RESULT', env, f.args[0], notation):
+                yield env, notation
 
     # Adoptaition of https://www.openbookproject.net/py4fun/prolog/prolog1.py
     # https://www.openbookproject.net/py4fun/prolog/prolog1.html
@@ -384,7 +443,7 @@ class PrologModel(object):
                exlusions: List[Rule] = None) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         global goalid
         if trace: print("\nsearch %s" % [repr(g) for g in goals])
-        rule = Rule(Term('\\operatorname{got}(#Goal)'), goals)  # Anything-just get a rule object
+        rule = Rule(self.root, goals)  # Anything-just get a rule object
         if notation is None:
             notation = Notation()
         goal = Goal(rule, notation, env=env)  # target is the single goal
@@ -393,7 +452,10 @@ class PrologModel(object):
             exlusions = []
         if trace: print("stack %s" % goal)
         iters = 0
-        while stack and iters < maxiters:
+        while stack:
+            if iters == maxiters:
+                print("Max iterations reached")
+                break
             iters += 1
             c = stack.pop()  # Next state to consider
             if trace: print("  pop %s" % c)
@@ -402,23 +464,21 @@ class PrologModel(object):
                     if trace: print("  find solution %s" % c.repr_env())
                     yield c.env, c.notation
                     continue
-                if c.rule.head.pred.name in self.callbacks:
+                elif c.rule.head.pred.name in self.callbacks:
                     for env, notation in self.callbacks[c.rule.head.pred.name](c.notation, c.env):
                         parent = copy.deepcopy(c.parent)  # Generate callback goals
-                        unify(c.rule.head, env, notation,
-                              parent.rule.goals[parent.inx], parent.env, parent.notation)
+                        unify(c.rule.head, env, notation, parent.rule.goals[parent.inx], parent.env, parent.notation)
                         parent.inx = parent.inx + 1
                         if trace: print("stack %s" % parent)
                         stack.append(parent)  # let it wait its turn
                 else:
                     parent = copy.deepcopy(c.parent)  # Otherwise resume parent goal
-                    unify(c.rule.head, c.env, c.notation,
-                          parent.rule.goals[parent.inx], parent.env, parent.notation)
+                    unify(c.rule.head, c.env, c.notation, parent.rule.goals[parent.inx], parent.env, parent.notation)
                     parent.inx = parent.inx + 1  # advance to next goal in body
                     if trace: print("stack %s" % parent)
                     stack.append(parent)  # let it wait its turn
                 continue
-            # No. more to do with this goal.
+            # No more to do with this goal.
             term = c.rule.goals[c.inx]  # What we want to solve
             if term.negated:  # negation: recursive search
                 term = Term(sym=term.sym, notation=term.notation)
@@ -428,27 +488,31 @@ class PrologModel(object):
                     if trace: print("  negation %s" % c)
                     c.inx = c.inx + 1
                     stack.append(c)
-            elif term.pred is None:  # evaluate expression
+            elif term.pred is None:  # no operator
                 if term.sym == Notation.EXCL_MARK:  # cut
                     if trace: print("  cut %s" % c)
-                    stack = [goal for goal in stack if goal.rule != c.rule]
-                    exlusions = exlusions + [c.rule]
+                    stack = [goal for goal in stack if goal.rule.head.pred != c.rule.head.pred or
+                             goal.rule.head.arity != c.rule.head.arity]
+                    # exlusions = exlusions + [c.rule]
                     c.inx = c.inx + 1
                     stack.append(c)
-                else:
-                    ans = termeval(term, c.notation, c.env)
-                    if ans:
-                        if trace: print("  eval %s" % term.expr)
-                        c.inx = c.inx + 1
-                        stack.append(c)
+                else:  # evaluate expression
+                    run(term, c.env, c.notation, c, stack, trace)
+            elif term.pred == Notation.SETQ:  # assignment
+                rule = Rule(self.setq, [Term(sym=term.args[1], notation=term.notation)])
+                child = Goal(rule, c.notation, parent=c, env=c.env)
+                if trace: print("stack %s (assignment)" % child)
+                stack.append(child)
             else:
-                for rule in self.rules:  # Walk down the rule database
-                    if rule.head.pred != term.pred or rule.head.arity != term.arity:
-                        continue
-                    if rule in exlusions:
-                        continue
-                    child = Goal(rule, c.notation, parent=c)  # A possible subgoal
-                    ans = unify(term, c.env, c.notation, rule.head, child.env, child.notation)
-                    if ans:  # if unifies, stack it up
-                        if trace: print("stack %s" % child)
-                        stack.append(child)
+                rules = self.rules.get(term.pred)
+                if rules is not None:
+                    for rule in rules:  # Walk down the rule database
+                        if rule.head.arity != term.arity:
+                            continue
+                        if rule in exlusions:
+                            continue
+                        child = Goal(rule, c.notation, parent=c)  # A possible subgoal
+                        ans = unify(term, c.env, c.notation, rule.head, child.env, child.notation)
+                        if ans:  # if unifies, stack it up
+                            if trace: print("stack %s" % child)
+                            stack.append(child)

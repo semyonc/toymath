@@ -16,6 +16,7 @@ from notation import Func, issym
 from replacer import Replacer
 from preprocessor import Preprocessor
 from value import *
+from replicator import Replicator
 
 
 def iterate(x):
@@ -204,10 +205,15 @@ class Calculator(Replacer):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (scalar, outdims)))
 
     def enter_group(self, sym, f):
+        if 'quoted' in f.props:
+            expr = Replicator(self.notation, self.output_notation)(f.args[0])
+            return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (expr,), **f.props))
         outs = self.enter_formula(f.args[0])
         if isinstance(outs, Value):
             return outs
         if f.props['br'] == '()':
+            if self.notation.get(f.args[0]) is None:
+                return f.args[0]
             f_out = self.output_notation.vgetf(outs, [Notation.P_LIST, Notation.INDEX])
             if f_out is not None:
                 ctx = self.context()
@@ -301,25 +307,56 @@ class Calculator(Replacer):
                                                  Func(Notation.MINUS, (self.subst(None, subst['x'], self.context()),)))
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (composite_expr,)))
 
+    def simplify(self, args):
+        output_args = []
+        for i, arg in enumerate(args):
+            sym = arg
+            if i != 0:
+                f = self.output_notation.getf(arg, Notation.PLUS)
+                if f is None:
+                    output_args.append(arg)
+                    continue
+                else:
+                    sym = f.args[0]
+            f = self.output_notation.getf(sym, Notation.GROUP)
+            if f is None or 'quoted' in f.props:
+                output_args.append(arg)
+                continue
+            f = self.output_notation.getf(f.args[0], Notation.S_LIST)
+            if f is None:
+                output_args.append(arg)
+                continue
+            for n, subarg in enumerate(f.args):
+                if n == 0:
+                    output_args.append(self.output_notation.setf(Notation.PLUS, (subarg,)))
+                else:
+                    output_args.append(subarg)
+        return output_args
+
     def enter_slist(self, sym, f):
         i = 0
         args = self.build_list(f, self.enter_additive_expr)
+        args = self.simplify(args)
         output_args = []
         while i < len(args):
             left = args[i]
-            factor = self.get_factor(left)
+            factor1 = self.get_factor(left)
             expr1 = self.get_expr(left)
             j = i + 1
-            k = factor
+            k = factor1
             while j < len(args):
                 right = args[j]
+                factor2 = self.get_factor(right)
+                if equal_value(factor2, 0):
+                    del args[j]
+                    continue
                 expr2 = self.get_expr(right)
                 if comparer.s_equal(expr1, self.output_notation, expr2, self.output_notation, ctx=Notation.S_LIST):
-                    k = addition(k, self.get_factor(right))
+                    k = addition(k, factor2)
                     del args[j]
                 else:
                     j = j + 1
-            if equal_value(factor, k):
+            if equal_value(factor1, k):
                 output_args.append(left)
             elif not equal_value(k, 0):
                 negative = less_value(k, 0)
@@ -340,11 +377,10 @@ class Calculator(Replacer):
 class MathProcessor(object):
     """MathProcessor"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, model=None, **kwargs):
         self.trace = None
         self.actions = register_actions()
-        from prolog import PrologModel
-        self.prologModel = PrologModel()
+        self.prologModel = model
 
     # create True in Notation
     @staticmethod
@@ -359,9 +395,10 @@ class MathProcessor(object):
         sym = preprocessor(sym)
         notation = output_notation
         output_notation = Notation()
-        parse_res = self.prologModel.parse_and_add_rule(sym, notation)
-        if parse_res is not None:
-            return parse_res, notation
+        if self.prologModel is not None:
+            parse_res = self.prologModel.parse_and_add_rule(sym, notation)
+            if parse_res is not None:
+                return parse_res, notation
         index = 1
         while True:
             calculator = Calculator(notation, output_notation, self.actions, self.prologModel)

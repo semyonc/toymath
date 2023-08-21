@@ -42,11 +42,12 @@ class LaTexWriter(object):
 
     """ LaTexWriter """
 
-    def __init__(self, notation, *kwargs):
+    def __init__(self, notation, show_quotes=False, *kwargs):
         self.output = StringIO()
         self.notation = notation
         self.last_value = ""
         self.head = None
+        self.show_quotes = show_quotes
 
     def __repr__(self):
         return self.output.getvalue()
@@ -225,6 +226,8 @@ class LaTexWriter(object):
                 self.write_term(sym)
 
     def write_symbol(self, sym):
+        if self.show_quotes and 'quoted' in sym.props:
+            self.writeString('`')
         if sym.name.startswith('#'):
             self.writeString("\\#\\text{" + sym.name[1:] + "}")
         elif sym.name.startswith('_'):
@@ -344,7 +347,7 @@ class LaTexWriter(object):
         if f.props.get('fmt', '') == 'unary' and (
                 f1 is None or f1.sym not in [Notation.S_LIST, Notation.C_LIST, Notation.GROUP,
                                              Notation.FUNC, Notation.PLUS, Notation.MINUS]):
-            self.write_expr(f.args[1])
+            self.write_formula(f.args[1])
         elif f.props.get('fmt', '') == 'oper' and (f1 is None or f1.sym not in [Notation.S_LIST, Notation.C_LIST,
                                                                                 Notation.PLUS, Notation.MINUS]):
             self.writeString('{')
@@ -388,7 +391,7 @@ class LaTexWriter(object):
 
     def write_backref(self, f):
         self.writeString('[[')
-        self.write_raw_term(f.args[0])
+        self.write_subformula(f.args[0])
         self.writeString(']]')
 
     def write_above(self, f):
@@ -445,9 +448,16 @@ class LaTexWriter(object):
 
     def write_group(self, f):
         br = f.props['br']
+        if self.show_quotes:
+            if 'quoted' in f.props:
+                self.writeString('`')
+            if br == '{}':
+                self.writeString('\\{')
         self.writeString(br[0])
         self.write_formula(f.args[0])
         self.writeString(br[1])
+        if self.show_quotes and br == '{}':
+            self.writeString('\\}')
 
     def write_vgroup(self, f):
         br = f.props['br']
