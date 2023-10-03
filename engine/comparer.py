@@ -296,7 +296,7 @@ class UnifyComparer(NotationComparer):
                     value2 = None
             if value1 is not None and value2 is not None:
                 if value1 != value2:
-                    if not self.compare(value1, notation1, subst1, value2, notation2, subst2, ctx):
+                    if not self.compare(value1, notation1, None, value2, notation2, None, ctx):
                         return False
             if var1:
                 if sym1.name != "##" and value2 is not None:

@@ -109,6 +109,8 @@ class TestScenario(TestCase):
 
     def test_unify4(self):
         self.assertUnify("x + y + z", {}, "x + ... + #X", {'#X': ['y', 'z']})
+        self.assertUnify("-x - y - z", {}, "x + ... + #X", {'x': '-x', "#X": ["-y", "-z"]})
+        self.assertUnify("x - y + z", {}, "x + ... + #X", {"#X": ["-y", "z"]})
 
     def test_unify5(self):
         self.assertUnify("xyz", {}, "x...#X", {'#X': ['y', 'z']})
@@ -258,7 +260,7 @@ class TestScenario(TestCase):
             Rule(Term("\\operatorname{test}(xy, x, y)"), [Term("\\val(x)"), Term("\\br(y)")])
         ])
         results = []
-        for s, n in m.search([Term("\\operatorname{test}(`{x(y)}, #X, #Y)")], trace=True):
+        for s, n in m.search([Term("\\operatorname{test}(`{x(y)}, #X, #Y)")]):
             writer = LaTexWriter(n)
             results.append(writer(s['#X']) + writer(s['#Y']))
         self.assertTrue(len(results) == 1 and results[0] == 'x(y)')

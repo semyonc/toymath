@@ -36,17 +36,24 @@ def replicate(notation: NOTATION, output_notation: NOTATION, subst2: Dict[str, A
 
 
 def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
-          term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION) -> bool:
-
+          term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION,
+          backprop: bool = True) -> bool:
     notation = input_notation.concate(term1.notation)
-    comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
     if term2.pred is not None:
         if term1.pred != term2.pred or term1.arity != term2.arity:
             return False
-        if not comparer.unify(term2.sym, term2.notation, subst2):
-            return False
+        if not backprop:
+            comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
+            if not comparer.unify(term2.sym, term2.notation, subst2):
+                return False
+        else:
+            for s1, s2 in zip(term1.args, term2.args):
+                comparer = UnifyComparer(s1, notation, copy.deepcopy(subst1))
+                if not comparer.unify(s2, term2.notation, subst2):
+                    return False
 
     if Notation.RESULT.name in subst1:
+        comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
         if term2.pred == Notation.SETQ:  # setq: assign result
             if not comparer.equal(Notation.RESULT, notation, subst1, term2.args[0],
                                   term2.notation, subst2, ctx=None):
@@ -467,13 +474,15 @@ class PrologModel(object):
                 elif c.rule.head.pred.name in self.callbacks:
                     for env, notation in self.callbacks[c.rule.head.pred.name](c.notation, c.env):
                         parent = copy.deepcopy(c.parent)  # Generate callback goals
-                        unify(c.rule.head, env, notation, parent.rule.goals[parent.inx], parent.env, parent.notation)
+                        unify(c.rule.head, env, notation, parent.rule.goals[parent.inx],
+                              parent.env, parent.notation)
                         parent.inx = parent.inx + 1
                         if trace: print("stack %s" % parent)
                         stack.append(parent)  # let it wait its turn
                 else:
                     parent = copy.deepcopy(c.parent)  # Otherwise resume parent goal
-                    unify(c.rule.head, c.env, c.notation, parent.rule.goals[parent.inx], parent.env, parent.notation)
+                    unify(c.rule.head, c.env, c.notation, parent.rule.goals[parent.inx],
+                          parent.env, parent.notation, backprop=True)
                     parent.inx = parent.inx + 1  # advance to next goal in body
                     if trace: print("stack %s" % parent)
                     stack.append(parent)  # let it wait its turn
@@ -481,9 +490,11 @@ class PrologModel(object):
             # No more to do with this goal.
             term = c.rule.goals[c.inx]  # What we want to solve
             if term.negated:  # negation: recursive search
-                term = Term(sym=term.sym, notation=term.notation)
-                notation = c.notation.concate(term.notation)
-                ans = not any(self.search([term], notation, trace, maxiters - iters, c.env, exlusions + [c.rule]))
+                output_notation = Notation()
+                replacer = SymbolReplacer(term.notation, output_notation, c.notation, c.env)
+                term = Term(sym=replacer(term.sym), notation=output_notation)
+                ans = not any(self.search([term],
+                                          output_notation, trace, maxiters - iters, c.env, exlusions + [c.rule]))
                 if ans:
                     if trace: print("  negation %s" % c)
                     c.inx = c.inx + 1
