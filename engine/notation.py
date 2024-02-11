@@ -134,6 +134,7 @@ class Notation(object):
     QUOTE = Symbol('quote')
     RESULT = Symbol('#RESULT')
     SETQ = Symbol('setq')
+    CMD = Symbol('[cmd]')
 
     comparer = (
         '=',
@@ -303,3 +304,4 @@ class Notation(object):
                 res += "\n"
             res += f'{sym.__repr__()}: {self.rel[sym]}'
         return res
+        

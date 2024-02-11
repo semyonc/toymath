@@ -21,7 +21,7 @@ class ExecuteGoal(object):
     arity = 1
 
     def exec(self, processor, _, f):
-        maxiters = 100
+        maxiters = 10000
         if f.args[0] is not None:
             if not isinstance(f.args[0], IntegerValue):
                 raise AttributeError(f'The goal attribute can be only integer')

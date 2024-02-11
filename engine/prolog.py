@@ -4,6 +4,7 @@ from typing import Union, Tuple, List, TypeVar, Any, Dict, Iterator, Callable
 
 from engine.LatexWriter import LaTexWriter
 from engine.LatexParser import MathParser
+from engine.helpers import trace_notation
 from engine.processor import MathProcessor
 from engine.replicator import Replicator
 from notation import Notation, NOTATION, Symbol, SYMBOL, Func
@@ -37,20 +38,20 @@ def replicate(notation: NOTATION, output_notation: NOTATION, subst2: Dict[str, A
 
 def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
           term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION,
-          backprop: bool = True) -> bool:
+          backprop: bool = False) -> bool:
     notation = input_notation.concate(term1.notation)
     if term2.pred is not None:
         if term1.pred != term2.pred or term1.arity != term2.arity:
             return False
         if not backprop:
-            comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
-            if not comparer.unify(term2.sym, term2.notation, subst2):
+            comparer = UnifyComparer(term2.sym, term2.notation, subst2)
+            if not comparer.unify(term1.sym, notation, copy.deepcopy(subst1)):
                 return False
         else:
             for s1, s2 in zip(term1.args, term2.args):
-                comparer = UnifyComparer(s1, notation, copy.deepcopy(subst1))
-                if not comparer.unify(s2, term2.notation, subst2):
-                    return False
+                comparer = UnifyComparer(s2, term2.notation, subst2)
+                comparer.unify(s1, notation, copy.deepcopy(subst1))
+            replicate(term2.notation, output_notation, subst2)
 
     if Notation.RESULT.name in subst1:
         comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
@@ -82,9 +83,9 @@ def transform(t_sym: SYMBOL, t_notation: NOTATION, parent: GOAL, targets: List[S
         placeholders.append(subst)
         output_notation.repf(oper, Func(Notation.GROUP, (subst,), br='()'))
     goals = []
+    processor = MathProcessor()
     for n, oper in enumerate(targets):
-        notation = Notation()
-        Replicator(t_notation, notation)(oper)
+        oper, notation = processor(oper, t_notation, {}, {})
         c_list = notation.setf(Notation.C_LIST, (placeholders[n], oper))
         setq = notation.setf(Notation.FUNC, (Notation.SETQ, c_list), fmt='operatorname')
         term = Term(sym=setq, notation=notation)
@@ -112,19 +113,21 @@ def run(term: TERM, env, notation: NOTATION, parent: GOAL, stack, trace) -> None
                 parent.inx = parent.inx + 1
                 stack.append(parent)
     else:  # evaluating
-        processor = MathProcessor()
-        outsym, output_notation2 = processor(replacer(term.sym), output_notation, {}, {})
-        walker = OperatorWalker(output_notation2)
+        outsym = replacer(term.sym)
+        walker = OperatorWalker(output_notation)
         targets = walker.resolve(outsym)
         if not targets:  # expression has no operators
-            comparer = UnifyComparer(Notation.RESULT, output_notation, env)
-            if comparer.equal(Notation.RESULT, output_notation, env, outsym, output_notation2, None):
+            if trace: print("  process %s" % LaTexWriter(output_notation)(outsym))
+            processor = MathProcessor()
+            outsym, output_notation2 = processor(outsym, output_notation, {}, {})
+            comparer = UnifyComparer(Notation.RESULT, notation, env)
+            if comparer.equal(Notation.RESULT, notation, env, outsym, output_notation2, None):
                 replicate(output_notation2, notation, env)
                 if trace: print("  eval %s" % term.expr)
                 parent.inx = parent.inx + 1
                 stack.append(parent)
         else:  # expression has operators: create subgoals and reevaluate
-            rule = transform(outsym, output_notation2, parent, targets)
+            rule = transform(outsym, output_notation, parent, targets)
             child = Goal(rule, parent.notation, parent=parent)
             if trace: print("  stack %s" % child)
             stack.append(child)
@@ -445,7 +448,7 @@ class PrologModel(object):
     def search(self,
                goals: List[Term], notation: NOTATION = None,
                trace: bool = False,
-               maxiters: int = 100,
+               maxiters: int = 1000,
                env: Dict[str, Any] = None,
                exlusions: List[Rule] = None) -> Iterator[Tuple[Dict[str, Any], NOTATION]]:
         global goalid
@@ -475,7 +478,7 @@ class PrologModel(object):
                     for env, notation in self.callbacks[c.rule.head.pred.name](c.notation, c.env):
                         parent = copy.deepcopy(c.parent)  # Generate callback goals
                         unify(c.rule.head, env, notation, parent.rule.goals[parent.inx],
-                              parent.env, parent.notation)
+                              parent.env, parent.notation, backprop=True)
                         parent.inx = parent.inx + 1
                         if trace: print("stack %s" % parent)
                         stack.append(parent)  # let it wait its turn

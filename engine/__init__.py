@@ -17,7 +17,6 @@ def setShell(shell):
     global math_shell
     math_shell = shell
 
-
 def display(*objs, **kwargs):
     handler(*objs, **kwargs)
 

@@ -262,6 +262,8 @@ class Replicator(object):
             with self._enter(sym, f):
                 return self.enter_prime(sym, f)
         else:
+            if self.notation.get(sym) is not None:
+                return self.enter_formula(sym)
             return self.enter_raw_term(sym)
 
     # noinspection PyMethodMayBeStatic
@@ -294,7 +296,7 @@ class Replicator(object):
         if comma_list is not None:
             comma_list = self.enter_comma_list(comma_list)
         return self.output_notation.repf(self.mapsym(sym),
-                                         Func(f.sym, (comma_list, tuple(self.enter_or_expr_list(arg) for arg in f.args[1]))))
+                                         Func(f.sym, (comma_list, tuple(self.enter_or_expr_list(arg) for arg in f.args[1])), **f.props))
 
     def enter_prime(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym), Func(Notation.PRIME, (self.enter_term(f.args[0]),)))

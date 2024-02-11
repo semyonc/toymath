@@ -322,7 +322,7 @@ class UnifyComparer(NotationComparer):
                 continue
             if match == 2:
                 tail.append(a[i])
-            elif not self.compare(a[i], notation1, subst1, y, notation2, subst2, ctx):
+            elif not self.compare(a[i], notation1, None, y, notation2, subst2, ctx):
                 return False
             i += 1
             if match > 0:
@@ -331,7 +331,19 @@ class UnifyComparer(NotationComparer):
             else:
                 j += 1
         if match == 2:
-            if not self.compare(tail, notation1, subst1, b[j], notation2, subst2, ctx):
+            if ctx == Notation.S_LIST:
+                f = notation1.getf(tail[0], Notation.PLUS)
+                if f is not None and f.sym == Notation.PLUS:
+                    tail[0] = f.args[0]
+            if len(tail) == 1:
+                x = tail[0]
+            else:
+                x = notation1.setf(ctx, tail)
+            y = b[j]
+            f = notation2.getf(y, Notation.PLUS)
+            if f is not None and f.sym == Notation.PLUS:
+                y = f.args[0]
+            if not self.compare(x, notation1, None, y, notation2, subst2, ctx):
                 return False
         return i == len(a) and j == len(b) - 1
 

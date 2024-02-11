@@ -27,23 +27,23 @@ class MathParser(object):
 
      def p_formula_command_0(self, p):
          'formula : COMMAND'
-         p[0] = self.notation.setf(Symbol(p[1]), (None,()))
+         p[0] = self.notation.setf(Symbol(p[1], command=True), (None,()))
 
      def p_formula_command_1(self, p):
          'formula : COMMAND logical-expr'
-         p[0] = self.notation.setf(Symbol(p[1]), (None,(p[2],)))
+         p[0] = self.notation.setf(Symbol(p[1], command=True), (None,(p[2],)))
 
      def p_formula_command_1_param(self, p):
          '''formula : COMMAND '[' comma-list ']' logical-expr'''
-         p[0] = self.notation.setf(Symbol(p[1]), (p[3],(p[5],)))
+         p[0] = self.notation.setf(Symbol(p[1], command=True), (p[3],(p[5],)))
 
      def p_formula_command_2(self, p):
          'formula : COMMAND logical-expr Box logical-expr'
-         p[0] = self.notation.setf(Symbol(p[1]), (None,(p[2],p[4])))
+         p[0] = self.notation.setf(Symbol(p[1], command=True), (None,(p[2],p[4])))
 
      def p_formula_command_2_param(self, p):
          '''formula : COMMAND '[' comma-list ']' subformula Box subformula'''
-         p[0] = self.notation.setf(Symbol(p[1]), (p[3],(p[5],p[7],)))
+         p[0] = self.notation.setf(Symbol(p[1], command=True), (p[3],(p[5],p[7],)))
 
      def p_formula_above(self, p):
           'formula : subformula above DIMEN subformula'

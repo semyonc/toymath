@@ -82,8 +82,12 @@ class LaTexWriter(object):
                 self.write_or_expr_list(f.args[1][0])
             else:
                 self.writeString('\\mathop{')
+                if 'negative' in f.props:
+                    self.writeString('\\overline{')
                 self.writeString(f.sym.name)
                 self.writeString('}')
+                if 'negative' in f.props:
+                    self.writeString('}')
                 if f.args[0] is not None:
                     self.writeString('\\limits_{')
                     self.write_comma_list(f.args[0])
@@ -262,7 +266,12 @@ class LaTexWriter(object):
             self.write_prime(f)
         else:
             if isinstance(sym, Symbol):
-                self.write_symbol(sym)
+                if self.notation.get(sym) is not None:
+                    self.writeString('{')
+                    self.write_formula(sym)
+                    self.writeString('}')
+                else:
+                    self.write_symbol(sym)
             else:
                 self.write_raw_term(sym)
 
