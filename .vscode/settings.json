@@ -1,4 +1,9 @@
 {
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportInvalidTypeForm": "none",
+        "reportUndefinedVariable": "none"
+    },
+    "terminal.integrated.defaultProfile.osx": "zsh",
     "python.testing.unittestArgs": [
         "-v",
         "-s",

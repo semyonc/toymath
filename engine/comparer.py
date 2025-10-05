@@ -87,10 +87,10 @@ def isVariable(sym):
             and 'quoted' not in sym.props)
 
 
-def unquote(sym, notation, subst):
+def unquote(sym, notation, subst, br=['{}']):
     while True:
         f = notation.getf(sym, Notation.GROUP)
-        if f is not None and f.props['br'] == '{}':
+        if f is not None and f.props['br'] in br:
             if 'quoted' in f.props:
                 subst = None
             sym = f.args[0]

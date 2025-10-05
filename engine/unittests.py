@@ -3,7 +3,7 @@ from comparer import *
 from processor import MathProcessor
 from preprocessor import Preprocessor
 from prolog import PrologModel, Rule, Term
-
+from llm_comparer import LLMComparer
 
 def execute_compare(expr1, expr2, params):
     notation1 = Notation()
@@ -79,7 +79,6 @@ def execute_unify(expr1, expr2, results1, results2):
             results2
         )
     return False
-
 
 class TestScenario(unittest.TestCase):
     def assertCompare(self, expr1, expr2, params=[]):

@@ -9,8 +9,10 @@ from engine.processor import MathProcessor
 from engine.replicator import Replicator
 from notation import Notation, NOTATION, Symbol, SYMBOL, Func
 from preprocessor import Preprocessor
-from comparer import UnifyComparer, isVariable, expand_group
+from comparer import UnifyComparer, isVariable
 from replacer import Replacer
+from llm_comparer import LLMComparer
+from engine.utils import PrologReplicator, SymbolReplacer
 
 RULE = TypeVar('RULE', bound='Rule')
 TERM = TypeVar('TERM', bound='Term')
@@ -35,6 +37,18 @@ def replicate(notation: NOTATION, output_notation: NOTATION, subst2: Dict[str, A
         if notation.get(value) is not None and output_notation.get(value) is None:
             subst2[key] = PrologReplicator(notation, output_notation)(value)
 
+# def unify_operator(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
+#                    term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION) -> bool:
+#     notation = input_notation.concate(term1.notation)
+#     if len(subst1) > 0:
+#         temp_notation = Notation()
+#         PrologReplacer(notation, temp_notation, subst1)(term1.sym)
+#         notation = temp_notation
+#     for s1, s2 in zip(term1.args, term2.args):
+#         if is_llm_unify(s1, notation, s2, term2.notation):
+#             llm_comparer = LLMComparer(s2, term2.notation, subst2)
+#     return False 
+
 
 def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
           term2: TERM, subst2: Dict[str, Any], output_notation: NOTATION,
@@ -43,15 +57,20 @@ def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
     if term2.pred is not None:
         if term1.pred != term2.pred or term1.arity != term2.arity:
             return False
-        if not backprop:
-            comparer = UnifyComparer(term2.sym, term2.notation, subst2)
-            if not comparer.unify(term1.sym, notation, copy.deepcopy(subst1)):
-                return False
-        else:
-            for s1, s2 in zip(term1.args, term2.args):
+        for s1, s2 in zip(term1.args, term2.args):
+            if not backprop:
+                f = term2.notation.getf(s2, Notation.FUNC)
+                if f is not None and f.props.get('fmt', '') == 'operatorname' and\
+                    f.args[0].name == 'llm':
+                    comparer = LLMComparer(f.args[1], term2.notation, subst2)
+                else:
+                    comparer = UnifyComparer(s2, term2.notation, subst2)
+                if not comparer.unify(s1, notation, copy.deepcopy(subst1)):
+                    return False
+            else:
                 comparer = UnifyComparer(s2, term2.notation, subst2)
                 comparer.unify(s1, notation, copy.deepcopy(subst1))
-            replicate(term2.notation, output_notation, subst2)
+                replicate(term2.notation, output_notation, subst2)
 
     if Notation.RESULT.name in subst1:
         comparer = UnifyComparer(term1.sym, notation, copy.deepcopy(subst1))
@@ -133,14 +152,6 @@ def run(term: TERM, env, notation: NOTATION, parent: GOAL, stack, trace) -> None
             stack.append(child)
 
 
-class PrologReplicator(Replicator):
-    def __init__(self, notation: NOTATION, output_notation: NOTATION):
-        super().__init__(notation, output_notation)
-
-    def mapsym(self, sym):
-        return Symbol()
-
-
 class SymbolWalker(Replicator):
     """SymbolWalker"""
 
@@ -156,24 +167,6 @@ class SymbolWalker(Replicator):
     def enter_symbol(self, sym):
         if isVariable(sym) and sym.name != "##" and sym not in self.variables:
             self.variables.append(sym.name)
-        return super().enter_symbol(sym)
-
-
-class SymbolReplacer(Replacer):
-    """SymbolReplacer"""
-
-    def __init__(self, notation: NOTATION, output_notation: NOTATION,
-                 outer_notation: NOTATION, mapping: Dict[str, Any]):
-        super().__init__(notation, output_notation)
-        self.outer_notation = outer_notation
-        self.mapping = mapping
-
-    def enter_symbol(self, sym):
-        if isVariable(sym) and sym.name in self.mapping:
-            replacer = self.mapping[sym.name]
-            if isinstance(replacer, Symbol) and self.output_notation.get(replacer) is None:
-                replacer = Replicator(self.outer_notation, self.output_notation)(replacer)
-            return self.subst(sym, replacer, self.context())
         return super().enter_symbol(sym)
 
 

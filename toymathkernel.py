@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+
+# from engine.helpers import attach_debugger
+# attach_debugger()
+
 import sys
 import logging
 import base64
@@ -27,6 +31,8 @@ except:
     RED = TermColors.Red
     NORMAL = TermColors.Normal
 
+from dotenv import load_dotenv
+load_dotenv()
 
 class MathKernel(Kernel):
     implementation = "toymath"

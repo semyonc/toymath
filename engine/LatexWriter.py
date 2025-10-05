@@ -223,6 +223,7 @@ class LaTexWriter(object):
                 elif f.sym.name in Notation.oper:
                     self.writeString(f.sym.name)
                     for expr in f.args:
+                        self.writeString(' ')
                         self.write_expr(expr)
                 else:
                     self.write_scalar(sym)
@@ -461,12 +462,12 @@ class LaTexWriter(object):
             if 'quoted' in f.props:
                 self.writeString('`')
             if br == '{}':
-                self.writeString('\\{')
+                self.writeString('{')
         self.writeString(br[0])
         self.write_formula(f.args[0])
         self.writeString(br[1])
         if self.show_quotes and br == '{}':
-            self.writeString('\\}')
+            self.writeString('}')
 
     def write_vgroup(self, f):
         br = f.props['br']

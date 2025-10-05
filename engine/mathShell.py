@@ -9,7 +9,6 @@ from prolog import PrologModel
 from IPython.display import HTML, Javascript
 from engine import display
 
-
 def split_lines(self, code):
     bracket = 0
     buffer = ''
