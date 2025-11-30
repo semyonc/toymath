@@ -25,11 +25,16 @@ try:
 
     RED = NeutralColors.colors["header"]
     NORMAL = NeutralColors.colors["normal"]
-except:
-    from IPython.core.excolors import TermColors
+except (ImportError, AttributeError):
+    try:
+        from IPython.core.excolors import TermColors
 
-    RED = TermColors.Red
-    NORMAL = TermColors.Normal
+        RED = TermColors.Red
+        NORMAL = TermColors.Normal
+    except (ImportError, AttributeError):
+        # Fallback for newer IPython versions
+        RED = "\033[91m"
+        NORMAL = "\033[0m"
 
 from dotenv import load_dotenv
 load_dotenv()

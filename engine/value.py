@@ -201,9 +201,16 @@ class FracValue(Value):
     typeKey = 3
 
     def __init__(self, num, denom):
-        gcd = math.gcd(num, denom)
-        self.num = int(num / gcd)
-        self.denom = int(denom / gcd)
+        # Handle special cases
+        if denom == 0:
+            # Division by zero or indeterminate form (0/0)
+            # Store without reduction to preserve the structure
+            self.num = num
+            self.denom = denom
+        else:
+            gcd = math.gcd(num, denom)
+            self.num = int(num / gcd)
+            self.denom = int(denom / gcd)
 
     def get_int(self):
         return IntegerValue(int(math.trunc(self.num / self.denom)))
@@ -276,6 +283,11 @@ class FracValue(Value):
         else:
             num = self.num * other.denom
             denom = self.denom * other.num
+
+        # Check for division by zero or indeterminate forms
+        if denom == 0:
+            return None  # Cannot compute: division by zero or 0/0
+
         return FracValue(num, denom)
 
     def power(self, n):
