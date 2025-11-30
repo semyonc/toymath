@@ -224,6 +224,116 @@ The system uses Prolog-like unification for pattern matching. See `prolog.py`:
 - `PrologModel.unify()` performs unification with substitutions
 - Goals can include callbacks for dynamic behavior
 
+### Fraction Operations
+
+ToyMath handles fraction operations through a **dual-path system** that processes numeric and symbolic fractions differently:
+
+#### Numeric Fractions (e.g., `\frac{1}{2}`, `\frac{2}{3}`)
+
+**Processing Path:**
+1. **Parsing** → `LatexParser` creates `Symbol` with `\frac` structure
+2. **Preprocessing** → `Preprocessor.enter_oper()` (preprocessor.py:43-46) converts to `FracValue`
+   - Only for fractions where both numerator and denominator are `IntegerValue`
+   - Example: `\frac{1}{2}` → `FracValue(1, 2)`
+3. **Arithmetic** → `FracValue` class (value.py:198-295) handles operations:
+   - `FracValue.add()` (lines 260-264): Fraction addition using cross-multiplication
+   - `FracValue.mul()` (lines 272-274): Fraction multiplication
+   - Auto-reduces via GCD in constructor (lines 211-213)
+4. **Output** → `LaTexWriter` renders `FracValue` back as `\frac{num}{denom}` LaTeX
+
+**Key Properties:**
+- `FracValue` objects are NOT recognized by `is_frac()` from `frac_utils.py`
+- Arithmetic operations return new `FracValue` objects
+- GCD reduction happens automatically during construction
+- Numeric fractions are fully evaluated during preprocessing/processing
+
+#### Symbolic Fractions (e.g., `\frac{a}{b}`, `\frac{x}{y}`)
+
+**Processing Path:**
+1. **Parsing** → Remain as `Symbol` objects with `\frac` structure
+2. **Preprocessing** → No conversion (stay as symbols)
+3. **Operations** → Handled by `cmd_add.py` and `cmd_mul.py`:
+   - **Multiplication Rules (cmd_mul.py:80-161)**:
+     - Rule 2: `\frac{x1}{y1} · \frac{x2}{y2}` → nested `\mul!` commands
+     - Rule 3: `a · \frac{x}{y}` → numerator multiplication
+     - Rule 4: `\frac{x}{y} · (sum)` → numerator multiplication
+   - **Addition Rules (cmd_add.py:86-214)**:
+     - Rule 1: `\frac{x1}{y1} + \frac{x2}{y2}` → cross-multiplication with nested `\add!`/`\mul!`
+     - Rule 5: `a + \frac{x}{y}` → common denominator with nested commands
+4. **Fixed-Point Iteration** → Nested commands expand over multiple iterations
+5. **Output** → Final symbolic fraction expression
+
+**Key Properties:**
+- Detected by `is_frac()` which checks `f.sym.name in FRAC_SYMBOL_NAMES`
+- Generate nested `\add!`/`\mul!` commands that evaluate in subsequent iterations
+- Do NOT auto-reduce (symbolic expressions remain expanded)
+- Follow monotonic/idempotent rules for convergence
+
+#### Shared Utilities (`frac_utils.py`)
+
+**Module Purpose:** Common fraction detection and manipulation for symbolic fractions
+
+**Key Functions:**
+- `FRAC_SYMBOL_NAMES`: Set of all fraction operator names (`\frac`, `\dfrac`, `\tfrac`, `\cfrac`)
+- `is_frac(notation, sym)`: Detects if symbol is a fraction operator
+  - **IMPORTANT**: Returns `False` for `FracValue` objects (numeric fractions)
+  - Only recognizes `Symbol` objects with fraction operator names
+- `get_numerator(notation, sym)`: Extracts numerator, unwrapping GROUP
+- `get_denominator(notation, sym)`: Extracts denominator, unwrapping GROUP
+- `normalize_frac(notation, num, denom, chainexpr_fn, mul_symbol)`: Creates canonical fraction
+  - Identity simplification: `\frac{x}{1}` → `x`
+  - Sign normalization: Negative always in numerator
+  - Nested fraction flattening: `\frac{\frac{a}{b}}{c}` → `\frac{a}{\mul!{bc}}`
+  - Always uses `\frac` (canonical style)
+
+#### Mixed Expressions
+
+**Numeric Fraction × Variable** (e.g., `\frac{2}{3}x`):
+- Preprocessor converts `\frac{2}{3}` → `FracValue(2, 3)`
+- Parser creates P_LIST: `[FracValue(2,3), Symbol('x')]`
+- Works correctly in sums: `\frac{2}{3}x + \frac{1}{5}x` → `\frac{13}{15}x`
+
+**Parsing Syntax Important Notes:**
+- `\frac 2 3 x` (spaces, no braces) → `(\frac{2}{3}) * x` ✓ CORRECT
+- `\frac{2}{3}x` (braces, no space) → Can parse as `\frac{2}{3x}` ✗ AMBIGUOUS
+- Always use spaces between fraction and variables for clarity
+
+#### Implementation Files
+
+**Fraction Multiplication (Rules 2-4):**
+- `engine/cmd_mul.py`: `multiply_fractions()` method (lines 80-161)
+- Handles: frac×frac, scalar×frac, frac×sum
+
+**Fraction Addition (Rules 1, 5):**
+- `engine/cmd_add.py`: `add_fractions()` method (lines 86-214)
+- Handles: frac+frac, scalar+frac
+- Processes terms pairwise in S_LIST
+
+**Shared Utilities:**
+- `engine/frac_utils.py`: Detection, extraction, normalization functions
+
+**Value Arithmetic:**
+- `engine/value.py`: `FracValue` class with arithmetic operations
+
+**Preprocessing:**
+- `engine/preprocessor.py`: Numeric fraction → FracValue conversion (lines 43-46)
+
+#### Testing Fraction Operations
+
+```python
+# Test numeric fractions (auto-evaluated)
+"\frac 1 2 + \frac 1 3"  # → \frac{5}{6}
+
+# Test symbolic fractions (symbolic manipulation)
+"\frac a b + \frac c d"  # → \frac{\add!{\mul!{ad} + \mul!{bc}}}{\mul!{bd}}
+
+# Test mixed (numeric frac with variable)
+"\frac 2 3 x + \frac 1 5 x"  # → \frac{13}{15}x
+
+# Run fraction tests
+pytest engine/unittests.py::TestScenario::test_frac1
+```
+
 ## File Organization
 
 - `engine/`: Core math processing engine

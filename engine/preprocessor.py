@@ -78,7 +78,10 @@ class Preprocessor(Replacer):
         i = 0
         while i < len(plist):
             if i < len(plist) - 1:
-                if isinstance(plist[i], IntegerValue) and isinstance(plist[i + 1], FracValue):
+                ctx = self.context()
+                in_command_ctx = isinstance(ctx, Symbol) and ctx.name.endswith('!')
+                # Mixed-number shorthand (e.g., 2 1/3) should not fire inside commands like mul!/add!
+                if (not in_command_ctx) and isinstance(plist[i], IntegerValue) and isinstance(plist[i + 1], FracValue):
                     res.append(addition(plist[i].get_frac(), plist[i + 1]))
                     i += 2
                     continue

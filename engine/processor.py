@@ -18,6 +18,7 @@ from preprocessor import Preprocessor
 from value import *
 from replicator import Replicator
 from helpers import trace_notation
+from frac_utils import FRAC_SYMBOL_NAMES, normalize_frac
  
 
 def iterate(x):
@@ -229,6 +230,41 @@ class Calculator(Replacer):
                 )
         return super(Calculator, self).enter_formula(sym)
 
+    def enter_oper(self, sym, f):
+        args = [self.enter_expr(expr) for expr in f.args]
+        if f.sym.name in FRAC_SYMBOL_NAMES:
+            if all(isinstance(arg, Value) for arg in args):
+                if all(isinstance(arg, IntegerValue) for arg in args):
+                    return division(args[0].get_frac(), args[1].get_frac())
+                return division(args[0], args[1])
+
+            from cmd_mul import chainexpr, Mul  # local import to avoid cycles
+            def unwrap_group(val):
+                g = self.output_notation.getf(val, Notation.GROUP)
+                if g is not None and g.props.get("br") == "{}":
+                    return unwrap_group(g.args[0])
+                return val
+
+            num = unwrap_group(args[0])
+            den = unwrap_group(args[1])
+
+            # Flatten nested fraction in numerator: (a/b)/c -> a/(bc)
+            num_frac = self.output_notation.getf(num, Notation.FUNC)
+            if (
+                num_frac is not None
+                and isinstance(num_frac.sym, Symbol)
+                and num_frac.sym.name in FRAC_SYMBOL_NAMES
+            ):
+                num_inner = num_frac.args[0]
+                den_plist = self.output_notation.setf(
+                    Notation.P_LIST, (num_frac.args[1], den)
+                )
+                den = chainexpr(Mul.MUL, self.output_notation, den_plist, None)
+                num = num_inner
+
+            return normalize_frac(self.output_notation, num, den, chainexpr, Mul.MUL)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, tuple(args)))
+
     def enter_index(self, sym, f):
         outdims = self.enter_dims(f)
         scalar = self.enter_scalar(f.args[0])
@@ -277,6 +313,17 @@ class Calculator(Replacer):
         return self.output_notation.repf(
             self.mapsym(sym), Func(f.sym, (outs,), **f.props)
         )
+
+    def enter_raw_term(self, t):
+        """
+        Normalize FracValue with denominator 1 to IntegerValue.
+
+        This handles cases like 3/1 → 3, ensuring fractions with
+        denominator 1 are simplified to integers.
+        """
+        if isinstance(t, FracValue) and t.denom == 1:
+            return IntegerValue(t.num)
+        return t
 
     def enter_plist(self, sym, f):
         args = self.build_list(f, self.enter_expr)
