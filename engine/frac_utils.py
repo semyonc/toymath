@@ -124,6 +124,26 @@ def normalize_frac(notation, numerator_sym, denominator_sym, chainexpr_fn=None, 
     if g is not None and g.props.get("br") == "{}":
         denominator_sym = g.args[0]
 
+    # Cancel common scalar when numerator and denominator are pure values
+    if isinstance(numerator_sym, Value) and isinstance(denominator_sym, Value):
+        div_res = division(numerator_sym, denominator_sym)
+        if div_res is not None:
+            if isinstance(div_res, FracValue):
+                sign_negative = div_res.num < 0
+                num_val = IntegerValue(abs(div_res.num))
+                den_val = IntegerValue(div_res.denom)
+                frac = notation.setf(
+                    Symbol("\\frac"),
+                    (
+                        notation.setf(Notation.GROUP, (num_val,), br="{}"),
+                        notation.setf(Notation.GROUP, (den_val,), br="{}"),
+                    ),
+                )
+                if sign_negative:
+                    frac = notation.setf(Notation.MINUS, (frac,))
+                return frac
+            return div_res
+
     # 1. Identity simplification
     if isinstance(denominator_sym, IntegerValue) and equal_value(denominator_sym, 1):
         return numerator_sym
@@ -152,9 +172,8 @@ def normalize_frac(notation, numerator_sym, denominator_sym, chainexpr_fn=None, 
                 num_val = IntegerValue(abs(div_res.num))
                 den_val = IntegerValue(div_res.denom)
                 frac = notation.setf(
-                    Notation.FUNC,
+                    Symbol("\\frac"),
                     (
-                        Symbol("\\frac"),
                         notation.setf(Notation.GROUP, (num_val,), br="{}"),
                         notation.setf(Notation.GROUP, (den_val,), br="{}"),
                     ),

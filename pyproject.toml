@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toymath"
+version = "0.1.0"
+description = "A symbolic mathematics system implemented as a Jupyter kernel with LaTeX I/O and Prolog-style logic"
+readme = "CLAUDE.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Semyon C", email = "semyonc@example.com"}
+]
+keywords = ["symbolic-math", "jupyter-kernel", "latex", "prolog", "computer-algebra"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "ipykernel>=6.29.5",
+    "ipython>=8.26.0",
+    "jupyter>=1.0.0",
+    "jupyterlab>=4.2.4",
+    "notebook>=7.2.1",
+    "ply>=3.11",
+    "pytest>=8.3.4",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "python-dotenv>=1.0.1",
+]
+llm = [
+    "openai>=1.41.0",
+    "pydantic>=2.8.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/semyonc/toymath"
+Repository = "https://github.com/semyonc/toymath"
+Documentation = "https://github.com/semyonc/toymath/blob/main/CLAUDE.md"
+
+[tool.setuptools]
+packages = ["engine"]
+
+[tool.setuptools.package-data]
+engine = ["*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["engine"]
+python_files = ["unittests.py", "unittests_frac.py"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312", "py313"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.venv
+  | bin
+  | obsolete
+  | __pycache__
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_glob = ["bin/*", "obsolete/*", ".venv/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["bin", "obsolete", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # line too long (handled by black)

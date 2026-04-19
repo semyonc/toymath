@@ -104,6 +104,14 @@ class TestFractionOperations(unittest.TestCase):
             "\\frac {ad + bc} {bd}"
         )
 
+    def test_rule1_symbolic_with_subtraction(self):
+        """Rule 1: Symbolic fraction subtraction using add! command."""
+        # add!{1/x - 1/y} → (y - x)/(xy)
+        self.checkEqual(
+            "add! \\frac 1 x - \\frac 1 y",
+            "\\frac {y - x} {xy}"
+        )
+
     def test_rule1_symbolic_same_denominator(self):
         """Rule 1: Symbolic fractions with same denominator using add!."""
         # add!{x/y + z/y} → (xy+zy)/y²
@@ -402,6 +410,50 @@ class TestFractionOperations(unittest.TestCase):
         """Edge case: Fraction plus zero."""
         # a/b + 0 = a/b
         self.checkEqual("\\frac a b + 0", "\\frac a b")
+
+    # =========================================================================
+    # Fraction Power Support
+    # =========================================================================
+
+    def test_power_fraction_positive_symbolic(self):
+        """Power: (a/b)^2 -> a^2/b^2"""
+        self.checkEqual("mul! (\\frac a b)^2", "\\frac {a^2} {b^2}")
+
+    def test_power_fraction_positive_numeric(self):
+        """Power: (2/3)^3 -> 8/27"""
+        self.checkEqual("mul! (\\frac 2 3)^3", "\\frac 8 {27}")
+
+    def test_power_fraction_negative_symbolic(self):
+        """Power: (a/b)^{-2} -> b^2/a^2"""
+        self.checkEqual("mul! (\\frac a b)^{-2}", "\\frac {b^2} {a^2}")
+
+    def test_power_fraction_negative_numeric(self):
+        """Power: (2/3)^{-2} -> 9/4"""
+        self.checkEqual("mul! (\\frac 2 3)^{-2}", "\\frac 9 4")
+
+    def test_power_fraction_zero(self):
+        """Power: (a/b)^0 -> 1"""
+        self.checkEqual("mul! (\\frac a b)^0", "1")
+
+    def test_negative_power_symbolic(self):
+        """Power: x^{-1} -> 1/x"""
+        self.checkEqual("mul! x^{-1}", "\\frac 1 x")
+
+    def test_negative_power_symbolic_squared(self):
+        """Power: x^{-2} -> 1/x^2"""
+        self.checkEqual("mul! x^{-2}", "\\frac 1 {x^2}")
+
+    def test_negative_power_cancel(self):
+        """Power: x^{-1} * x -> 1"""
+        self.checkEqual("mul! x^{-1}x", "1")
+
+    def test_negative_power_cancel_squared(self):
+        """Power: x^{-2} * x^2 -> 1"""
+        self.checkEqual("mul! x^{-2}x^2", "1")
+
+    def test_negative_power_partial_cancel(self):
+        """Power: x^{-1} * x^2 -> x"""
+        self.checkEqual("mul! x^{-1}x^2", "x")
 
 
 if __name__ == '__main__':

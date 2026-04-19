@@ -12,12 +12,13 @@ import importlib
 
 import comparer
 from comparer import NotationParam
-from notation import Func, issym
+from notation import Func, issym, Notation
 from replacer import Replacer
 from preprocessor import Preprocessor
 from value import *
 from replicator import Replicator
 from helpers import trace_notation
+from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
 from frac_utils import FRAC_SYMBOL_NAMES, normalize_frac
  
 
@@ -274,6 +275,40 @@ class Calculator(Replacer):
                 return IntegerValue(1)
             if equal_value(n, 1):
                 return scalar
+            # Handle powers of fractions explicitly: (a/b)^n -> a^n/b^n, including negative n
+            base = scalar
+            sign_negative = False
+            while True:
+                g = self.output_notation.getf(base, Notation.GROUP)
+                if g is not None and g.props.get("br") in ("{}", "()"):
+                    base = g.args[0]
+                    continue
+                m = self.output_notation.getf(base, Notation.MINUS)
+                if m is not None:
+                    sign_negative = not sign_negative
+                    base = m.args[0]
+                    continue
+                break
+            if is_frac(self.output_notation, base):
+                pos_n = abs(n.val)
+                pow_val = IntegerValue(pos_n)
+                def power_term(t):
+                    if pos_n == 1:
+                        return t
+                    return self.output_notation.setf(
+                        Notation.INDEX, (t, (None, None, pow_val, None))
+                    )
+                num = power_term(get_numerator(self.output_notation, base))
+                den = power_term(get_denominator(self.output_notation, base))
+                if n.val < 0:
+                    num, den = den, num
+                from cmd_mul import chainexpr, Mul  # local import to avoid cycles
+                res = normalize_frac(
+                    self.output_notation, num, den, chainexpr, Mul.MUL
+                )
+                if sign_negative:
+                    res = self.output_notation.setf(Notation.MINUS, (res,))
+                return res
             val = get_value(scalar, self.output_notation)
             if isinstance(val, IntegerValue) or isinstance(val, FracValue):
                 val = val.power(n)

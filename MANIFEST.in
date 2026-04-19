@@ -1,0 +1,31 @@
+# Include documentation
+include README.md
+include CLAUDE.md
+include NOTATION.md
+include AGENTS.md
+include LICENSE
+
+# Include requirements
+include requirements.txt
+
+# Include kernel spec
+recursive-include kernel_spec *
+
+# Include engine files
+recursive-include engine *.py
+
+# Exclude development and cache files
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *$py.class
+global-exclude .DS_Store
+global-exclude *.ipynb
+global-exclude parser.out
+global-exclude parsetab.py
+
+# Exclude obsolete and test files
+prune obsolete
+prune bin
+prune .venv
+prune .pytest_cache
+prune .idea

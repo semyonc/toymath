@@ -27,6 +27,7 @@ ToyMath is a symbolic math system packaged as a Jupyter kernel and console app. 
 - Console mode: `python console.py`
 - Kernel: `jupyter notebook` then pick the LaTeX kernel (registered by `toymathkernel.py`)
 - Tests: `pytest engine/unittests.py` (core); `pytest engine/unittests_llm.py` (LLM)
+- Activate the venv first (`source .venv/bin/activate`) or set `PYTHONPATH=.` when running tests to avoid import errors for `engine/*`.
 - Package management: use `uv pip install -r requirements.txt` for dependencies.
 
 ## Reference Reading

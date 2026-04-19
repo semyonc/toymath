@@ -1,9 +1,10 @@
 from value import *
 from replicator import Replicator
-from comparer import pattern, NotationParam
+from comparer import pattern, NotationParam, s_equal
 from notation import Notation, Func, Symbol
 from helpers import trace_notation
 from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
+from processor import get_value
 
 
 def chainexpr(oper, notation, sym, negative):
@@ -58,9 +59,33 @@ class Mul(object):
         return self.main(processor, processor.output_notation, outsym, negative)
 
     def main(self, processor, notation, sym, negative):
+        # Existing positive exponent pattern (keep for n > 0 non-fraction)
         subst = Mul.Pw1.match(sym, notation)
         if subst is not None:
-            return self.power(processor, notation, subst["z"], subst["n"])
+            z, n = subst["z"], subst["n"]
+            unwrapped = self.unwrap_base(notation, z)
+            if is_frac(notation, unwrapped):
+                result = self.power_fraction(processor, notation, unwrapped, n, negative)
+                if result is not None:
+                    return result
+            return self.power(processor, notation, z, n)
+
+        # Direct INDEX detection for negative/zero/any integer exponent
+        power_info = self.detect_power(notation, sym)
+        if power_info is not None:
+            base, n = power_info
+            unwrapped = self.unwrap_base(notation, base)
+
+            if n.val == 0:
+                return IntegerValue(1)
+
+            if is_frac(notation, unwrapped):
+                result = self.power_fraction(processor, notation, unwrapped, n, negative)
+                if result is not None:
+                    return result
+
+            if n.val < 0:
+                return self.negative_power(processor, notation, base, n, negative)
 
         # Fraction multiplication handling (Rules 2-4)
         result = self.multiply_fractions(processor, notation, sym, negative)
@@ -76,6 +101,106 @@ class Mul(object):
             args.append(outsym)
         sym_plist = notation.setf(Notation.P_LIST, tuple(args))
         return notation.setf(self.MUL, (None, (sym_plist,)))
+
+    def detect_power(self, notation, sym):
+        """
+        Detect (base)^exponent structure directly without patterns.
+        Returns (base, exponent) or None.
+        """
+        # Unwrap GROUP
+        f = notation.getf(sym, Notation.GROUP)
+        if f is not None:
+            sym = f.args[0]
+
+        # Check for INDEX
+        f = notation.getf(sym, Notation.INDEX)
+        if f is None:
+            return None
+
+        base = f.args[0]
+        power = f.args[1][2]  # INDEX structure: (base, (sub, sup_l, power, sup_r))
+
+        # Get integer exponent value
+        n = get_value(power, notation)
+        if not isinstance(n, IntegerValue):
+            return None
+
+        return (base, n)
+
+    def unwrap_base(self, notation, z):
+        """Unwrap GROUP/MINUS from base."""
+        g = notation.getf(z, Notation.GROUP)
+        if g is not None:
+            z = g.args[0]
+        m = notation.getf(z, Notation.MINUS)
+        if m is not None:
+            z = m.args[0]
+        return z
+
+    def get_power_info(self, notation, sym):
+        """
+        Extract base and exponent from symbol.
+        Returns (base, exponent_value) or (sym, IntegerValue(1)) for plain symbols.
+        Exponent must be an IntegerValue.
+        """
+        # Unwrap GROUP
+        f = notation.getf(sym, Notation.GROUP)
+        if f is not None:
+            sym = f.args[0]
+
+        # Check for INDEX (power)
+        f = notation.getf(sym, Notation.INDEX)
+        if f is not None:
+            base = f.args[0]
+            power = f.args[1][2]  # INDEX: (base, (sub, sup_l, power, sup_r))
+            if power is not None:
+                n = get_value(power, notation)
+                if isinstance(n, IntegerValue):
+                    return (base, n)
+
+        # Plain symbol treated as base^1
+        return (sym, IntegerValue(1))
+
+    def power_fraction(self, processor, notation, frac_sym, n, negative):
+        """
+        Expand (frac{x}{y})^n symbolically.
+
+        n > 0: (frac{x}{y})^n -> frac{x^n}{y^n}
+        n < 0: (frac{x}{y})^n -> frac{y^|n|}{x^|n|}
+        n = 0: -> 1
+        """
+        x = get_numerator(notation, frac_sym)
+        y = get_denominator(notation, frac_sym)
+
+        # Idempotence: skip if already expanded
+        if notation.getf(x, Notation.INDEX) or notation.getf(y, Notation.INDEX):
+            return None
+
+        if n.val == 0:
+            return IntegerValue(1)
+
+        if n.val > 0:
+            x_pow = notation.setf(Notation.INDEX, (x, (None, None, n, None)))
+            y_pow = notation.setf(Notation.INDEX, (y, (None, None, n, None)))
+            result = normalize_frac(notation, x_pow, y_pow, chainexpr, self.MUL)
+        else:
+            pos_n = IntegerValue(-n.val)
+            y_pow = notation.setf(Notation.INDEX, (y, (None, None, pos_n, None)))
+            x_pow = notation.setf(Notation.INDEX, (x, (None, None, pos_n, None)))
+            result = normalize_frac(notation, y_pow, x_pow, chainexpr, self.MUL)
+
+        if negative:
+            result = notation.setf(Notation.MINUS, (result,))
+        return result
+
+    def negative_power(self, processor, notation, z, n, negative):
+        """x^{-n} -> frac{1}{x^n}"""
+        pos_n = IntegerValue(-n.val)
+        z_pow = notation.setf(Notation.INDEX, (z, (None, None, pos_n, None)))
+        result = normalize_frac(notation, IntegerValue(1), z_pow, chainexpr, self.MUL)
+        if negative:
+            result = notation.setf(Notation.MINUS, (result,))
+        return result
 
     def multiply_fractions(self, processor, notation, sym, negative):
         """
@@ -177,6 +302,30 @@ class Mul(object):
             val = processor.get_factor(candidate)
             if equal_value(val, 0):
                 return IntegerValue(0)
+
+        # Power cancellation: base^m * base^n -> base^{m+n}
+        # Only when at least one factor has an explicit power (not implicit exponent 1)
+        base1, exp1 = self.get_power_info(notation, unwrapped1)
+        base2, exp2 = self.get_power_info(notation, unwrapped2)
+        if (exp1.val != 1 or exp2.val != 1) and s_equal(base1, notation, base2, notation):
+            total_exp = IntegerValue(exp1.val + exp2.val)
+            if total_exp.val == 0:
+                result = IntegerValue(1)
+            elif total_exp.val == 1:
+                result = base1
+            elif total_exp.val < 0:
+                # Negative result: base^{-n} -> \frac{1}{base^n}
+                pos_exp = IntegerValue(-total_exp.val)
+                if pos_exp.val == 1:
+                    denom = base1
+                else:
+                    denom = notation.setf(Notation.INDEX, (base1, (None, None, pos_exp, None)))
+                result = normalize_frac(notation, IntegerValue(1), denom, chainexpr, self.MUL)
+            else:
+                result = notation.setf(Notation.INDEX, (base1, (None, None, total_exp, None)))
+            if overall_negative:
+                result = notation.setf(Notation.MINUS, (result,))
+            return result
 
         # Rule 2: Fraction × Fraction
         if is_frac(notation, unwrapped1) and is_frac(notation, unwrapped2):

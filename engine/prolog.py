@@ -11,7 +11,6 @@ from notation import Notation, NOTATION, Symbol, SYMBOL, Func
 from preprocessor import Preprocessor
 from comparer import UnifyComparer, isVariable
 from replacer import Replacer
-from llm_comparer import LLMComparer
 from engine.utils import PrologReplicator, SymbolReplacer
 
 RULE = TypeVar('RULE', bound='Rule')
@@ -59,12 +58,13 @@ def unify(term1: TERM, subst1: Dict[str, Any], input_notation: NOTATION,
             return False
         for s1, s2 in zip(term1.args, term2.args):
             if not backprop:
-                f = term2.notation.getf(s2, Notation.FUNC)
-                if f is not None and f.props.get('fmt', '') == 'operatorname' and\
-                    f.args[0].name == 'llm':
-                    comparer = LLMComparer(f.args[1], term2.notation, subst2)
-                else:
-                    comparer = UnifyComparer(s2, term2.notation, subst2)
+                # Note: LLM comparison feature has been moved to obsolete
+                # f = term2.notation.getf(s2, Notation.FUNC)
+                # if f is not None and f.props.get('fmt', '') == 'operatorname' and\
+                #     f.args[0].name == 'llm':
+                #     comparer = LLMComparer(f.args[1], term2.notation, subst2)
+                # else:
+                comparer = UnifyComparer(s2, term2.notation, subst2)
                 if not comparer.unify(s1, notation, copy.deepcopy(subst1)):
                     return False
             else:
