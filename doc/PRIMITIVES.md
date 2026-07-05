@@ -45,6 +45,10 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
 7. **rewrite(expr, lemma, direction)** — registered equality lemmas
    (`diff_squares`, `square_of_sum`, `cube_of_sum`, `diff_cubes`, …) matched
    at the root; the lemma library is the extensibility point.
+8. **factor_gcd(expr)** / **factor_quadratic(expr, var)** — named
+   factorings in place of a general `factor`. `factor_quadratic` factors
+   over Q via the discriminant, reports the roots, and honestly refuses
+   irrational/complex cases.
 
 **equal_exprs(e1, e2)** → verdict `yes`/`no`/`unknown`. Canonical `RatFunc`
 comparison decides the rational fragment; outside it the numeric oracle

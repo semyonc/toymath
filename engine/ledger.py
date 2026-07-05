@@ -107,6 +107,9 @@ class Ledger(object):
                 a['expr'], a['var']),
             'rewrite': lambda a: primitives.rewrite(
                 a['expr'], a['lemma'], a.get('direction', 'forward')),
+            'factor_gcd': lambda a: primitives.factor_gcd(a['expr']),
+            'factor_quadratic': lambda a: primitives.factor_quadratic(
+                a['expr'], a['var']),
         }
         for step in self.steps:
             fn = dispatch.get(step['op'])

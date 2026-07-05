@@ -19,6 +19,7 @@ Deliberately absent: solve, simplify, autonomous integrate, general factor.
 import math
 import random
 import hashlib
+import re
 from fractions import Fraction
 
 from notation import Notation, Symbol, Func
@@ -51,9 +52,12 @@ class EvalError(Exception):
 # ---------------------------------------------------------------------------
 
 def parse_latex(latex):
+    # the grammar's \cdot rule is binary and cannot chain; juxtaposition
+    # is the same product, so normalize before parsing
+    normalized = re.sub(r'\\cdot\b', ' ', latex)
     notation = Notation()
     try:
-        sym = MathParser(notation).parse(latex)
+        sym = MathParser(notation).parse(normalized)
     except Exception as e:
         raise PrimitiveError(f'cannot parse {latex!r}: {e}')
     if sym is None:
@@ -416,8 +420,16 @@ def _substitute_check(expr, result, var, value, samples=8, seed=20260705):
         s1, n1 = parse_latex(expr)
         s2, n2 = parse_latex(result)
         vs, vn = parse_latex(value)
+        sp1 = _comp_split(s1, n1)
+        sp2 = _comp_split(s2, n2)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
+    if sp1 is not None and sp2 is not None:
+        return _merge_checks(
+            _substitute_check(write_latex(sp1[0], n1),
+                              write_latex(sp2[0], n2), var, value),
+            _substitute_check(write_latex(sp1[1], n1),
+                              write_latex(sp2[1], n2), var, value))
     variables = (free_symbols(s1, n1) | free_symbols(s2, n2)
                  | free_symbols(vs, vn)) - {var}
     rng = random.Random(seed)
@@ -463,7 +475,27 @@ def _needs_parens_factor(sym, notation):
 
 
 def _paren(s):
+    s = s.strip()
+    if _fully_wrapped(s):
+        return s
     return '\\left(' + s + '\\right)'
+
+
+def _fully_wrapped(s):
+    """True if s is one balanced (...) / \\left(...\\right) around the
+    whole string, so another wrap adds nothing."""
+    if not ((s.startswith('(') or s.startswith('\\left('))
+            and s.endswith(')')):
+        return False
+    depth = 0
+    for idx, ch in enumerate(s):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0 and idx < len(s) - 1:
+                return False
+    return depth == 0
 
 
 def apply_both_sides(equation, op, arg):
@@ -1186,6 +1218,138 @@ def rewrite(expr, lemma_name, direction='forward'):
     out_s = Substitutor(tnotation, out_n, mapping)(tsym)
     result = write_latex(out_s, out_n)
     rec = _result('rewrite', args, expr, result)
+    return _checked(rec)
+
+
+# ---------------------------------------------------------------------------
+# primitives: named factorings (no general `factor` on purpose)
+# ---------------------------------------------------------------------------
+
+def _q_str(q):
+    """Fraction -> latex string."""
+    out_n = Notation()
+    if q < 0:
+        return '-' + write_latex(_fraction_to_notation(-q, out_n), out_n)
+    if q == 0:
+        return '0'
+    return write_latex(_fraction_to_notation(q, out_n), out_n)
+
+
+def _fraction_sqrt(q):
+    if q < 0:
+        return None
+    n = math.isqrt(q.numerator)
+    d = math.isqrt(q.denominator)
+    if n * n == q.numerator and d * d == q.denominator:
+        return Fraction(n, d)
+    return None
+
+
+def _as_poly(expr, op, args):
+    """Parse expr and convert to a Poly, or return an error record."""
+    sym, notation = parse_latex(expr)
+    rf = to_ratfunc(sym, notation)
+    if not rf.is_poly():
+        raise PrimitiveError(f'{op} supports polynomials only')
+    return rf.num
+
+
+def factor_gcd(expr):
+    """Pull out the common numeric/monomial factor: 6x^2+9x -> 3x(2x+3)."""
+    args = {'expr': expr}
+    try:
+        poly = _as_poly(expr, 'factor_gcd', args)
+    except PrimitiveError as e:
+        return _error('factor_gcd', args, str(e))
+    except ZeroDivisionError:
+        return _error('factor_gcd', args, 'division by zero')
+    except NotInFragment as e:
+        return _error('factor_gcd', args,
+                      f'outside the rational fragment: {e}')
+    if poly.is_zero():
+        return _error('factor_gcd', args, 'zero polynomial')
+    content = poly.content()
+    if poly.leading_coeff() < 0:
+        content = -content
+    mono = poly.monomial_gcd()
+    if content == 1 and mono == ():
+        return _error('factor_gcd', args, 'no common factor to pull out')
+    quotient = poly.divide_monomial(mono).scale(1 / content)
+    if quotient.is_const():
+        return _error('factor_gcd', args,
+                      'expression is a single term; nothing to factor')
+    out_n = Notation()
+    factor_s = write_latex(poly_to_notation(Poly({mono: content}), out_n),
+                           out_n)
+    out_n2 = Notation()
+    quot_s = write_latex(poly_to_notation(quotient, out_n2), out_n2)
+    result = f'{factor_s}{_paren(quot_s)}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('factor_gcd', args,
+                      f'internal: unparseable result: {e}')
+    return _checked(_result('factor_gcd', args, expr, result))
+
+
+def factor_quadratic(expr, var):
+    """Factor a quadratic in `var` with rational roots:
+    x^2-5x+6 -> (x-2)(x-3); perfect squares -> (x-r)^2."""
+    args = {'expr': expr, 'var': var}
+    try:
+        poly = _as_poly(expr, 'factor_quadratic', args)
+    except PrimitiveError as e:
+        return _error('factor_quadratic', args, str(e))
+    except ZeroDivisionError:
+        return _error('factor_quadratic', args, 'division by zero')
+    except NotInFragment as e:
+        return _error('factor_quadratic', args,
+                      f'outside the rational fragment: {e}')
+    if poly.degree(var) != 2:
+        return _error('factor_quadratic', args,
+                      f'expression is not quadratic in {var!r}')
+    coeffs = {0: Fraction(0), 1: Fraction(0), 2: Fraction(0)}
+    for mono, coeff in poly.terms.items():
+        d = dict(mono)
+        k = d.pop(var, 0)
+        if d:
+            return _error('factor_quadratic', args,
+                          'coefficients must be constants for now')
+        coeffs[k] = coeff
+    a, b, c = coeffs[2], coeffs[1], coeffs[0]
+    disc = b * b - 4 * a * c
+    if disc < 0:
+        return _error('factor_quadratic', args,
+                      'negative discriminant; no real factorization')
+    s = _fraction_sqrt(disc)
+    if s is None:
+        return _error('factor_quadratic', args,
+                      'roots are not rational; not factorable over Q '
+                      f'(discriminant {disc})')
+    r1 = (-b + s) / (2 * a)
+    r2 = (-b - s) / (2 * a)
+
+    def root_factor(r):
+        if r == 0:
+            return var
+        sign = '-' if r > 0 else '+'
+        return f'\\left({var} {sign} {_q_str(abs(r))}\\right)'
+
+    if r1 == r2:
+        body = f'{root_factor(r1)}^{{2}}'
+    else:
+        body = root_factor(r1) + root_factor(r2)
+    if a == 1:
+        result = body
+    else:
+        result = f'{_q_str(a)}{body}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('factor_quadratic', args,
+                      f'internal: unparseable result: {e}')
+    rec = _result('factor_quadratic', args, expr, result,
+                  extra={'roots': [str(r1), str(r2)]})
     return _checked(rec)
 
 

@@ -31,6 +31,8 @@ it appends each verified step to a replayable ledger.
 | `evaluate EXPR` | `evaluate "2(2)+3 = 7"` | exact arithmetic; on an equation reports `holds: true/false` |
 | `diff EXPR VAR` | `diff "x \sin x" x` | derivative, checked by central differences |
 | `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root |
+| `factor_gcd EXPR` | `factor_gcd "6x^2+9x"` | pull out the common factor → `3x(2x+3)` |
+| `factor_quadratic EXPR VAR` | `factor_quadratic "x^2-5x+6" x` | rational roots → `(x-2)(x-3)`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown |
 | `lemmas` | | list rewrite lemmas |
 | `show --session f` | | render the ledger |

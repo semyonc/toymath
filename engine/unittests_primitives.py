@@ -261,6 +261,66 @@ class TestRewrite(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestFactor(unittest.TestCase):
+    def test_quadratic_two_roots(self):
+        r = P.factor_quadratic('x^2 - 5x + 6', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(sorted(r['roots']), ['2', '3'])
+
+    def test_quadratic_perfect_square(self):
+        r = P.factor_quadratic('x^2 - 6x + 9', 'x')
+        self.assertTrue(r['ok'])
+        self.assertIn('^{2}', r['result'])
+
+    def test_quadratic_leading_coeff(self):
+        r = P.factor_quadratic('2x^2 + 5x - 3', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_quadratic_irrational_rejected(self):
+        r = P.factor_quadratic('x^2 - 2', 'x')
+        self.assertFalse(r['ok'])
+
+    def test_quadratic_complex_rejected(self):
+        r = P.factor_quadratic('x^2 + x + 1', 'x')
+        self.assertFalse(r['ok'])
+
+    def test_gcd(self):
+        r = P.factor_gcd('6x^2 + 9x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(P.equal_exprs(r['result'],
+                                       '3x(2x+3)')['verdict'], 'yes')
+
+    def test_gcd_negative_leading(self):
+        r = P.factor_gcd('-2x^2 - 4x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_gcd_nothing_to_factor(self):
+        r = P.factor_gcd('x + 1')
+        self.assertFalse(r['ok'])
+
+
+class TestParsingEdges(unittest.TestCase):
+    def test_cdot_chain(self):
+        r = P.expand('2 \\cdot x \\cdot (x+1)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '{2}x^{2}+{2}x')
+
+    def test_substitute_into_equation(self):
+        r = P.substitute('x^2 - 6x + 5 = 0', 'x', '5')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertTrue(P.evaluate(r['result'])['holds'])
+
+    def test_substitute_wrong_candidate(self):
+        r = P.substitute('x^2 - 6x + 5 = 0', 'x', '4')
+        self.assertTrue(r['ok'])
+        self.assertFalse(P.evaluate(r['result'])['holds'])
+
+
 class TestEqual(unittest.TestCase):
     def test_canonical_yes(self):
         self.assertEqual(P.equal_exprs('(x+1)^2',

@@ -26,7 +26,8 @@ import primitives  # noqa: E402
 from ledger import Ledger  # noqa: E402
 
 TRANSFORMING_OPS = {'substitute', 'apply_both_sides', 'expand', 'collect',
-                    'evaluate', 'differentiate', 'rewrite'}
+                    'evaluate', 'differentiate', 'rewrite', 'factor_gcd',
+                    'factor_quadratic'}
 
 
 def emit(obj, pretty=False):
@@ -90,6 +91,14 @@ def main(argv=None):
     p.add_argument('--direction', choices=['forward', 'backward'],
                    default='forward')
 
+    p = add_parser('factor_gcd', help='pull out the common factor')
+    p.add_argument('expr')
+
+    p = add_parser('factor_quadratic',
+                   help='factor a quadratic with rational roots')
+    p.add_argument('expr')
+    p.add_argument('var')
+
     p = add_parser('equal', help='check two expressions: yes/no/unknown')
     p.add_argument('expr1')
     p.add_argument('expr2')
@@ -114,6 +123,10 @@ def main(argv=None):
         res = primitives.differentiate(args.expr, args.var)
     elif args.cmd == 'rewrite':
         res = primitives.rewrite(args.expr, args.lemma, args.direction)
+    elif args.cmd == 'factor_gcd':
+        res = primitives.factor_gcd(args.expr)
+    elif args.cmd == 'factor_quadratic':
+        res = primitives.factor_quadratic(args.expr, args.var)
     elif args.cmd == 'equal':
         res = primitives.equal_exprs(args.expr1, args.expr2)
     elif args.cmd == 'lemmas':
