@@ -121,10 +121,15 @@ class Ledger(object):
                 return {'status': 'failed', 'step': step['id'],
                         'reason': res.get('error')}
             if res.get('result') != step['result']:
-                return {'status': 'failed', 'step': step['id'],
-                        'reason': 'result mismatch',
-                        'recorded': step['result'],
-                        'replayed': res.get('result')}
+                # tolerate formatting drift between versions, but only if
+                # the results are semantically equal
+                eq = primitives.equal_exprs(res.get('result'),
+                                            step['result'])
+                if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'result mismatch',
+                            'recorded': step['result'],
+                            'replayed': res.get('result')}
             if res.get('check', {}).get('status') == 'disagree':
                 return {'status': 'failed', 'step': step['id'],
                         'reason': 'numeric oracle disagrees on replay'}

@@ -55,6 +55,9 @@ def parse_latex(latex):
     # the grammar's \cdot rule is binary and cannot chain; juxtaposition
     # is the same product, so normalize before parsing
     normalized = re.sub(r'\\cdot\b', ' ', latex)
+    # the lexer has no bare < / > tokens, only the \lt / \gt commands
+    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
+    normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
     notation = Notation()
     try:
         sym = MathParser(notation).parse(normalized)
@@ -65,10 +68,67 @@ def parse_latex(latex):
     return sym, notation
 
 
-def write_latex(sym, notation):
-    out = LaTexWriter(notation)(sym)
+class PrettyWriter(LaTexWriter):
+    """LaTexWriter that drops the repr braces of integer values outside
+    INDEX dimensions: {2}x -> 2x, while x^{12} keeps its braces."""
+
+    def __init__(self, notation, **kwargs):
+        super(PrettyWriter, self).__init__(notation, **kwargs)
+        self._keep_braces = 0
+
+    def write_index_item(self, sym):
+        self._keep_braces += 1
+        try:
+            super(PrettyWriter, self).write_index_item(sym)
+        finally:
+            self._keep_braces -= 1
+
+    def write_raw_term(self, t):
+        if self._keep_braces == 0 and isinstance(t, IntegerValue):
+            self.writeString(str(abs(t.val)))
+        else:
+            super(PrettyWriter, self).write_raw_term(t)
+
+
+def _write_std(sym, notation):
     # the writer occasionally doubles spaces; normalize for stable output
-    return ' '.join(out.split())
+    return ' '.join(LaTexWriter(notation)(sym).split())
+
+
+class _GroupStripper(Replicator):
+    """Copy a graph dropping transparent {}-groups, for normal-form
+    comparison only (the result may not print as valid LaTeX)."""
+
+    def enter_group(self, sym, f):
+        if f.props.get('br') == '{}' and 'quoted' not in f.props:
+            return self.enter_formula(f.args[0])
+        return super(_GroupStripper, self).enter_group(sym, f)
+
+
+def _normal_form(latex):
+    """Parse and print with {}-groups stripped: two strings with equal
+    normal forms parse to the same expression."""
+    sym, notation = parse_latex(latex)
+    out = Notation()
+    return _write_std(_GroupStripper(notation, out)(sym), out)
+
+
+def write_latex(sym, notation):
+    """Readable LaTeX with a safety net: the pretty form is used only if it
+    parses back to the same normal form as the standard output."""
+    std = _write_std(sym, notation)
+    try:
+        pretty = ' '.join(PrettyWriter(notation)(sym).split())
+    except Exception:
+        return std
+    if pretty == std:
+        return std
+    try:
+        if _normal_form(pretty) == _normal_form(std):
+            return pretty
+    except PrimitiveError:
+        pass
+    return std
 
 
 def canonical_or_same(latex):
@@ -460,6 +520,13 @@ def _substitute_check(expr, result, var, value, samples=8, seed=20260705):
 
 _APPLY_OPS = ('+', '-', '*', '/', '^')
 
+# relation handling: '=' and '\ne' are sign-blind; strict/weak inequalities
+# flip under multiplication/division by a negative constant
+_FLIP_REL = {'<': '>', '>': '<', '\\lt': '\\gt', '\\gt': '\\lt',
+             '\\le': '\\ge', '\\ge': '\\le', '\\leq': '\\geq',
+             '\\geq': '\\leq'}
+_SUPPORTED_REL = {'=', '\\ne', '\\neq'} | set(_FLIP_REL)
+
 
 def _needs_parens_additive(sym, notation):
     if notation.vgetf(sym, [Notation.S_LIST, Notation.MINUS, Notation.PLUS]):
@@ -513,10 +580,13 @@ def apply_both_sides(equation, op, arg):
     comp = notation.getf(sym, Notation.COMP)
     if comp is None:
         return _error('apply_both_sides', args,
-                      'expression is not an equation')
-    if comp.sym.props.get('op') != '=':
+                      'expression is not an equation or inequality')
+    rel = comp.sym.props.get('op')
+    if rel not in _SUPPORTED_REL:
         return _error('apply_both_sides', args,
-                      "only '=' equations are supported for now")
+                      f'unsupported relation {rel!r}')
+    is_ineq = rel in _FLIP_REL
+    out_rel = rel
     lhs, rhs = comp.args[0], comp.args[1]
     lhs_s = write_latex(lhs, notation)
     rhs_s = write_latex(rhs, notation)
@@ -549,8 +619,16 @@ def apply_both_sides(equation, op, arg):
     elif op == '*':
         if arg_const == 0:
             return _error('apply_both_sides', args,
-                          'multiplying both sides by 0 destroys the equation')
-        if arg_const is None:
+                          'multiplying both sides by 0 destroys the relation')
+        if is_ineq:
+            if arg_const is None:
+                return _error(
+                    'apply_both_sides', args,
+                    'cannot multiply an inequality by an expression of '
+                    'unknown sign; use a constant or split into cases')
+            if arg_const < 0:
+                out_rel = _FLIP_REL[rel]
+        elif arg_const is None:
             # if the factor can vanish, the step may introduce solutions
             assumptions.append({'text': f'{arg_s} \\ne 0', 'nonzero': arg_s})
         new_lhs = multiplicative(lhs, lhs_s)
@@ -558,11 +636,22 @@ def apply_both_sides(equation, op, arg):
     elif op == '/':
         if arg_const == 0:
             return _error('apply_both_sides', args, 'division by zero')
-        if arg_const is None:
+        if is_ineq:
+            if arg_const is None:
+                return _error(
+                    'apply_both_sides', args,
+                    'cannot divide an inequality by an expression of '
+                    'unknown sign; use a constant or split into cases')
+            if arg_const < 0:
+                out_rel = _FLIP_REL[rel]
+        elif arg_const is None:
             assumptions.append({'text': f'{arg_s} \\ne 0', 'nonzero': arg_s})
         new_lhs = f'\\frac{{{lhs_s}}}{{{arg_s}}}'
         new_rhs = f'\\frac{{{rhs_s}}}{{{arg_s}}}'
     else:  # '^'
+        if rel != '=':
+            return _error('apply_both_sides', args,
+                          "op '^' is only supported for '=' relations")
         if arg_const is not None and arg_const < 0:
             assumptions.append({'text': f'{lhs_s} \\ne 0', 'nonzero': lhs_s})
             assumptions.append({'text': f'{rhs_s} \\ne 0', 'nonzero': rhs_s})
@@ -572,7 +661,7 @@ def apply_both_sides(equation, op, arg):
         new_lhs = f'{_paren(lhs_s)}^{{{arg_s}}}'
         new_rhs = f'{_paren(rhs_s)}^{{{arg_s}}}'
 
-    result = f'{new_lhs} = {new_rhs}'
+    result = f'{new_lhs} {out_rel} {new_rhs}'
     try:
         parse_latex(result)
     except PrimitiveError as e:
@@ -618,13 +707,15 @@ def _merge_checks(c1, c2):
 # ---------------------------------------------------------------------------
 
 def _comp_split(sym, notation):
-    """Return (lhs, rhs) for an '=' equation, None for plain expressions."""
+    """Return (lhs, rhs, rel) for a supported relation, None for plain
+    expressions."""
     comp = notation.getf(sym, Notation.COMP)
     if comp is None:
         return None
-    if comp.sym.props.get('op') != '=':
-        raise PrimitiveError("only '=' equations are supported")
-    return comp.args[0], comp.args[1]
+    rel = comp.sym.props.get('op')
+    if rel not in _SUPPORTED_REL:
+        raise PrimitiveError(f'unsupported relation {rel!r}')
+    return comp.args[0], comp.args[1], rel
 
 
 def _canonical_side(side, notation):
@@ -641,10 +732,10 @@ def expand(expr):
         sym, notation = parse_latex(expr)
         split = _comp_split(sym, notation)
         if split:
-            lhs, rhs = split
+            lhs, rhs, rel = split
             new_l = _canonical_side(lhs, notation)
             new_r = _canonical_side(rhs, notation)
-            rec = _result('expand', args, expr, f'{new_l} = {new_r}')
+            rec = _result('expand', args, expr, f'{new_l} {rel} {new_r}')
             rec['check'] = _merge_checks(
                 numeric_spot_check(write_latex(lhs, notation), new_l),
                 numeric_spot_check(write_latex(rhs, notation), new_r))
@@ -670,9 +761,9 @@ def collect(expr, var):
         sym, notation = parse_latex(expr)
         split = _comp_split(sym, notation)
         if split:
-            lhs, rhs = split
+            lhs, rhs, rel = split
             sides = []
-            for side in split:
+            for side in (lhs, rhs):
                 rf = to_ratfunc(side, notation)
                 if not rf.is_poly():
                     return _error('collect', args,
@@ -685,7 +776,7 @@ def collect(expr, var):
                     sides.append(
                         write_latex(poly_to_notation(rf.num, out_n), out_n))
             rec = _result('collect', args, expr,
-                          f'{sides[0]} = {sides[1]}')
+                          f'{sides[0]} {rel} {sides[1]}')
             rec['check'] = _merge_checks(
                 numeric_spot_check(write_latex(lhs, notation), sides[0]),
                 numeric_spot_check(write_latex(rhs, notation), sides[1]))
@@ -698,8 +789,25 @@ def collect(expr, var):
     except NotInFragment as e:
         return _error('collect', args, f'outside the rational fragment: {e}')
     if not rf.is_poly():
-        return _error('collect', args,
-                      'collect currently supports polynomials only')
+        # rational function: collect numerator and denominator separately
+        if (var not in rf.num.variables()
+                and var not in rf.den.variables()):
+            return _error('collect', args,
+                          f'variable {var!r} does not occur in expression')
+
+        def side_str(p):
+            if var in p.variables():
+                return _collect_poly(p, var)
+            out_n = Notation()
+            return write_latex(poly_to_notation(p, out_n), out_n)
+
+        result = f'\\frac{{{side_str(rf.num)}}}{{{side_str(rf.den)}}}'
+        try:
+            parse_latex(result)
+        except PrimitiveError as e:
+            return _error('collect', args,
+                          f'internal: unparseable result: {e}')
+        return _checked(_result('collect', args, expr, result))
     poly = rf.num
     if var not in poly.variables():
         return _error('collect', args,
@@ -710,6 +818,20 @@ def collect(expr, var):
     except PrimitiveError as e:
         return _error('collect', args, f'internal: unparseable result: {e}')
     return _checked(_result('collect', args, expr, result))
+
+
+def _rel_holds(rel, a, b):
+    if rel == '=':
+        return a == b
+    if rel in ('\\ne', '\\neq'):
+        return a != b
+    if rel in ('<', '\\lt'):
+        return a < b
+    if rel in ('>', '\\gt'):
+        return a > b
+    if rel in ('\\le', '\\leq'):
+        return a <= b
+    return a >= b
 
 
 def _collect_poly(poly, var):
@@ -767,8 +889,9 @@ def evaluate(expr):
     except PrimitiveError as e:
         return _error('evaluate', args, str(e))
     if split:
+        lhs, rhs, rel = split
         sides = []
-        for side in split:
+        for side in (lhs, rhs):
             try:
                 rf = to_ratfunc(side, notation)
             except (NotInFragment, ZeroDivisionError) as e:
@@ -789,9 +912,10 @@ def evaluate(expr):
             else:
                 s = _fraction_to_notation(q, out_n)
             out.append(write_latex(s, out_n))
-        rec = _result('evaluate', args, expr, f'{out[0]} = {out[1]}',
+        rec = _result('evaluate', args, expr, f'{out[0]} {rel} {out[1]}',
                       check={'status': 'exact'},
-                      extra={'exact': True, 'holds': sides[0] == sides[1]})
+                      extra={'exact': True,
+                             'holds': _rel_holds(rel, sides[0], sides[1])})
         return rec
     try:
         rf = to_ratfunc(sym, notation)
@@ -1208,9 +1332,21 @@ def rewrite(expr, lemma_name, direction='forward'):
         return _error('rewrite', args, str(e))
     pat = comparer.pattern(src, [(p, NotationParam.Any) for p in lemma.params])
     subst = pat.match(sym, notation)
+    target = sym if subst is not None else None
+    matches = 1 if subst is not None else 0
+    if subst is None:
+        # search subterms in parse order (children precede parents, so the
+        # first hit is an innermost match); rewrite the first, count the rest
+        for node in notation.rel:
+            s = pat.match(node, notation)
+            if s is not None:
+                matches += 1
+                if target is None:
+                    target, subst = node, s
     if subst is None:
         return _error('rewrite', args,
-                      f'expression does not match pattern {src!r}')
+                      f'expression does not match pattern {src!r} '
+                      '(at the root or any subterm)')
     tsym, tnotation = parse_latex(dst)
     mapping = {}
     for p in lemma.params:
@@ -1218,10 +1354,24 @@ def rewrite(expr, lemma_name, direction='forward'):
             return _error('rewrite', args,
                           f'pattern variable {p!r} unbound')
         mapping[Symbol(p)] = (subst[p], notation)
-    out_n = Notation()
-    out_s = Substitutor(tnotation, out_n, mapping)(tsym)
-    result = write_latex(out_s, out_n)
-    rec = _result('rewrite', args, expr, result)
+    extra = {}
+    if target is sym:
+        out_n = Notation()
+        out_s = Substitutor(tnotation, out_n, mapping)(tsym)
+        result = write_latex(out_s, out_n)
+    else:
+        # replace the matched subterm inside a clone of the graph
+        at_s = write_latex(target, notation)
+        work = notation.clone()
+        inst = Substitutor(tnotation, work, mapping)(tsym)
+        f_inst = work.get(inst)
+        if f_inst is None:
+            work.repf(target, Func(Notation.GROUP, (inst,), br='()'))
+        else:
+            work.repf(target, f_inst)
+        result = write_latex(sym, work)
+        extra = {'at': at_s, 'matches': matches}
+    rec = _result('rewrite', args, expr, result, extra=extra)
     return _checked(rec)
 
 
@@ -1378,8 +1528,12 @@ def equal_exprs(expr1, expr2):
                 'method': 'structural',
                 'reason': 'one side is an equation, the other is not'}
     if sp1 is not None:
+        if sp1[2] != sp2[2]:
+            return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
+                    'method': 'structural',
+                    'reason': f'different relations {sp1[2]!r} vs {sp2[2]!r}'}
         verdicts = []
-        for a, b in zip(sp1, sp2):
+        for a, b in zip(sp1[:2], sp2[:2]):
             sub = equal_exprs(write_latex(a, n1), write_latex(b, n2))
             if not sub.get('ok'):
                 return sub

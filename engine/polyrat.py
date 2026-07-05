@@ -349,8 +349,10 @@ class RatFunc(object):
         return self.num.variables() | self.den.variables()
 
     def __eq__(self, other):
-        return (isinstance(other, RatFunc) and self.num == other.num
-                and self.den == other.den)
+        # cross-multiplication: exact even when cancellation is incomplete
+        # (multivariate GCD is only monomial-level)
+        return (isinstance(other, RatFunc)
+                and self.num * other.den == other.num * self.den)
 
     def __ne__(self, other):
         return not self.__eq__(other)

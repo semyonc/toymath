@@ -83,7 +83,7 @@ class TestSubstitute(unittest.TestCase):
     def test_numeric(self):
         r = P.substitute('x^2 + 2x + 1', 'x', '3')
         self.assertTrue(r['ok'])
-        self.assertEqual(P.evaluate(r['result'])['result'], '{16}')
+        self.assertEqual(P.evaluate(r['result'])['result'], '16')
 
     def test_symbolic(self):
         r = P.substitute('x^2 + y', 'x', 'a+b')
@@ -106,7 +106,7 @@ class TestApplyBothSides(unittest.TestCase):
         r = P.apply_both_sides('2x + 3 = 7', '-', '3')
         self.assertTrue(r['ok'])
         self.assertEqual(r['check']['status'], 'agree')
-        self.assertEqual(P.expand(r['result'])['result'], '{2}x = {4}')
+        self.assertEqual(P.expand(r['result'])['result'], '2x = 4')
 
     def test_divide_constant_no_assumption(self):
         r = P.apply_both_sides('2x = 4', '/', '2')
@@ -151,12 +151,12 @@ class TestApplyBothSides(unittest.TestCase):
 class TestExpandCollectEvaluate(unittest.TestCase):
     def test_expand(self):
         r = P.expand('(x+1)(x-2)')
-        self.assertEqual(r['result'], 'x^{2}-x-{2}')
+        self.assertEqual(r['result'], 'x^{2}-x-2')
         self.assertEqual(r['check']['status'], 'agree')
 
     def test_expand_equation(self):
         r = P.expand('{2}x+{3} - {3} = {7} - {3}')
-        self.assertEqual(r['result'], '{2}x = {4}')
+        self.assertEqual(r['result'], '2x = 4')
 
     def test_expand_rejects_trig(self):
         r = P.expand('\\sin x + 1')
@@ -177,7 +177,7 @@ class TestExpandCollectEvaluate(unittest.TestCase):
     def test_evaluate_fractions(self):
         r = P.evaluate('\\frac{2}{3} + \\frac{1}{6}')
         self.assertTrue(r['exact'])
-        self.assertEqual(r['result'], '\\frac {{5}} {{6}}')
+        self.assertEqual(r['result'], '\\frac {5} {6}')
 
     def test_evaluate_free_vars_rejected(self):
         r = P.evaluate('x + 1')
@@ -204,7 +204,7 @@ class TestDifferentiate(unittest.TestCase):
 
     def test_polynomial(self):
         r = self.check('x^3 + 2x')
-        self.assertEqual(r['result'], '{3}x^{2}+{2}')
+        self.assertEqual(r['result'], '3x^{2}+2')
 
     def test_rational(self):
         self.check('\\frac{1}{x}')
@@ -267,6 +267,88 @@ class TestRewrite(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestInequalities(unittest.TestCase):
+    def test_subtract_keeps_relation(self):
+        r = P.apply_both_sides('2x + 3 < 7', '-', '3')
+        self.assertTrue(r['ok'])
+        self.assertIn('\\lt', r['result'])
+        self.assertEqual(P.expand(r['result'])['result'], '2x \\lt 4')
+
+    def test_divide_positive_keeps(self):
+        r = P.apply_both_sides('2x \\lt 4', '/', '2')
+        self.assertTrue(r['ok'])
+        self.assertIn('\\lt', r['result'])
+
+    def test_divide_negative_flips(self):
+        r = P.apply_both_sides('-2x \\le 4', '/', '-2')
+        self.assertTrue(r['ok'])
+        self.assertIn('\\ge', r['result'])
+        self.assertEqual(P.expand(r['result'])['result'], 'x \\ge -2')
+
+    def test_multiply_unknown_sign_rejected(self):
+        r = P.apply_both_sides('x y > 4', '*', 'y')
+        self.assertFalse(r['ok'])
+
+    def test_power_rejected(self):
+        r = P.apply_both_sides('x \\ge 3', '^', '2')
+        self.assertFalse(r['ok'])
+
+    def test_ne_divide_records_assumption(self):
+        r = P.apply_both_sides('x y \\ne 4', '/', 'y')
+        self.assertTrue(r['ok'])
+        self.assertEqual(len(r['assumptions']), 1)
+
+    def test_evaluate_inequality_holds(self):
+        self.assertTrue(P.evaluate('3 \\le 4')['holds'])
+        self.assertFalse(P.evaluate('5 \\lt 4')['holds'])
+        self.assertTrue(P.evaluate('2(3) \\gt 5')['holds'])
+
+
+class TestSubtermRewrite(unittest.TestCase):
+    def test_inside_sum(self):
+        r = P.rewrite('3 + (x^2 - y^2)', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['at'], 'x^{2}-y^{2}')
+
+    def test_inside_fraction(self):
+        r = P.rewrite('\\frac{x^2 - y^2}{x + y}', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(P.equal_exprs(r['result'],
+                                       'x - y')['verdict'], 'yes')
+
+    def test_backward_inside(self):
+        r = P.rewrite('1 + (a+b)(a-b)', 'diff_squares', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(P.equal_exprs(r['result'],
+                                       '1 + a^2 - b^2')['verdict'], 'yes')
+
+
+class TestCollectRational(unittest.TestCase):
+    def test_collect_num_and_den(self):
+        r = P.collect('\\frac{ax + bx + 1}{x + cx}', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+
+class TestPrettyOutput(unittest.TestCase):
+    def test_no_value_braces(self):
+        self.assertEqual(P.expand('(x+1)(x-2)')['result'], 'x^{2}-x-2')
+
+    def test_index_dims_keep_braces(self):
+        r = P.expand('x^{12} x')
+        self.assertIn('x^{13}', r['result'])
+
+    def test_pretty_reparses_equal(self):
+        # every pretty result must parse back to an equal expression
+        for expr in ['(x+1)^3', '\\frac{2}{3} + \\frac{1}{6}',
+                     '2 \\cdot x \\cdot (x+1)']:
+            r = P.expand(expr) if 'frac' not in expr else P.evaluate(expr)
+            self.assertEqual(
+                P.equal_exprs(r['result'], expr)['verdict'], 'yes', expr)
+
+
 class TestFactor(unittest.TestCase):
     def test_quadratic_two_roots(self):
         r = P.factor_quadratic('x^2 - 5x + 6', 'x')
@@ -313,7 +395,7 @@ class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = P.expand('2 \\cdot x \\cdot (x+1)')
         self.assertTrue(r['ok'])
-        self.assertEqual(r['result'], '{2}x^{2}+{2}x')
+        self.assertEqual(r['result'], '2x^{2}+2x')
 
     def test_substitute_into_equation(self):
         r = P.substitute('x^2 - 6x + 5 = 0', 'x', '5')
@@ -331,6 +413,13 @@ class TestEqual(unittest.TestCase):
     def test_canonical_yes(self):
         self.assertEqual(P.equal_exprs('(x+1)^2',
                                        'x^2 + 2x + 1')['verdict'], 'yes')
+
+    def test_multivariate_cancellation_via_cross_multiply(self):
+        # (x+y)(x-y)/(x+y) does not cancel (multivariate GCD is
+        # monomial-level) but must still compare equal to x-y
+        self.assertEqual(
+            P.equal_exprs('\\frac{(x+y)(x-y)}{x+y}', 'x - y')['verdict'],
+            'yes')
 
     def test_canonical_no(self):
         self.assertEqual(P.equal_exprs('(x+1)^2', 'x^2 + 1')['verdict'],

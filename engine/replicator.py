@@ -409,7 +409,7 @@ class Replicator(object):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),), **f.props))
 
     def enter_vgroup(self, sym, f):
-        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),)), **f.props)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),), **f.props))
 
     def enter_sgroup(self, sym, f):
         args = [self.enter_expr(f.args[0])]

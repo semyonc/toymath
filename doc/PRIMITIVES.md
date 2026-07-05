@@ -28,8 +28,10 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    values in parens so juxtaposition never corrupts (`2x`, x:=3 → `2(3)`,
    never `23`). Checked by evaluating input-with-binding vs output.
 2. **apply_both_sides(eq, op, arg)**, op ∈ {`+`,`-`,`*`,`/`,`^`} — the spine
-   of equation solving. Division by a non-constant records the assumption
-   `arg ≠ 0` in the step (record, don't prove). Refuses `*0` and `/0`.
+   of equation solving. Multiplication/division by a non-constant records
+   the assumption `arg ≠ 0` in the step (record, don't prove). Refuses `*0`
+   and `/0`. Inequalities are supported: `*`/`/` by a negative constant
+   flips the relation, unknown-sign factors are refused, `^` is `=`-only.
    Each new side is oracle-checked against `op(old side, arg)`.
 3. **expand(expr)** — `to_ratfunc` → canonical, degree-ordered output.
    Accepts equations (expands each side), which doubles as the
@@ -44,7 +46,9 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    quotient, `f^n(u)`) outside it. Verified by central differences.
 7. **rewrite(expr, lemma, direction)** — registered equality lemmas
    (`diff_squares`, `square_of_sum`, `cube_of_sum`, `diff_cubes`, …) matched
-   at the root; the lemma library is the extensibility point.
+   at the root or, failing that, at the first matching subterm (reported as
+   `at`, with the total match count); the lemma library is the
+   extensibility point.
 8. **factor_gcd(expr)** / **factor_quadratic(expr, var)** — named
    factorings in place of a general `factor`. `factor_quadratic` factors
    over Q via the discriminant, reports the roots, and honestly refuses
@@ -88,14 +92,25 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 - `replay` re-runs every step and confirms recorded results — cheap
   verification of the whole derivation.
 
-## Known limitations (v1)
+## Known limitations
 
-- `rewrite` matches at the root only; the agent extracts subterms.
-- `collect` handles polynomials, not rational functions.
 - Multivariate polynomial GCD is monomial-level only (univariate is full
-  Euclidean).
-- `apply_both_sides` supports `=` only (inequalities need direction logic).
+  Euclidean); `equal?` compensates by cross-multiplying, so verdicts stay
+  exact, but printed fractions may not be fully cancelled.
+- `apply_both_sides` on inequalities refuses `*`/`/` by expressions of
+  unknown sign (no case splitting) and `^` entirely.
+- `rewrite` rewrites the first matching subterm (innermost, parse order)
+  and reports it as `at`; it does not offer a position selector yet.
 - Function-argument binding in products uses the convention: a parenthesized
   group right after the function is the whole argument; otherwise the run of
   tight factors up to the next function/group binds (`\sin 2x` = sin(2x),
   `\cos(x) y` = cos(x)·y).
+
+## Output format
+
+Results print through a PrettyWriter that drops the `{2}`-style value
+braces of the legacy writer wherever the pretty string parses back to the
+same expression (validated per call via a group-stripped normal form);
+anything ambiguous falls back to the verbose form. Ledger `replay`
+tolerates formatting drift across versions by falling back to a semantic
+`equal?` comparison when recorded and replayed strings differ.
