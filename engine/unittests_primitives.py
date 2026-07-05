@@ -131,6 +131,12 @@ class TestApplyBothSides(unittest.TestCase):
         r = P.apply_both_sides('x + 1', '+', '2')
         self.assertFalse(r['ok'])
 
+    def test_multiply_symbolic_records_assumption(self):
+        r = P.apply_both_sides('\\frac{2x+1}{x+1} = 3', '*', 'x+1')
+        self.assertTrue(r['ok'])
+        self.assertEqual(len(r['assumptions']), 1)
+        self.assertIn('\\ne 0', r['assumptions'][0]['text'])
+
     def test_multiply_parenthesizes_sums(self):
         r = P.apply_both_sides('x + 1 = y', '*', 'a + b')
         self.assertTrue(r['ok'])

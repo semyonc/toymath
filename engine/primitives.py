@@ -550,6 +550,9 @@ def apply_both_sides(equation, op, arg):
         if arg_const == 0:
             return _error('apply_both_sides', args,
                           'multiplying both sides by 0 destroys the equation')
+        if arg_const is None:
+            # if the factor can vanish, the step may introduce solutions
+            assumptions.append({'text': f'{arg_s} \\ne 0', 'nonzero': arg_s})
         new_lhs = multiplicative(lhs, lhs_s)
         new_rhs = multiplicative(rhs, rhs_s)
     elif op == '/':
@@ -787,6 +790,7 @@ def evaluate(expr):
                 s = _fraction_to_notation(q, out_n)
             out.append(write_latex(s, out_n))
         rec = _result('evaluate', args, expr, f'{out[0]} = {out[1]}',
+                      check={'status': 'exact'},
                       extra={'exact': True, 'holds': sides[0] == sides[1]})
         return rec
     try:

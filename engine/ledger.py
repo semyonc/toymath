@@ -136,8 +136,8 @@ class Ledger(object):
         lines = []
         for step in self.steps:
             check = step['check'].get('status', '?')
-            mark = {'agree': 'ok', 'skipped': '??', 'disagree': 'XX'}.get(
-                check, '?')
+            mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
+                    'disagree': 'XX'}.get(check, '?')
             branch = '' if step.get('continues') in (True, None) else ' (branch)'
             lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch} "
                          f"{step['op']}: {step['input']}  ==>  "

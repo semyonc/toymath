@@ -24,7 +24,7 @@ it appends each verified step to a replayable ledger.
 
 | Command | Example | Meaning |
 |---|---|---|
-| `apply EQ OP ARG` | `apply "2x + 3 = 7" - 3` | op ∈ `+ - * / ^` to both sides. Division by a symbolic expression records the assumption `arg ≠ 0` |
+| `apply EQ OP ARG` | `apply "2x + 3 = 7" - 3` | op ∈ `+ - * / ^` to both sides. Multiplying or dividing by a symbolic expression records the assumption `arg ≠ 0` |
 | `expand EXPR` | `expand "(x+1)(x-2)"` | distribute products/powers; also simplifies each side of an equation |
 | `collect EXPR VAR` | `collect "ax + 2x" x` | group by powers of VAR |
 | `substitute EXPR VAR VAL` | `substitute "x^2+1" x 3` | replace a variable |
