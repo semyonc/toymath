@@ -9,3 +9,4 @@ bin
 .venv
 .env
 kernel_spec
+CORN.md
