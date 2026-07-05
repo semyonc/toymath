@@ -409,6 +409,119 @@ class TestParsingEdges(unittest.TestCase):
         self.assertFalse(P.evaluate(r['result'])['holds'])
 
 
+class TestIntegration(unittest.TestCase):
+    def ok(self, rec):
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree',
+                         f"{rec.get('result')} check={rec['check']}")
+        return rec
+
+    def test_power_rule_monomial(self):
+        r = self.ok(P.integrate_power_rule('x^2', 'x'))
+        self.assertEqual(r['result'], '\\frac {1} {3}x^{3} + C')
+
+    def test_power_rule_polynomial(self):
+        r = self.ok(P.integrate_power_rule('3x^2 + 2x + 1', 'x'))
+        self.assertEqual(r['result'], 'x^{3}+x^{2}+x + C')
+
+    def test_power_rule_strips_integral_wrapper(self):
+        r = self.ok(P.integrate_power_rule('\\int x^2 \\, dx', 'x'))
+        self.assertEqual(r['result'], '\\frac {1} {3}x^{3} + C')
+
+    def test_power_rule_negative_power(self):
+        r = self.ok(P.integrate_power_rule('\\frac{1}{x^2}', 'x'))
+        self.assertEqual(r['result'], '-\\frac{1}{x} + C')
+
+    def test_power_rule_symbolic_coefficient(self):
+        self.ok(P.integrate_power_rule('a x', 'x'))
+
+    def test_power_rule_refuses_log_case(self):
+        r = P.integrate_power_rule('\\frac{1}{x}', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('integrate_table', r['error'])
+
+    def test_power_rule_refuses_trig(self):
+        r = P.integrate_power_rule('\\sin x', 'x')
+        self.assertFalse(r['ok'])
+
+    def test_wrong_integration_variable(self):
+        r = P.integrate_power_rule('\\int x^2 \\, dx', 'y')
+        self.assertFalse(r['ok'])
+
+    def test_definite_integral_refused(self):
+        r = P.integrate_power_rule('\\int_0^1 x^2 \\, dx', 'x')
+        self.assertFalse(r['ok'])
+
+    def test_table_log_records_assumption(self):
+        r = self.ok(P.integrate_table('\\frac{1}{x}', 'x'))
+        self.assertIn('\\ln', r['result'])
+        self.assertEqual(len(r['assumptions']), 1)
+
+    def test_table_sin(self):
+        r = self.ok(P.integrate_table('\\sin x', 'x'))
+        self.assertEqual(r['result'], '-\\cos\\left(x\\right) + C')
+
+    def test_table_constant_multiple(self):
+        self.ok(P.integrate_table('2 \\cos x', 'x'))
+
+    def test_table_exp(self):
+        r = self.ok(P.integrate_table('e^x', 'x'))
+        self.assertEqual(r['result'], 'e^{x} + C')
+
+    def test_table_mixed_sum(self):
+        self.ok(P.integrate_table('x + \\sin x', 'x'))
+
+    def test_table_refuses_product(self):
+        r = P.integrate_table('x \\sin x', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('integrate_by_parts', r['error'])
+
+    def test_by_parts_x_sin(self):
+        r = self.ok(P.integrate_by_parts('x \\sin x', 'x', 'x', '\\sin x'))
+        self.assertEqual(r['v'], '-\\cos\\left(x\\right)')
+        self.assertEqual(r['du'], '1')
+        self.assertIn('remaining_integral', r)
+        # the remaining integral must feed back into integrate_table
+        r2 = self.ok(P.integrate_table(r['remaining_integral'], 'x'))
+        self.assertEqual(r2['result'], '-\\sin\\left(x\\right) + C')
+
+    def test_by_parts_rejects_wrong_split(self):
+        r = P.integrate_by_parts('x \\sin x', 'x', 'x', '\\cos x')
+        self.assertFalse(r['ok'])
+
+    def test_by_parts_requires_u_with_var(self):
+        r = P.integrate_by_parts('a \\sin x', 'x', 'a', '\\sin x')
+        self.assertFalse(r['ok'])
+
+    def test_fresh_constant_avoids_collision(self):
+        r = self.ok(P.integrate_power_rule('C x', 'x'))
+        self.assertEqual(r['constant'], 'K')
+        self.assertIn('+ K', r['result'])
+
+    def test_final_answer_verifiable_by_existing_primitives(self):
+        d = P.differentiate('-x \\cos(x) + \\sin(x)', 'x')
+        self.assertTrue(d['ok'])
+        self.assertEqual(
+            P.equal_exprs(d['result'], 'x \\sin x')['verdict'], 'yes')
+
+    def test_ledger_replay_with_integration(self):
+        path = os.path.join(tempfile.mkdtemp(), 'session.json')
+        ledger = Ledger(path)
+        ledger.record(P.integrate_by_parts('x e^x', 'x', 'x', 'e^x'))
+        ledger.record(P.integrate_table('e^x', 'x'))
+        ledger.save()
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_markdown_render(self):
+        path = os.path.join(tempfile.mkdtemp(), 'session.json')
+        ledger = Ledger(path)
+        ledger.record(P.integrate_table('\\frac{1}{x}', 'x'))
+        md = ledger.render_markdown()
+        self.assertIn('# Verified derivation', md)
+        self.assertIn('assumptions', md)
+        self.assertIn('\\Longrightarrow', md)
+
+
 class TestEqual(unittest.TestCase):
     def test_canonical_yes(self):
         self.assertEqual(P.equal_exprs('(x+1)^2',

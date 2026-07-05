@@ -110,6 +110,12 @@ class Ledger(object):
             'factor_gcd': lambda a: primitives.factor_gcd(a['expr']),
             'factor_quadratic': lambda a: primitives.factor_quadratic(
                 a['expr'], a['var']),
+            'integrate_power_rule': lambda a: primitives.integrate_power_rule(
+                a['expr'], a['var']),
+            'integrate_table': lambda a: primitives.integrate_table(
+                a['expr'], a['var']),
+            'integrate_by_parts': lambda a: primitives.integrate_by_parts(
+                a['expr'], a['var'], a['u'], a['dv']),
         }
         for step in self.steps:
             fn = dispatch.get(step['op'])
@@ -135,6 +141,44 @@ class Ledger(object):
                         'reason': 'numeric oracle disagrees on replay'}
         return {'status': 'verified', 'steps': len(self.steps),
                 'assumptions': self.assumptions}
+
+    _MARKS = {'agree': 'verified', 'exact': 'exact',
+              'skipped': 'unchecked', 'disagree': 'FAILED'}
+
+    def render_markdown(self):
+        """Render the derivation as Markdown with LaTeX math blocks."""
+        lines = ['# Verified derivation', '']
+        if self.assumptions:
+            lines.append('**Valid under the assumptions:** '
+                         + ', '.join(f'${a["text"]}$'
+                                     for a in self.assumptions))
+            lines.append('')
+        for step in self.steps:
+            check = step['check'].get('status', '?')
+            mark = self._MARKS.get(check, check)
+            branch = ('' if step.get('continues') in (True, None)
+                      else ' *(new chain)*')
+            arg_note = ''
+            if step['op'] == 'apply_both_sides':
+                a = step['args']
+                arg_note = f" — `{a['op']} {a['arg']}` on both sides"
+            elif step['op'] == 'substitute':
+                a = step['args']
+                arg_note = f" — ${a['var']} := {a['value']}$"
+            elif step['op'] == 'integrate_by_parts':
+                a = step['args']
+                arg_note = f" — $u = {a['u']}$, $dv = {a['dv']}$"
+            lines.append(f"**{step['id']}** `{step['op']}`{arg_note} "
+                         f"— *{mark}*{branch}")
+            lines.append('')
+            lines.append(f"$${step['input']} \\;\\Longrightarrow\\; "
+                         f"{step['result']}$$")
+            for a in step['assumptions']:
+                lines.append(f"- assumes ${a['text']}$")
+            lines.append('')
+        lines.append(f'*{len(self.steps)} steps; replay with '
+                     f'`toymath replay --session <file>`.*')
+        return '\n'.join(lines)
 
     def render(self):
         """Terse human/agent-readable summary of the derivation."""

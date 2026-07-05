@@ -31,11 +31,14 @@ it appends each verified step to a replayable ledger.
 | `evaluate EXPR` | `evaluate "2(2)+3 = 7"` | exact arithmetic; on an equation reports `holds: true/false` |
 | `diff EXPR VAR` | `diff "x \sin x" x` | derivative, checked by central differences |
 | `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root, or at the first matching subterm (reported as `at`) |
+| `integrate_power_rule EXPR VAR` | `integrate_power_rule "3x^2+2x" x` | term-by-term power rule; accepts `\int ... dx` wrappers; refuses the `1/x` case (that is the table's log rule) |
+| `integrate_table EXPR VAR` | `integrate_table "2\cos x" x` | sin, cos, e^x, sinh, cosh, `1/x`→`ln x` (records `x > 0`); closed under sums and constant factors |
+| `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |
 | `factor_gcd EXPR` | `factor_gcd "6x^2+9x"` | pull out the common factor → `3x(2x+3)` |
 | `factor_quadratic EXPR VAR` | `factor_quadratic "x^2-5x+6" x` | rational roots → `(x-2)(x-3)`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown |
 | `lemmas` | | list rewrite lemmas |
-| `show --session f` | | render the ledger |
+| `show --session f [--format md]` | | render the ledger (Markdown with `--format md`) |
 | `replay --session f` | | re-verify every recorded step |
 
 ## How to solve an equation (there is deliberately no `solve`)
@@ -52,6 +55,23 @@ python toymath_cli.py replay --session d.json
 
 Feed each step's `result` verbatim as the next input (the ledger flags
 discontinuities). Check candidate solutions with `substitute` + `evaluate`.
+
+## How to integrate (there is deliberately no autonomous `integrate`)
+
+Pick the tactic; chain until no integral remains; verify the assembled
+answer by differentiating it:
+
+```bash
+python toymath_cli.py integrate_by_parts "\int x \sin x \, dx" x "x" "\sin x"
+python toymath_cli.py integrate_table "\int \left(-\cos\left(x\right)\right) \, d x" x
+# assemble: x(-cos x) - (-sin x + C)  =>  -x cos x + sin x + C, then verify:
+python toymath_cli.py diff "-x \cos(x) + \sin(x)" x
+python toymath_cli.py equal "<that derivative>" "x \sin x"    # -> yes
+```
+
+Antiderivatives carry `+ C` (a fresh symbol, reported as `constant`); the
+oracle checks them by central-difference differentiation against the
+integrand.
 
 ## Rules
 

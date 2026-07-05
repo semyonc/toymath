@@ -27,7 +27,8 @@ from ledger import Ledger  # noqa: E402
 
 TRANSFORMING_OPS = {'substitute', 'apply_both_sides', 'expand', 'collect',
                     'evaluate', 'differentiate', 'rewrite', 'factor_gcd',
-                    'factor_quadratic'}
+                    'factor_quadratic', 'integrate_power_rule',
+                    'integrate_table', 'integrate_by_parts'}
 
 
 def emit(obj, pretty=False):
@@ -91,6 +92,23 @@ def main(argv=None):
     p.add_argument('--direction', choices=['forward', 'backward'],
                    default='forward')
 
+    p = add_parser('integrate_power_rule',
+                   help='term-by-term power rule antiderivative')
+    p.add_argument('expr')
+    p.add_argument('var')
+
+    p = add_parser('integrate_table',
+                   help='basic-function antiderivatives (sin, cos, e^x, 1/x)')
+    p.add_argument('expr')
+    p.add_argument('var')
+
+    p = add_parser('integrate_by_parts',
+                   help='one application of integration by parts')
+    p.add_argument('expr')
+    p.add_argument('var')
+    p.add_argument('u')
+    p.add_argument('dv')
+
     p = add_parser('factor_gcd', help='pull out the common factor')
     p.add_argument('expr')
 
@@ -104,7 +122,8 @@ def main(argv=None):
     p.add_argument('expr2')
 
     add_parser('lemmas', help='list registered rewrite lemmas')
-    add_parser('show', help='render the session ledger')
+    p = add_parser('show', help='render the session ledger')
+    p.add_argument('--format', choices=['text', 'md'], default='text')
     add_parser('replay', help='re-verify every step in the session')
 
     args = parser.parse_args(argv)
@@ -123,6 +142,13 @@ def main(argv=None):
         res = primitives.differentiate(args.expr, args.var)
     elif args.cmd == 'rewrite':
         res = primitives.rewrite(args.expr, args.lemma, args.direction)
+    elif args.cmd == 'integrate_power_rule':
+        res = primitives.integrate_power_rule(args.expr, args.var)
+    elif args.cmd == 'integrate_table':
+        res = primitives.integrate_table(args.expr, args.var)
+    elif args.cmd == 'integrate_by_parts':
+        res = primitives.integrate_by_parts(args.expr, args.var,
+                                            args.u, args.dv)
     elif args.cmd == 'factor_gcd':
         res = primitives.factor_gcd(args.expr)
     elif args.cmd == 'factor_quadratic':
@@ -135,7 +161,10 @@ def main(argv=None):
         if not args.session:
             return emit({'ok': False, 'error': '--session required'})
         ledger = Ledger(args.session)
-        print(ledger.render())
+        if args.format == 'md':
+            print(ledger.render_markdown())
+        else:
+            print(ledger.render())
         return 0
     elif args.cmd == 'replay':
         if not args.session:

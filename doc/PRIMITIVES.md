@@ -53,6 +53,18 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    factorings in place of a general `factor`. `factor_quadratic` factors
    over Q via the discriminant, reports the roots, and honestly refuses
    irrational/complex cases.
+9. **integrate_power_rule / integrate_table / integrate_by_parts(u, dv)** —
+   tactic-shaped integration in place of an autonomous `integrate`. All
+   accept a bare integrand or an `\int ... d<var>` wrapper (definite
+   integrals refused). Antiderivatives carry a fresh `+ C` (collision-safe,
+   reported as `constant`) and are verified by central-difference
+   differentiation against the integrand. `by_parts` verifies the agent's
+   split (`u·dv` must equal the integrand via `equal?`), computes `du`
+   with the trusted differentiator and `v` from the table, and returns
+   `u v - \int v du` plus a `remaining_integral` handle for the next
+   step; its pieces are verified individually since the result still
+   contains an integral. The `1/x → ln x` rule records the assumption
+   `x > 0`.
 
 **equal_exprs(e1, e2)** → verdict `yes`/`no`/`unknown`. Canonical `RatFunc`
 comparison decides the rational fragment; outside it the numeric oracle

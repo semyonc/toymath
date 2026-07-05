@@ -419,8 +419,9 @@ def to_ratfunc(sym, notation):
         raise NotInFragment(f'unsupported term {sym!r}')
     f = notation.get(sym)
     if f is None:
-        if sym.name in FUNCTION_NAMES or sym.name in Notation.styles:
-            raise NotInFragment(f'function symbol {sym.name}')
+        if (sym.name in FUNCTION_NAMES or sym.name in Notation.styles
+                or sym.name in Notation.p_oper):
+            raise NotInFragment(f'operator symbol {sym.name}')
         return RatFunc(Poly.var(sym.name))
     name = f.sym.name
     if f.sym in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP):

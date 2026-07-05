@@ -1508,6 +1508,360 @@ def factor_quadratic(expr, var):
 
 
 # ---------------------------------------------------------------------------
+# integration tactics (no autonomous `integrate` on purpose: the agent picks
+# the tactic, toymath mechanically completes it)
+# ---------------------------------------------------------------------------
+
+_ANTIDERIV_TABLE = {
+    '\\sin': lambda x: f'-\\cos\\left({x}\\right)',
+    '\\cos': lambda x: f'\\sin\\left({x}\\right)',
+    '\\exp': lambda x: f'\\exp\\left({x}\\right)',
+    '\\sinh': lambda x: f'\\cosh\\left({x}\\right)',
+    '\\cosh': lambda x: f'\\sinh\\left({x}\\right)',
+}
+
+
+def _strip_integral(sym, notation, var):
+    """If sym is `\\int <integrand> [\\,] d<var>`, return the integrand sym;
+    None if it is not an integral; raises on malformed/mismatched ones."""
+    f = notation.getf(sym, Notation.P_LIST)
+    if f is None:
+        return None
+    args = list(f.args)
+    if not args:
+        return None
+    head = args[0]
+    if notation.getf(head, Notation.INDEX) is not None:
+        base = notation.getf(head, Notation.INDEX).args[0]
+        if isinstance(base, Symbol) and base.name == '\\int':
+            raise PrimitiveError('definite integrals are not supported yet')
+    if not (isinstance(head, Symbol) and head.name == '\\int'):
+        return None
+    tail = args[1:]
+    if len(tail) < 3:
+        raise PrimitiveError('malformed integral')
+    if not (isinstance(tail[-1], Symbol) and tail[-1].name == var):
+        raise PrimitiveError(f'integral is not with respect to {var!r}')
+    if not (isinstance(tail[-2], Symbol) and tail[-2].name == 'd'):
+        raise PrimitiveError('malformed integral (missing d' + var + ')')
+    body = tail[:-2]
+    while body and isinstance(body[-1], Symbol) \
+            and body[-1].name in Notation.styles:
+        body.pop()
+    if not body:
+        raise PrimitiveError('empty integrand')
+    if len(body) == 1:
+        return body[0]
+    return notation.setf(Notation.P_LIST, body)
+
+
+def _integrand(expr, var):
+    """Parse expr, stripping an optional \\int ... d<var> wrapper.
+    Returns (sym, notation, integrand_latex)."""
+    sym, notation = parse_latex(expr)
+    inner = _strip_integral(sym, notation, var)
+    if inner is not None:
+        sym = inner
+    return sym, notation, write_latex(sym, notation)
+
+
+def _fresh_constant(taken):
+    for name in ('C', 'K', 'Q'):
+        if name not in taken:
+            return name
+    return 'C'
+
+
+def _power_integrate_ratfunc(rf, var, assumptions, allow_log):
+    """Antiderivative latex (no constant) for num/den where den is a
+    constant or a single monomial in var. Raises PrimitiveError."""
+    den = rf.den
+    if den.variables() - {var}:
+        raise PrimitiveError(
+            'denominator must be constant or a power of the variable')
+    if den.is_const():
+        m, dconst = 0, den.const_value()
+    else:
+        if len(den.terms) != 1:
+            raise PrimitiveError(
+                'denominator must be a single power of the variable')
+        (mono, dconst), = den.terms.items()
+        m = dict(mono).get(var, 0)
+    pos = {}
+    neg_parts = []
+    log_parts = []
+    for mono, coeff in rf.num.terms.items():
+        d = dict(mono)
+        k = d.pop(var, 0)
+        rest = tuple(sorted(d.items()))
+        e = k - m
+        if e == -1:
+            if not allow_log:
+                raise PrimitiveError(
+                    'a term integrates to a logarithm (exponent -1); '
+                    'use integrate_table for it')
+            log_parts.append((coeff / dconst, rest))
+            continue
+        c2 = coeff / dconst / (e + 1)
+        if e + 1 > 0:
+            nm = tuple(sorted(list(rest) + [(var, e + 1)]))
+            pos[nm] = pos.get(nm, Fraction(0)) + c2
+        else:
+            neg_parts.append((c2, rest, -(e + 1)))
+    parts = []
+    p = Poly(pos)
+    if not p.is_zero():
+        out_n = Notation()
+        parts.append(write_latex(poly_to_notation(p, out_n), out_n))
+    for c2, rest, pw in sorted(neg_parts, key=lambda t: (t[2], t[1])):
+        out_n = Notation()
+        num_s = write_latex(poly_to_notation(Poly({rest: abs(c2)}), out_n),
+                            out_n)
+        den_s = var if pw == 1 else f'{var}^{{{pw}}}'
+        frac = f'\\frac{{{num_s}}}{{{den_s}}}'
+        parts.append('-' + frac if c2 < 0 else frac)
+    for c2, rest in sorted(log_parts, key=lambda t: t[1]):
+        out_n = Notation()
+        coeff_s = write_latex(poly_to_notation(Poly({rest: abs(c2)}), out_n),
+                              out_n)
+        term = _d_mul(coeff_s, f'\\ln\\left({var}\\right)')
+        parts.append('-' + term if c2 < 0 else term)
+        guard = {'text': f'{var} > 0', 'nonzero': var}
+        if guard not in assumptions:
+            assumptions.append(guard)
+    if not parts:
+        return '0'
+    return _d_add(*parts)
+
+
+def _is_bare_var(sym, notation, var):
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if g is not None:
+            sym = g.args[0]
+            continue
+        break
+    return isinstance(sym, Symbol) and notation.get(sym) is None \
+        and sym.name == var
+
+
+def _table_integrate(sym, notation, var, assumptions):
+    """Mechanical antiderivative (no constant): power rule + logarithm +
+    basic functions of the bare variable, closed under sums and constant
+    factors. Raises PrimitiveError with an honest reason otherwise."""
+    try:
+        rf = to_ratfunc(sym, notation)
+        return _power_integrate_ratfunc(rf, var, assumptions, allow_log=True)
+    except NotInFragment:
+        pass
+    except ZeroDivisionError:
+        raise PrimitiveError('integrand contains division by zero')
+    if not isinstance(sym, Symbol):
+        raise PrimitiveError(f'cannot integrate term {sym!r}')
+    f = notation.get(sym)
+    if f is None:
+        raise PrimitiveError(f'no rule to integrate {sym.name}')
+    op = f.sym
+    if op in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
+              Notation.PLUS):
+        return _table_integrate(f.args[0], notation, var, assumptions)
+    if op == Notation.MINUS:
+        return _d_neg(_table_integrate(f.args[0], notation, var,
+                                       assumptions))
+    if op == Notation.S_LIST:
+        parts = []
+        for t in f.args:
+            sign = notation.vgetf(t, [Notation.PLUS, Notation.MINUS])
+            if sign is not None and sign.sym == Notation.MINUS:
+                parts.append(_d_neg(_table_integrate(
+                    sign.args[0], notation, var, assumptions)))
+            elif sign is not None:
+                parts.append(_table_integrate(sign.args[0], notation, var,
+                                              assumptions))
+            else:
+                parts.append(_table_integrate(t, notation, var, assumptions))
+        return _d_add(*parts)
+    if op == Notation.P_LIST:
+        # peel var-free constant factors off the front
+        args = [a for a in f.args if not (isinstance(a, Symbol)
+                                          and a.name in Notation.styles)]
+        consts = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if (isinstance(a, Symbol) and notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                break
+            if var in free_symbols(a, notation):
+                break
+            consts.append(write_latex(a, notation))
+            i += 1
+        core = args[i:]
+        if not core:
+            # fully constant integrand: c dx -> c x
+            return _d_mul(_d_mul(*consts) if consts else '1', var)
+        if len(core) == 1:
+            inner = _table_integrate(core[0], notation, var, assumptions)
+        else:
+            inner = _table_core_plist(core, notation, var)
+        if consts:
+            return _d_mul(*(consts + [_paren(inner) if _is_sum_str(inner)
+                                      else inner]))
+        return inner
+    if op == Notation.INDEX:
+        sub, sup_l, power, sup_r = f.args[1]
+        base = f.args[0]
+        if (isinstance(base, Symbol) and base.name == 'e'
+                and power is not None and sub is None and sup_l is None
+                and sup_r is None and _is_bare_var(power, notation, var)):
+            return f'e^{{{var}}}'
+        raise PrimitiveError(
+            'no table rule for this power; integrate_power_rule handles '
+            'rational powers, or use integrate_by_parts')
+    if op == Notation.FUNC:
+        fname, arg = f.args[0], f.args[1]
+        if isinstance(fname, Symbol) and fname.name in _ANTIDERIV_TABLE \
+                and _is_bare_var(arg, notation, var):
+            return _ANTIDERIV_TABLE[fname.name](var)
+        raise PrimitiveError(
+            'table rules require a basic function of the bare variable')
+    raise PrimitiveError(f'no rule to integrate operation {op.name}')
+
+
+def _table_core_plist(core, notation, var):
+    """Integrate a p-list core of the form [func, arg...] where the
+    argument is the bare variable."""
+    head = core[0]
+    if (isinstance(head, Symbol) and notation.get(head) is None
+            and head.name in _ANTIDERIV_TABLE):
+        rest = core[1:]
+        if len(rest) == 1 and _is_bare_var(rest[0], notation, var):
+            return _ANTIDERIV_TABLE[head.name](var)
+        raise PrimitiveError(
+            f'{head.name}: table rules require the bare variable as '
+            'argument; use integrate_by_parts or substitution')
+    raise PrimitiveError(
+        'integrand is a product; use integrate_by_parts and choose u, dv')
+
+
+def _finish_integration(op, args, expr, integrand_latex, body, var,
+                        assumptions):
+    taken = set()
+    try:
+        s, n = parse_latex(integrand_latex)
+        taken = free_symbols(s, n) | {var}
+    except PrimitiveError:
+        pass
+    const = _fresh_constant(taken)
+    result = f'{body} + {const}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error(op, args, f'internal: unparseable result: {e}')
+    rec = _result(op, args, expr, result, assumptions=assumptions,
+                  extra={'constant': const, 'integrand': integrand_latex})
+    rec['check'] = _derivative_check(result, integrand_latex, var)
+    return rec
+
+
+def integrate_power_rule(expr, var):
+    """Term-by-term power rule for polynomials and rational expressions
+    with a constant or single-power denominator. Refuses the exponent -1
+    case (that is integrate_table's logarithm rule)."""
+    args = {'expr': expr, 'var': var}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+        rf = to_ratfunc(sym, notation)
+    except PrimitiveError as e:
+        return _error('integrate_power_rule', args, str(e))
+    except ZeroDivisionError:
+        return _error('integrate_power_rule', args, 'division by zero')
+    except NotInFragment as e:
+        return _error('integrate_power_rule', args,
+                      f'outside the rational fragment: {e}; '
+                      'use integrate_table or integrate_by_parts')
+    assumptions = []
+    try:
+        body = _power_integrate_ratfunc(rf, var, assumptions,
+                                        allow_log=False)
+    except PrimitiveError as e:
+        return _error('integrate_power_rule', args, str(e))
+    return _finish_integration('integrate_power_rule', args, expr,
+                               integrand_latex, body, var, assumptions)
+
+
+def integrate_table(expr, var):
+    """Basic-function antiderivatives (sin, cos, e^x, sinh, cosh, 1/x),
+    closed under sums, constant factors, and the power rule."""
+    args = {'expr': expr, 'var': var}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+        assumptions = []
+        body = _table_integrate(sym, notation, var, assumptions)
+    except PrimitiveError as e:
+        return _error('integrate_table', args, str(e))
+    return _finish_integration('integrate_table', args, expr,
+                               integrand_latex, body, var, assumptions)
+
+
+def integrate_by_parts(expr, var, u, dv):
+    """One application of integration by parts with the agent's choice of
+    u and dv: returns u v - \\int v du. Requires u * dv == integrand; the
+    remaining integral is left for the next step."""
+    args = {'expr': expr, 'var': var, 'u': u, 'dv': dv}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+        usym, unotation = parse_latex(u)
+        dvsym, dvnotation = parse_latex(dv)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts', args, str(e))
+    if var not in free_symbols(usym, unotation):
+        return _error('integrate_by_parts', args,
+                      f'u must depend on {var!r}')
+    eq = equal_exprs(f'{_paren(u)} {_paren(dv)}', integrand_latex)
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('integrate_by_parts', args,
+                      f'u * dv must equal the integrand '
+                      f'(verdict: {eq.get("verdict", "error")})')
+    du_rec = differentiate(u, var)
+    if not du_rec.get('ok'):
+        return _error('integrate_by_parts', args,
+                      f'cannot differentiate u: {du_rec.get("error")}')
+    assumptions = []
+    try:
+        v = _table_integrate(dvsym, dvnotation, var, assumptions)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts', args,
+                      f'cannot integrate dv mechanically: {e}; '
+                      'choose a simpler dv')
+    du = du_rec['result']
+    uv = _d_mul(_paren(u) if _is_sum_str(u) else u,
+                _paren(v) if _is_sum_str(v) or v.startswith('-') else v)
+    inner = _d_mul(_paren(v) if _is_sum_str(v) or v.startswith('-') else v,
+                   _paren(du) if _is_sum_str(du) or du.startswith('-')
+                   else du)
+    result = f'{uv} - \\int {inner} \\, d {var}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts', args,
+                      f'internal: unparseable result: {e}')
+    rec = _result('integrate_by_parts', args, expr, result,
+                  assumptions=assumptions,
+                  extra={'u': u, 'du': du, 'v': v, 'dv': dv,
+                         'remaining_integral': f'\\int {inner} \\, d {var}'})
+    # the whole result contains an unevaluated integral, so verify the
+    # pieces: v' == dv (central differences) and du (already self-checked);
+    # the by-parts identity itself is mechanical
+    v_check = _derivative_check(v, write_latex(dvsym, dvnotation), var)
+    rec['check'] = _merge_checks(v_check,
+                                 du_rec.get('check', {'status': 'skipped'}))
+    if rec['check'].get('status') == 'agree':
+        rec['check']['method'] = 'per-piece (v and du verified)'
+    return rec
+
+
+# ---------------------------------------------------------------------------
 # checker: equal?
 # ---------------------------------------------------------------------------
 
