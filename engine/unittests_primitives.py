@@ -397,6 +397,13 @@ class TestParsingEdges(unittest.TestCase):
         self.assertTrue(r['ok'])
         self.assertEqual(r['result'], '2x^{2}+2x')
 
+    def test_star_chain(self):
+        # '*' and \cdot are grammar-level product separators (P_LIST),
+        # so chains parse without preprocessing
+        self.assertEqual(P.evaluate('2*3*4')['result'], '24')
+        self.assertEqual(P.equal_exprs('a \\cdot b * c', 'c b a')['verdict'],
+                         'yes')
+
     def test_substitute_into_equation(self):
         r = P.substitute('x^2 - 6x + 5 = 0', 'x', '5')
         self.assertTrue(r['ok'])

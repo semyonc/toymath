@@ -52,11 +52,8 @@ class EvalError(Exception):
 # ---------------------------------------------------------------------------
 
 def parse_latex(latex):
-    # the grammar's \cdot rule is binary and cannot chain; juxtaposition
-    # is the same product, so normalize before parsing
-    normalized = re.sub(r'\\cdot\b', ' ', latex)
     # the lexer has no bare < / > tokens, only the \lt / \gt commands
-    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
+    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', latex)
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
     notation = Notation()
     try:
