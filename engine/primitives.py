@@ -94,12 +94,25 @@ def _write_std(sym, notation):
 
 class _GroupStripper(Replicator):
     """Copy a graph dropping transparent {}-groups, for normal-form
-    comparison only (the result may not print as valid LaTeX)."""
+    comparison only (the result may not print as valid LaTeX).
+    With all_brackets=True, ()-groups and \\left...\\right groups are
+    stripped too (used for atom identity, where any grouping is noise)."""
+
+    def __init__(self, notation, output_notation, all_brackets=False):
+        super(_GroupStripper, self).__init__(notation, output_notation)
+        self.all_brackets = all_brackets
 
     def enter_group(self, sym, f):
-        if f.props.get('br') == '{}' and 'quoted' not in f.props:
+        transparent = f.props.get('br') == '{}' or (
+            self.all_brackets and f.props.get('br') == '()')
+        if transparent and 'quoted' not in f.props:
             return self.enter_formula(f.args[0])
         return super(_GroupStripper, self).enter_group(sym, f)
+
+    def enter_vgroup(self, sym, f):
+        if self.all_brackets and f.props.get('br') == '()':
+            return self.enter_formula(f.args[0])
+        return super(_GroupStripper, self).enter_vgroup(sym, f)
 
 
 def _normal_form(latex):
@@ -693,8 +706,11 @@ def _merge_checks(c1, c2):
     if c2['status'] == 'disagree':
         return c2
     if c1['status'] == 'agree' and c2['status'] == 'agree':
-        return {'status': 'agree',
-                'samples': min(c1['samples'], c2['samples'])}
+        merged = {'status': 'agree'}
+        samples = [c['samples'] for c in (c1, c2) if 'samples' in c]
+        if samples:
+            merged['samples'] = min(samples)
+        return merged
     return {'status': 'skipped',
             'reason': c1.get('reason') or c2.get('reason') or 'partial'}
 
@@ -702,6 +718,151 @@ def _merge_checks(c1, c2):
 # ---------------------------------------------------------------------------
 # primitives: expand / collect / evaluate  (polyrat-powered)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# opaque atoms: canonicalize expressions outside the rational fragment by
+# treating maximal non-fragment subtrees (\cos x, e^x, unevaluated \int ...)
+# as opaque variables, running the SAME polyrat engine, and substituting the
+# subtrees back. No new rewrite rules - just the trusted canonical core.
+# ---------------------------------------------------------------------------
+
+class _AtomStore(object):
+    def __init__(self):
+        self.by_key = {}   # normal-form key -> atom name
+        self.exprs = {}    # atom name -> (sym, notation)
+
+    def atom(self, sym, notation):
+        latex = _write_std(sym, notation)
+        try:
+            # atom identity ignores all transparent grouping, so \sin(x)
+            # and \sin x share one atom
+            s2, n2 = parse_latex(latex)
+            out = Notation()
+            key = _write_std(
+                _GroupStripper(n2, out, all_brackets=True)(s2), out)
+        except PrimitiveError:
+            key = latex
+        name = self.by_key.get(key)
+        if name is None:
+            # 'zz#' prefix: sorts after single-letter variables, so
+            # canonical monomials print as x (\sin x), not (\sin x) x
+            name = f'zz#a{len(self.exprs)}'
+            self.by_key[key] = name
+            self.exprs[name] = (sym, notation)
+        return Symbol(name)
+
+    def mapping(self):
+        return {Symbol(name): se for name, se in self.exprs.items()}
+
+
+_NON_EXPR_OPS = (Notation.COMP, Notation.C_LIST, Notation.O_LIST,
+                 Notation.A_LIST)
+
+
+def _atomize_walk(sym, notation, out_n, store):
+    """Copy sym into out_n replacing maximal non-fragment subtrees with
+    opaque atom symbols. `notation` must be a private clone (span nodes are
+    added to it). Raises NotInFragment for non-expressions."""
+    try:
+        to_ratfunc(sym, notation)
+        return Replicator(notation, out_n)(sym)
+    except NotInFragment:
+        pass
+    if not isinstance(sym, Symbol):
+        raise NotInFragment(f'cannot atomize {sym!r}')
+    f = notation.get(sym)
+    if f is None:
+        raise NotInFragment(f'bare operator {sym.name}')
+    op = f.sym
+    if op in _NON_EXPR_OPS:
+        raise NotInFragment(f'{op.name} is not an expression')
+    if op in (Notation.GROUP, Notation.V_GROUP):
+        inner = _atomize_walk(f.args[0], notation, out_n, store)
+        return out_n.setf(op, (inner,), **f.props)
+    if op in (Notation.PLUS, Notation.MINUS):
+        inner = _atomize_walk(f.args[0], notation, out_n, store)
+        return out_n.setf(op, (inner,))
+    if op == Notation.S_LIST:
+        terms = [_atomize_walk(t, notation, out_n, store) for t in f.args]
+        return out_n.setf(op, terms)
+    if op == Notation.SLASH or op.name in FRAC_NAMES:
+        a = _atomize_walk(f.args[0], notation, out_n, store)
+        b = _atomize_walk(f.args[1], notation, out_n, store)
+        return out_n.setf(f.sym, (a, b), **f.props)
+    if op == Notation.INDEX:
+        sub, sup_l, power, sup_r = f.args[1]
+        if sub is None and sup_l is None and sup_r is None \
+                and power is not None:
+            try:
+                _index_power(power, notation)
+                base = _atomize_walk(f.args[0], notation, out_n, store)
+                pw = Replicator(notation, out_n)(power)
+                return out_n.setf(op, (base, (None, None, pw, None)))
+            except NotInFragment:
+                pass
+        return store.atom(sym, notation)
+    if op == Notation.P_LIST:
+        args = [a for a in f.args if not (isinstance(a, Symbol)
+                                          and a.name in Notation.styles)]
+
+        def is_head(a):
+            if (isinstance(a, Symbol) and notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                return True
+            fp = _func_power(a, notation)
+            return fp is not None and fp[0] in FUNC_NAMES
+
+        out_args = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if isinstance(a, Symbol) and notation.get(a) is None \
+                    and a.name == '\\int':
+                # unevaluated integral: the rest of the product is one atom
+                span = notation.setf(Notation.P_LIST, args[i:]) \
+                    if len(args[i:]) > 1 else a
+                out_args.append(store.atom(span, notation))
+                break
+            if is_head(a):
+                inner, j = _func_arg_span(args, i, notation, is_head)
+                if not inner:
+                    raise NotInFragment(f'{a!r} without argument')
+                span_syms = [a] + inner
+                span = notation.setf(Notation.P_LIST, span_syms)
+                out_args.append(store.atom(span, notation))
+                i = j
+            else:
+                out_args.append(_atomize_walk(a, notation, out_n, store))
+                i += 1
+        if len(out_args) == 1:
+            return out_args[0]
+        return out_n.setf(Notation.P_LIST, out_args)
+    # anything else expression-shaped (FUNC, \sqrt, prime, ...) is an atom
+    return store.atom(sym, notation)
+
+
+def _atomized_ratfunc(sym, notation, store):
+    """RatFunc over opaque atoms; the caller substitutes atoms back via
+    store.mapping()."""
+    work = notation.clone()
+    out_n = Notation()
+    new_sym = _atomize_walk(sym, work, out_n, store)
+    return to_ratfunc(new_sym, out_n)
+
+
+def _atomized_canonical(sym, notation):
+    """Canonical latex of an expression outside the fragment.
+    Returns (latex, atom_count); raises NotInFragment if impossible."""
+    store = _AtomStore()
+    rf = _atomized_ratfunc(sym, notation, store)
+    res_n = Notation()
+    res_s = ratfunc_to_notation(rf, res_n)
+    if not store.exprs:
+        return write_latex(res_s, res_n), 0
+    final_n = Notation()
+    final_s = Substitutor(res_n, final_n, store.mapping())(res_s)
+    return write_latex(final_s, final_n), len(store.exprs)
+
 
 def _comp_split(sym, notation):
     """Return (lhs, rhs, rel) for a supported relation, None for plain
@@ -716,7 +877,10 @@ def _comp_split(sym, notation):
 
 
 def _canonical_side(side, notation):
-    rf = to_ratfunc(side, notation)
+    try:
+        rf = to_ratfunc(side, notation)
+    except NotInFragment:
+        return _atomized_canonical(side, notation)[0]
     out_n = Notation()
     return write_latex(ratfunc_to_notation(rf, out_n), out_n)
 
@@ -742,9 +906,18 @@ def expand(expr):
         return _error('expand', args, str(e))
     except ZeroDivisionError:
         return _error('expand', args, 'expression contains division by zero')
-    except NotInFragment as e:
-        return _error('expand', args,
-                      f'outside the rational fragment: {e}')
+    except NotInFragment:
+        # canonicalize over opaque atoms (\cos x, e^x, unevaluated \int)
+        try:
+            result, n_atoms = _atomized_canonical(sym, notation)
+        except NotInFragment as e:
+            return _error('expand', args,
+                          f'outside the rational fragment: {e}')
+        except ZeroDivisionError:
+            return _error('expand', args,
+                          'expression contains division by zero')
+        return _checked(_result('expand', args, expr, result,
+                                extra={'opaque_atoms': n_atoms}))
     out_n = Notation()
     result = write_latex(ratfunc_to_notation(rf, out_n), out_n)
     return _checked(_result('expand', args, expr, result))
@@ -1705,6 +1878,15 @@ def _table_integrate(sym, notation, var, assumptions):
             return _d_mul(*(consts + [_paren(inner) if _is_sum_str(inner)
                                       else inner]))
         return inner
+    if op == Notation.SLASH or op.name in FRAC_NAMES:
+        num, den = f.args[0], f.args[1]
+        if var in free_symbols(den, notation):
+            raise PrimitiveError(
+                'no table rule for a variable denominator beyond 1/x; '
+                'use integrate_power_rule or substitution')
+        den_s = write_latex(den, notation)
+        inner = _table_integrate(num, notation, var, assumptions)
+        return f'\\frac{{{inner}}}{{{den_s}}}'
     if op == Notation.INDEX:
         sub, sup_l, power, sup_r = f.args[1]
         base = f.args[0]
@@ -1858,6 +2040,82 @@ def integrate_by_parts(expr, var, u, dv):
     return rec
 
 
+def integrate_substitute(expr, var, u_expr, u_var, new_integrand):
+    """u-substitution with the agent's choice of u = u_expr and the
+    integrand rewritten in u_var. Verifies mechanically that
+    new_integrand[u_var := u_expr] * du/dx equals the original integrand,
+    then returns \\int new_integrand d u_var. Substitute u_expr back after
+    integrating the transformed integral."""
+    args = {'expr': expr, 'var': var, 'u_expr': u_expr, 'u_var': u_var,
+            'new_integrand': new_integrand}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+        usym, unotation = parse_latex(u_expr)
+        nsym, nnotation = parse_latex(new_integrand)
+        vsym, vnotation = parse_latex(u_var)
+    except PrimitiveError as e:
+        return _error('integrate_substitute', args, str(e))
+    if not (isinstance(vsym, Symbol) and vnotation.get(vsym) is None):
+        return _error('integrate_substitute', args,
+                      f'u_var must be a plain symbol, got {u_var!r}')
+    if u_var == var:
+        return _error('integrate_substitute', args,
+                      'u_var must differ from the integration variable')
+    if u_var in free_symbols(sym, notation):
+        return _error('integrate_substitute', args,
+                      f'{u_var!r} already occurs in the integrand; '
+                      'pick a fresh variable')
+    if var not in free_symbols(usym, unotation):
+        return _error('integrate_substitute', args,
+                      f'u must depend on {var!r}')
+    if var in free_symbols(nsym, nnotation):
+        return _error('integrate_substitute', args,
+                      f'the new integrand must not mention {var!r}; '
+                      f'write it in terms of {u_var!r} only')
+    if u_var not in free_symbols(nsym, nnotation):
+        return _error('integrate_substitute', args,
+                      f'the new integrand must be written in terms of '
+                      f'{u_var!r}')
+    du_rec = differentiate(u_expr, var)
+    if not du_rec.get('ok'):
+        return _error('integrate_substitute', args,
+                      f'cannot differentiate u: {du_rec.get("error")}')
+    back_rec = substitute(new_integrand, u_var, u_expr)
+    if not back_rec.get('ok'):
+        return _error('integrate_substitute', args,
+                      f'cannot check the rewrite: {back_rec.get("error")}')
+    du = du_rec['result']
+    reconstructed = _d_mul(_paren(back_rec['result']), _paren(du))
+    eq = equal_exprs(reconstructed, integrand_latex)
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error(
+            'integrate_substitute', args,
+            f'new_integrand[{u_var} := {u_expr}] * du/d{var} does not '
+            f'equal the integrand (verdict: {eq.get("verdict", "error")})')
+    body = _paren(new_integrand) if _is_sum_str(new_integrand) \
+        else new_integrand
+    result = f'\\int {body} \\, d {u_var}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_substitute', args,
+                      f'internal: unparseable result: {e}')
+    rec = _result('integrate_substitute', args, expr, result,
+                  extra={'u': f'{u_var} = {u_expr}', 'du': du,
+                         'back_substitute': {'var': u_var, 'value': u_expr}})
+    # the substitution identity was verified by equal?; surface it as the
+    # step check
+    check = {'status': 'agree',
+             'method': f'substitution identity via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    rec['check'] = _merge_checks(check,
+                                 du_rec.get('check', {'status': 'skipped'}))
+    if rec['check'].get('status') == 'agree':
+        rec['check']['method'] = check['method']
+    return rec
+
+
 # ---------------------------------------------------------------------------
 # checker: equal?
 # ---------------------------------------------------------------------------
@@ -1904,6 +2162,18 @@ def equal_exprs(expr1, expr2):
         return {'ok': True, 'op': 'equal', 'args': args,
                 'verdict': verdict, 'method': 'canonical'}
     except (NotInFragment, ZeroDivisionError):
+        pass
+    # canonical comparison over shared opaque atoms: equality is conclusive
+    # (atoms match syntactically), inequality is NOT (distinct atoms may
+    # still be related, e.g. sin^2 + cos^2), so only a 'yes' short-circuits
+    try:
+        store = _AtomStore()
+        rf1 = _atomized_ratfunc(s1, n1, store)
+        rf2 = _atomized_ratfunc(s2, n2, store)
+        if rf1 == rf2:
+            return {'ok': True, 'op': 'equal', 'args': args,
+                    'verdict': 'yes', 'method': 'canonical (opaque atoms)'}
+    except (NotInFragment, ZeroDivisionError, PrimitiveError):
         pass
     check = numeric_spot_check(expr1, expr2, samples=20)
     if check['status'] == 'agree':

@@ -158,9 +158,43 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         r = P.expand('{2}x+{3} - {3} = {7} - {3}')
         self.assertEqual(r['result'], '2x = 4')
 
-    def test_expand_rejects_trig(self):
+    def test_expand_trig_via_atoms(self):
+        # outside the fragment, expand canonicalizes over opaque atoms
         r = P.expand('\\sin x + 1')
-        self.assertFalse(r['ok'])
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_expand_merges_atom_terms(self):
+        r = P.expand('2 \\sin x + 3 \\sin x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(P.equal_exprs(r['result'],
+                                       '5 \\sin x')['verdict'], 'yes')
+
+    def test_expand_cancels_atom_terms(self):
+        r = P.expand('x \\sin x - x \\sin x + 1')
+        self.assertEqual(r['result'], '1')
+
+    def test_expand_finishes_by_parts_assembly(self):
+        r = P.expand('x \\left(-\\cos\\left(x\\right)\\right) '
+                     '- \\left(-\\sin\\left(x\\right) + C\\right)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(
+            P.equal_exprs(r['result'],
+                          '-x \\cos(x) + \\sin(x) - C')['verdict'], 'yes')
+
+    def test_equal_via_shared_atoms(self):
+        r = P.equal_exprs('2\\sin x + \\cos x - \\cos x', '\\sin(x) + \\sin x')
+        self.assertEqual(r['verdict'], 'yes')
+        self.assertIn('atoms', r['method'])
+
+    def test_atom_inequality_not_trusted(self):
+        # distinct atoms may still be related; canonical inequality must
+        # fall through to the oracle, which decides correctly
+        r = P.equal_exprs('\\sin^2 x + \\cos^2 x', '1')
+        self.assertEqual(r['verdict'], 'yes')
+        self.assertIn('numeric', r['method'])
 
     def test_collect(self):
         r = P.collect('x^2 + 2x + a x + a', 'x')
@@ -510,6 +544,47 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(d['ok'])
         self.assertEqual(
             P.equal_exprs(d['result'], 'x \\sin x')['verdict'], 'yes')
+
+    def test_substitute_tactic_chain(self):
+        # ∫ 2x cos(x²) dx via u = x²
+        r1 = self.ok(P.integrate_substitute('2x \\cos(x^2)', 'x',
+                                            'x^2', 'u', '\\cos(u)'))
+        self.assertEqual(r1['result'], '\\int \\cos(u) \\, d u')
+        self.assertEqual(r1['back_substitute'],
+                         {'var': 'u', 'value': 'x^2'})
+        r2 = self.ok(P.integrate_table(r1['result'], 'u'))
+        r3 = P.substitute(r2['result'], 'u', 'x^2')
+        self.assertTrue(r3['ok'])
+        d = P.differentiate('\\sin(x^2)', 'x')
+        self.assertEqual(
+            P.equal_exprs(d['result'], '2x \\cos(x^2)')['verdict'], 'yes')
+
+    def test_substitute_tactic_rejects_wrong_rewrite(self):
+        r = P.integrate_substitute('2x \\cos(x^2)', 'x', 'x^2', 'u',
+                                   '\\sin(u)')
+        self.assertFalse(r['ok'])
+
+    def test_substitute_tactic_rejects_var_leak(self):
+        r = P.integrate_substitute('2x \\cos(x^2)', 'x', 'x^2', 'u',
+                                   'x \\cos(u)')
+        self.assertFalse(r['ok'])
+
+    def test_substitute_tactic_rejects_colliding_uvar(self):
+        r = P.integrate_substitute('2u \\cos(u^2)', 'u', 'u^2', 'u',
+                                   '\\cos(u)')
+        self.assertFalse(r['ok'])
+
+    def test_substitute_tactic_linear_inner(self):
+        r1 = self.ok(P.integrate_substitute('\\int e^{3x} \\, dx', 'x',
+                                            '3x', 'u', '\\frac{e^u}{3}'))
+        r2 = self.ok(P.integrate_table(r1['result'], 'u'))
+        self.assertEqual(
+            P.equal_exprs(r2['result'].replace(' + C', ''),
+                          '\\frac{e^{u}}{3}')['verdict'], 'yes')
+
+    def test_table_constant_denominator(self):
+        r = self.ok(P.integrate_table('\\frac{\\sin u}{3}', 'u'))
+        self.assertIn('\\cos', r['result'])
 
     def test_ledger_replay_with_integration(self):
         path = os.path.join(tempfile.mkdtemp(), 'session.json')

@@ -116,6 +116,10 @@ class Ledger(object):
                 a['expr'], a['var']),
             'integrate_by_parts': lambda a: primitives.integrate_by_parts(
                 a['expr'], a['var'], a['u'], a['dv']),
+            'integrate_substitute':
+                lambda a: primitives.integrate_substitute(
+                    a['expr'], a['var'], a['u_expr'], a['u_var'],
+                    a['new_integrand']),
         }
         for step in self.steps:
             fn = dispatch.get(step['op'])

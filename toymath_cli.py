@@ -28,7 +28,8 @@ from ledger import Ledger  # noqa: E402
 TRANSFORMING_OPS = {'substitute', 'apply_both_sides', 'expand', 'collect',
                     'evaluate', 'differentiate', 'rewrite', 'factor_gcd',
                     'factor_quadratic', 'integrate_power_rule',
-                    'integrate_table', 'integrate_by_parts'}
+                    'integrate_table', 'integrate_by_parts',
+                    'integrate_substitute'}
 
 
 def emit(obj, pretty=False):
@@ -109,6 +110,15 @@ def main(argv=None):
     p.add_argument('u')
     p.add_argument('dv')
 
+    p = add_parser('integrate_substitute',
+                   help='u-substitution: verify the rewrite, transform '
+                        'the integral')
+    p.add_argument('expr')
+    p.add_argument('var')
+    p.add_argument('u_expr')
+    p.add_argument('u_var')
+    p.add_argument('new_integrand')
+
     p = add_parser('factor_gcd', help='pull out the common factor')
     p.add_argument('expr')
 
@@ -149,6 +159,10 @@ def main(argv=None):
     elif args.cmd == 'integrate_by_parts':
         res = primitives.integrate_by_parts(args.expr, args.var,
                                             args.u, args.dv)
+    elif args.cmd == 'integrate_substitute':
+        res = primitives.integrate_substitute(args.expr, args.var,
+                                              args.u_expr, args.u_var,
+                                              args.new_integrand)
     elif args.cmd == 'factor_gcd':
         res = primitives.factor_gcd(args.expr)
     elif args.cmd == 'factor_quadratic':

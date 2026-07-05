@@ -35,7 +35,14 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    Each new side is oracle-checked against `op(old side, arg)`.
 3. **expand(expr)** — `to_ratfunc` → canonical, degree-ordered output.
    Accepts equations (expands each side), which doubles as the
-   "simplify both sides" move after `apply_both_sides`.
+   "simplify both sides" move after `apply_both_sides`. Outside the
+   rational fragment it canonicalizes over *opaque atoms*: maximal
+   non-fragment subtrees (`\cos x`, `e^x`, unevaluated `\int ...`) become
+   opaque variables, the same polyrat engine runs, and the subtrees are
+   substituted back — so like terms merge (`2\sin x + 3\sin x → 5(\sin
+   x)`), cancellations happen, and tactic-chain assemblies finish inside
+   the ledger. No new rewrite rules; atom identity ignores transparent
+   grouping (`\sin(x)` ≡ `\sin x`).
 4. **collect(expr, var)** — polynomial grouped by powers of `var`.
    Accepts equations.
 5. **evaluate(expr)** — exact `Fraction` arithmetic when no free variables
@@ -53,7 +60,8 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    factorings in place of a general `factor`. `factor_quadratic` factors
    over Q via the discriminant, reports the roots, and honestly refuses
    irrational/complex cases.
-9. **integrate_power_rule / integrate_table / integrate_by_parts(u, dv)** —
+9. **integrate_power_rule / integrate_table / integrate_by_parts(u, dv) /
+   integrate_substitute(u_expr, u_var, new_integrand)** —
    tactic-shaped integration in place of an autonomous `integrate`. All
    accept a bare integrand or an `\int ... d<var>` wrapper (definite
    integrals refused). Antiderivatives carry a fresh `+ C` (collision-safe,
@@ -63,8 +71,17 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    with the trusted differentiator and `v` from the table, and returns
    `u v - \int v du` plus a `remaining_integral` handle for the next
    step; its pieces are verified individually since the result still
-   contains an integral. The `1/x → ln x` rule records the assumption
-   `x > 0`.
+   contains an integral. `integrate_substitute` takes the agent's `u =
+   u_expr` and the integrand rewritten in `u_var`, mechanically verifies
+   `f(u(x))·u'(x)` equals the original integrand via `equal?`, and returns
+   `\int f(u) du` with a `back_substitute` handle. The `1/x → ln x` rule
+   records the assumption `x > 0`.
+
+**equal?** additionally compares canonically over *shared opaque atoms*
+when both sides leave the fragment: syntactic atom equality is conclusive
+for "yes" (`\sin(x)·x ≡ x \sin x` decides canonically), but atom
+*inequality* is never trusted — distinct atoms may still be related (e.g.
+`sin²x + cos²x` vs `1`), so those fall through to the numeric oracle.
 
 **equal_exprs(e1, e2)** → verdict `yes`/`no`/`unknown`. Canonical `RatFunc`
 comparison decides the rational fragment; outside it the numeric oracle
