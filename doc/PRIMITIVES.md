@@ -17,6 +17,8 @@ touch the fixed-point rewrite rules.
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification, chain-continuity detection |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
 | `engine/agent_do.py` | The `do!` Jupyter endpoint: OpenRouter-backed agent (OpenAI Agents SDK) whose only way to do math is calling the primitives |
+| `engine/plot_sandbox.py` | Sandboxed plotting backends for the do! agent (backend seam; v1: Pyodide under Deno) |
+| `engine/pyodide_runner.mjs` | Vendored Deno script: runs agent plot code in the Pyodide WASM sandbox, captures matplotlib figures as base64 PNGs |
 | `engine/unittests_primitives.py` | 132 tests |
 | `engine/unittests_do.py` | do! endpoint tests (scripted fake model; live OpenRouter test behind `TOYMATH_LIVE_TESTS=1`) |
 
@@ -173,6 +175,20 @@ do! solve [[3]] for x, recording every assumption
 - All `do!` cells in a notebook share one session ledger; each cell
   renders only the steps it added, and a replay verifies the whole
   notebook's derivation chain.
+- **Plotting** (optional): when Deno is installed (`brew install deno`),
+  the agent gets a `plot(code, caption)` tool. Its matplotlib/seaborn
+  code runs OUTSIDE the kernel, in a Pyodide WASM sandbox under Deno's
+  deny-by-default permissions (read/write only the wheel cache, network
+  only to the package CDNs, **no environment access** — the agent cannot
+  reach the OpenRouter key or the filesystem even through the `js`
+  bridge). Figures stream inline captioned *"illustration, not
+  machine-checked"*: plots are illustrations, never evidence — they do
+  not become ledger steps and `replay` ignores them. The model receives
+  only figure counts, never image bytes. Disable with
+  `TOYMATH_SANDBOX=off`; the tool (and its prompt section) simply isn't
+  registered when unavailable. The backend seam
+  (`run_plot(code, timeout)`) is container-agnostic, so a Docker /
+  llm-sandbox backend can be added later.
 
 ## Output format
 

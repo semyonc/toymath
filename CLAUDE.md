@@ -209,3 +209,5 @@ engine/
 - Commands auto-discovered via `register_actions()` on startup
 - The `do!` agent endpoint requires the `OPEN_ROUTER` key in `.env`
   (model via `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`)
+- do! plotting needs Deno (`brew install deno`); sandboxed via Pyodide,
+  toggle with `TOYMATH_SANDBOX=off`

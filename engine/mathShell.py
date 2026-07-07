@@ -168,9 +168,23 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail the derivation step
 
+        def on_plot(caption, images):
+            try:
+                parts = [f'<div><img src="data:image/png;base64,{b64}" '
+                         f'style="max-width:640px"/></div>'
+                         for b64 in images]
+                parts.append(f'<div style="color:#888"><em>'
+                             f'{_html.escape(caption)}</em> '
+                             f'&mdash; illustration, not machine-checked'
+                             f'</div>')
+                display(HTML(''.join(parts)))
+            except Exception:
+                pass  # rendering must never fail the plot call
+
         try:
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
-                                           on_step=on_step)
+                                           on_step=on_step,
+                                           on_plot=on_plot)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return

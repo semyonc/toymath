@@ -79,6 +79,18 @@ _DO_RULES = """
   when that is cheap.
 """
 
+_PLOT_RULES = """
+## Plotting (optional)
+
+A `plot` tool renders matplotlib/seaborn figures in an isolated sandbox;
+they appear to the user inline, marked as unverified illustration. Use it
+only when a picture genuinely helps (shape of a function, roots, area
+under a curve). The code must be self-contained: import what you use,
+build numpy grids, label axes, add a legend for multiple curves; one
+figure per call. You translate LaTeX to Python yourself. Plots are never
+ledger steps - if plotting fails, continue the derivation without it.
+"""
+
 _FALLBACK_SKILL = """# ToyMath verified derivations
 
 You are the strategist; toymath is the mechanical checker. Never do
@@ -93,10 +105,10 @@ into the next call. Surface recorded assumptions; results are
 """
 
 
-def build_prompt(skill_path=_SKILL_PATH):
+def build_prompt(skill_path=_SKILL_PATH, plotting=False):
     """Agent instructions derived from SKILL.md: frontmatter stripped, the
     bash invocation section replaced by tool-calling guidance, do!-mode
-    rules appended."""
+    (and, when available, plotting) rules appended."""
     try:
         with open(skill_path, 'r', encoding='utf-8') as fh:
             text = fh.read()
@@ -108,7 +120,10 @@ def build_prompt(skill_path=_SKILL_PATH):
             text = text[end + len('\n---'):].lstrip('\n')
     text = re.sub(r'## Invocation.*?(?=\n## )', _TOOL_PREAMBLE, text,
                   count=1, flags=re.S)
-    return text.rstrip() + '\n' + _DO_RULES
+    text = text.rstrip() + '\n' + _DO_RULES
+    if plotting:
+        text += _PLOT_RULES
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +132,30 @@ def build_prompt(skill_path=_SKILL_PATH):
 
 class DoSession(object):
     """Shared state of one do! run: the ledger the steps land in, the
-    streaming callback, and the step-range bookkeeping."""
+    streaming callbacks, the plot backend, and step-range bookkeeping."""
 
-    def __init__(self, ledger=None, on_step=None):
+    def __init__(self, ledger=None, on_step=None, on_plot=None,
+                 plot_backend=None):
         self.ledger = ledger if ledger is not None else Ledger()
         self.on_step = on_step
+        self.on_plot = on_plot
+        self.plot_backend = plot_backend
         self.start = len(self.ledger.steps)
         self.result_override = None
+        # the SDK executes sync tools on a thread pool, so parallel tool
+        # calls hit the ledger concurrently - serialize the appends
+        self._lock = threading.Lock()
 
     def record(self, result):
         """Ledger a successful transforming result; always return the
         (possibly step-annotated) record."""
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
-            step = self.ledger.record(result)
-            result = dict(result)
-            result['step'] = {'id': step['id'], 'hash': step['hash']}
-            if self.on_step is not None:
-                self.on_step(step)
+            with self._lock:
+                step = self.ledger.record(result)
+                result = dict(result)
+                result['step'] = {'id': step['id'], 'hash': step['hash']}
+                if self.on_step is not None:
+                    self.on_step(step)
         return result
 
     def new_steps(self):
@@ -317,10 +339,35 @@ def make_api(session):
         return json.dumps({'ok': True, 'op': 'set_result', 'result': expr},
                           ensure_ascii=False)
 
-    fns = (apply, expand, collect, substitute, evaluate, diff, rewrite,
+    def plot(code: str, caption: str) -> str:
+        """Render matplotlib/seaborn figures in an isolated sandbox; they
+        are shown to the user inline as unverified illustration (never a
+        ledger step).
+
+        Args:
+            code: self-contained Python; import everything you use
+                (numpy/matplotlib/seaborn available), build the figure,
+                no plt.show() needed.
+            caption: one-line description displayed under the figure.
+        """
+        r = session.plot_backend.run_plot(code)
+        images = r.get('images') or []
+        if images and session.on_plot is not None:
+            session.on_plot(caption, images)
+        reply = {'ok': bool(r.get('ok')) and bool(images),
+                 'plots': len(images),
+                 'stdout': (r.get('stdout') or '')[-800:]}
+        if not reply['ok']:
+            reply['error'] = (r.get('error')
+                              or 'the code produced no figure')[-1200:]
+        return json.dumps(reply, ensure_ascii=False)
+
+    fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, factor_gcd, factor_quadratic, equal,
-           lemmas, set_result)
+           lemmas, set_result]
+    if session.plot_backend is not None:
+        fns.append(plot)
     return {f.__name__: f for f in fns}
 
 
@@ -349,19 +396,28 @@ def build_model():
 
 
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
-                    max_turns=DEFAULT_MAX_TURNS):
+                    max_turns=DEFAULT_MAX_TURNS, on_plot=None,
+                    plot_backend=None):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, summary[, error]}.
     `steps` are the ledger steps this run added; `final_result` is the
-    last transforming step's result (the cell's chainable value). The
-    agent loop runs in a private thread with its own asyncio loop, so
-    this is safe to call from the Jupyter kernel's event-loop thread.
+    cell's chainable value. Figures reach `on_plot(caption, images)`;
+    when `plot_backend` is None the configured one is auto-detected
+    (TOYMATH_SANDBOX). The agent loop runs in a private thread with its
+    own asyncio loop, so this is safe to call from the Jupyter kernel's
+    event-loop thread.
     """
     from agents import Agent, Runner
     from agents.exceptions import MaxTurnsExceeded
-    session = DoSession(ledger=ledger, on_step=on_step)
-    agent = Agent(name='toymath', instructions=build_prompt(),
+    if plot_backend is None:
+        import plot_sandbox
+        plot_backend = plot_sandbox.get_backend()
+    session = DoSession(ledger=ledger, on_step=on_step, on_plot=on_plot,
+                        plot_backend=plot_backend)
+    agent = Agent(name='toymath',
+                  instructions=build_prompt(
+                      plotting=session.plot_backend is not None),
                   tools=make_tools(session),
                   model=model if model is not None else build_model())
     holder = {}

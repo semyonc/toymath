@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import agent_do
+import plot_sandbox
 from agent_do import DoSession, make_api, run_instruction
 from ledger import Ledger
 
@@ -116,6 +117,26 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(session.result_override, 'x = 2')  # kept
         self.assertEqual(session.new_steps(), [])  # never a ledger step
 
+    def test_concurrent_recording_is_thread_safe(self):
+        # the Agents SDK runs sync tools on a thread pool; parallel tool
+        # calls must not produce duplicate step ids
+        import threading
+        session = DoSession()
+        api = make_api(session)
+
+        def work():
+            for _ in range(10):
+                api['expand']('x + x')
+
+        threads = [threading.Thread(target=work) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        ids = [s['id'] for s in session.new_steps()]
+        self.assertEqual(len(ids), 40)
+        self.assertEqual(len(set(ids)), 40)
+
     def test_existing_ledger_range(self):
         ledger = Ledger()
         ledger.record({'ok': True, 'op': 'expand', 'args': {'expr': 'x+x'},
@@ -178,6 +199,121 @@ class TestScriptedAgent(unittest.TestCase):
             ledger=ledger)
         self.assertEqual(len(ledger.steps), 3)
         self.assertEqual(len(res['steps']), 1)  # only this run's slice
+
+
+FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
+
+
+class FakePlotBackend(object):
+    name = 'fake'
+
+    def __init__(self, result=None):
+        self.calls = []
+        self.result = result or {'ok': True, 'stdout': 'drew it\n',
+                                 'stderr': '', 'images': [FAKE_PNG_B64]}
+
+    def run_plot(self, code, timeout=None):
+        self.calls.append(code)
+        return dict(self.result)
+
+
+class TestPlotTool(unittest.TestCase):
+    def test_registered_only_with_backend(self):
+        self.assertNotIn('plot', make_api(DoSession()))
+        session = DoSession(plot_backend=FakePlotBackend())
+        self.assertIn('plot', make_api(session))
+
+    def test_prompt_mentions_plotting_only_when_available(self):
+        self.assertNotIn('## Plotting', agent_do.build_prompt())
+        self.assertIn('## Plotting', agent_do.build_prompt(plotting=True))
+
+    def test_plot_streams_images_not_tokens(self):
+        shown = []
+        backend = FakePlotBackend()
+        session = DoSession(plot_backend=backend,
+                            on_plot=lambda cap, imgs: shown.append(
+                                (cap, imgs)))
+        api = make_api(session)
+        reply = json.loads(api['plot']('plt.plot([1])', 'a parabola'))
+        # the model sees counts and stdout, never image bytes
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['plots'], 1)
+        self.assertNotIn(FAKE_PNG_B64[:24], json.dumps(reply))
+        # the user sees the figure with its caption
+        self.assertEqual(shown[0][0], 'a parabola')
+        self.assertEqual(shown[0][1], [FAKE_PNG_B64])
+        # never a ledger step
+        self.assertEqual(session.new_steps(), [])
+
+    def test_plot_failure_reported_in_band(self):
+        backend = FakePlotBackend({'ok': False, 'images': [],
+                                   'error': 'NameError: nope'})
+        session = DoSession(plot_backend=backend)
+        reply = json.loads(make_api(session)['plot']('bad', 'cap'))
+        self.assertFalse(reply['ok'])
+        self.assertIn('NameError', reply['error'])
+
+    def test_no_figure_is_an_error(self):
+        backend = FakePlotBackend({'ok': True, 'stdout': '', 'stderr': '',
+                                   'images': []})
+        session = DoSession(plot_backend=backend)
+        reply = json.loads(make_api(session)['plot']('print(1)', 'cap'))
+        self.assertFalse(reply['ok'])
+        self.assertIn('no figure', reply['error'])
+
+    def test_scripted_agent_with_plot(self):
+        shown = []
+        script = [
+            [tool_call('expand', {'expr': '(x-2)(x-3)'}, 'c1')],
+            [tool_call('plot', {'code': 'plt.plot([1])',
+                                'caption': 'the parabola'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('expand and plot',
+                              model=ScriptedModel(script),
+                              plot_backend=FakePlotBackend(),
+                              on_plot=lambda cap, imgs: shown.append(cap))
+        self.assertTrue(res['ok'])
+        self.assertEqual(len(res['steps']), 1)  # plot is not a step
+        self.assertEqual(shown, ['the parabola'])
+
+    def test_get_backend_off(self):
+        with mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'off'}):
+            self.assertIsNone(plot_sandbox.get_backend())
+
+    def test_parse_runner_output(self):
+        good = plot_sandbox._parse_runner_output(
+            'noise\n{"ok": true, "images": []}\n', '')
+        self.assertTrue(good['ok'])
+        bad = plot_sandbox._parse_runner_output('garbage only', 'boom')
+        self.assertFalse(bad['ok'])
+        self.assertIn('boom', bad['stderr'])
+
+
+@unittest.skipUnless(os.environ.get('TOYMATH_PLOT_TESTS') == '1',
+                     'set TOYMATH_PLOT_TESTS=1 for a live deno/pyodide '
+                     'sandbox test')
+class TestLivePlotSandbox(unittest.TestCase):
+    def test_matplotlib_figure_roundtrip(self):
+        import base64
+        backend = plot_sandbox.get_backend()
+        self.assertIsNotNone(backend, 'deno not available')
+        r = backend.run_plot(
+            'import numpy as np\nimport matplotlib.pyplot as plt\n'
+            'x = np.linspace(0, 1, 50)\nplt.plot(x, x*x)\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(len(r['images']), 1)
+        png = base64.b64decode(r['images'][0])
+        self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
+
+    def test_escape_probes_denied(self):
+        backend = plot_sandbox.get_backend()
+        for probe in ("import js\njs.Deno.env.get('OPEN_ROUTER')",
+                      "import js\njs.Deno.readTextFileSync('/etc/hosts')"):
+            r = backend.run_plot(probe)
+            self.assertFalse(r['ok'])
+            self.assertTrue('NotCapable' in (r.get('error') or '')
+                            or 'PermissionDenied' in (r.get('error') or ''))
 
 
 class TestMathShellDo(unittest.TestCase):
