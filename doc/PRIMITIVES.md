@@ -16,7 +16,9 @@ touch the fixed-point rewrite rules.
 | `engine/primitives.py` | The seven primitives + `equal_exprs` checker + numeric oracle |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification, chain-continuity detection |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
+| `engine/agent_do.py` | The `do!` Jupyter endpoint: OpenRouter-backed agent (OpenAI Agents SDK) whose only way to do math is calling the primitives |
 | `engine/unittests_primitives.py` | 132 tests |
+| `engine/unittests_do.py` | do! endpoint tests (scripted fake model; live OpenRouter test behind `TOYMATH_LIVE_TESTS=1`) |
 
 ## The primitives
 
@@ -142,6 +144,35 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
   group right after the function is the whole argument; otherwise the run of
   tight factors up to the next function/group binds (`\sin 2x` = sin(2x),
   `\cos(x) y` = cos(x)·y).
+
+## The `do!` endpoint (Jupyter)
+
+A cell starting with `do!` hands the rest of the cell to an agent as a
+natural-language instruction:
+
+```
+do! solve [[3]] for x, recording every assumption
+```
+
+- `[[n]]` references resolve to the rendered result of cell *n* before
+  the agent runs (undefined references fail fast, before any API call).
+- The agent (OpenAI Agents SDK over OpenRouter; `OPEN_ROUTER` key in
+  `.env`, model from `OPENROUTER_MODEL`, default
+  `anthropic/claude-sonnet-5`) gets one tool per primitive and its
+  instructions are generated from the committed skill file at load time.
+  **Only tool executions write ledger steps** — the model's prose cannot
+  enter the artifact, so a hallucinated step is structurally impossible.
+- Steps stream into the result cell as they are verified, each rendered
+  `sN#hash [ok] op: input ⟹ result` with per-step assumptions;
+  `disagree`/refused steps show in red; the run ends with the agent's
+  one-line summary, the accumulated assumptions, and the final value.
+- The agent designates the cell's final value with a validated
+  `set_result` tool (falling back to the last step's result); that value
+  is stored in the execution history, so later cells — plain math or
+  another `do!` — can chain on it with `[[n]]`.
+- All `do!` cells in a notebook share one session ledger; each cell
+  renders only the steps it added, and a replay verifies the whole
+  notebook's derivation chain.
 
 ## Output format
 

@@ -42,7 +42,8 @@ dev = [
     "python-dotenv>=1.0.1",
 ]
 llm = [
-    "openai>=1.41.0",
+    "openai>=2.44.0",
+    "openai-agents>=0.18.0",
     "pydantic>=2.8.2",
 ]
 
@@ -59,7 +60,8 @@ engine = ["*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["engine"]
-python_files = ["unittests.py", "unittests_frac.py"]
+python_files = ["unittests.py", "unittests_frac.py",
+                "unittests_primitives.py", "unittests_do.py"]
 addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",

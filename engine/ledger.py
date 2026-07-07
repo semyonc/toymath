@@ -16,6 +16,14 @@ import hashlib
 
 LEDGER_VERSION = 1
 
+# primitives whose successful results become ledger steps (everything that
+# transforms an expression; equal/lemmas are queries, not steps)
+TRANSFORMING_OPS = frozenset({
+    'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
+    'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
+    'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
+    'integrate_substitute'})
+
 
 def _step_hash(op, input_latex, result_latex):
     h = hashlib.sha1(f'{op}|{input_latex}|{result_latex}'.encode('utf-8'))

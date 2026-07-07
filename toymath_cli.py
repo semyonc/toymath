@@ -23,13 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'engine'))
 
 import primitives  # noqa: E402
-from ledger import Ledger  # noqa: E402
-
-TRANSFORMING_OPS = {'substitute', 'apply_both_sides', 'expand', 'collect',
-                    'evaluate', 'differentiate', 'rewrite', 'factor_gcd',
-                    'factor_quadratic', 'integrate_power_rule',
-                    'integrate_table', 'integrate_by_parts',
-                    'integrate_substitute'}
+from ledger import Ledger, TRANSFORMING_OPS  # noqa: E402
 
 
 def emit(obj, pretty=False):

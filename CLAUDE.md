@@ -34,7 +34,7 @@ See [NOTATION.md](NOTATION.md) for detailed notation graph system documentation.
 | `value.py` | IntegerValue, FracValue, FloatValue |
 | `comparer.py` | Pattern matching, unification |
 | `prolog.py` | Unification/pattern rules (logic layer) |
-| `llm_comparer.py` | LLM-aware structural matching |
+| `agent_do.py` | `do!` Jupyter endpoint: OpenRouter agent driving the primitives |
 | `lexer.py` | Tokenizer used by LatexParser |
 
 ### Fixed-Point Iteration Model
@@ -74,7 +74,9 @@ uv pip install -r requirements.txt
 ```bash
 pytest engine/unittests.py           # Core tests (40)
 pytest engine/unittests_frac.py      # Fraction tests (50)
-pytest engine/unittests_llm.py       # LLM tests (requires .env)
+pytest engine/unittests_primitives.py  # Verified-derivation primitives
+pytest engine/unittests_do.py        # do! endpoint (offline scripted agent)
+TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```
 
 ## Adding Commands
@@ -205,4 +207,5 @@ engine/
 - Use Replicator to copy expressions between notation contexts
 - Parser generates `parser.out`/`parsetab.py` (cached, ignore)
 - Commands auto-discovered via `register_actions()` on startup
-- LLM features require OpenAI API key in `.env`
+- The `do!` agent endpoint requires the `OPEN_ROUTER` key in `.env`
+  (model via `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`)
