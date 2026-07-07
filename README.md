@@ -1,299 +1,242 @@
 # ToyMath
 
-A symbolic mathematics system implemented as a Jupyter kernel that parses LaTeX expressions, performs symbolic manipulation using Prolog-style logic, and outputs results as LaTeX.
-
-## Features
-
-- **LaTeX I/O**: Input and output mathematical expressions in LaTeX format
-- **Symbolic Manipulation**: Fixed-point iteration engine for expression transformations
-- **Processing Commands**: Explicit control over evaluation with `mul!`, `add!`, and more
-- **Prolog-style Logic**: Pattern matching and unification for symbolic operations
-- **Jupyter Integration**: Full Jupyter kernel implementation
-- **Fraction Operations**: Complete support for symbolic and numeric fractions
-- **Power Operations**: Negative powers, fraction powers, and power cancellation
-
-## Architecture
-
-ToyMath uses a **notation graph** (DAG) to represent mathematical expressions and a **fixed-point iteration** model for evaluation:
+ToyMath is a LaTeX-native symbolic mathematics system with an agentic twist:
+an LLM plans the mathematical strategy, ToyMath executes every move as a
+narrow, named, **mechanically checked** transformation, and the session
+ledger — the full chain of verified steps — is the product. Ask for a
+derivation in plain language in a Jupyter cell, and get back a proof-style
+trace where every step was validated by code, not by the model's confidence:
 
 ```
-Input (LaTeX) → Parser → Notation Graph → Processor → Output (LaTeX)
+do! differentiate x^3 - 3x, find where the derivative is zero, plot with those points marked
 ```
 
-Key components:
-- **`notation.py`**: DAG representation (Symbol, Func, Notation)
-- **`processor.py`**: Fixed-point iteration engine (MathProcessor, Calculator)
-- **`cmd_*.py`**: Transformation commands (mul!, add!, etc.)
-- **`LatexParser.py`**: LaTeX → notation parsing
-- **`LatexWriter.py`**: Notation → LaTeX output
+![A do! cell: six verified ledger steps, a sandboxed plot of the critical points, and the chainable result](doc/Pic1.png)
+
+Underneath sits the original ToyMath: a Jupyter kernel that parses LaTeX,
+represents expressions as a notation graph (DAG), and transforms them with a
+fixed-point rewrite engine — see [The classic kernel](#the-classic-kernel)
+below.
+
+## The idea: derivations you can trust
+
+A capable model already solves most school and early-undergraduate math on
+its own. What it cannot do alone is **prove each step is valid** —
+model-generated math comes with model-generated confidence, sometimes right,
+sometimes wrong, with no mechanical check.
+
+ToyMath inverts the usual CAS design:
+
+- **The agent decides strategy.** It picks the next move: subtract 3 from
+  both sides, expand, factor the quadratic, integrate by parts with this
+  particular u and dv.
+- **ToyMath executes and verifies.** Each primitive is a small, narrow,
+  battle-tested transformation. Every result is additionally spot-checked by
+  a **numeric oracle** that shares nothing with the symbolic code — random
+  sample points, Schwartz–Zippel style. A bug in either leg is caught by the
+  other.
+- **The ledger is the artifact.** Every step is recorded with its hash,
+  arguments, result, assumptions, and check status. `replay` re-runs the
+  whole derivation and confirms it. The model's prose can never enter the
+  ledger — only tool executions can — so a hallucinated step is structurally
+  impossible.
+
+Side conditions are **recorded, not proved**: dividing both sides by
+`a + b` stamps the step with *assumes `a + b ≠ 0`*, and the accumulated
+assumptions travel with the derivation — honestly conditional, the way a
+good teacher writes it on the board.
+
+There is deliberately **no `solve`, no `simplify`, no autonomous
+`integrate`, no general `factor`**. Any of them would collapse the visible
+chain of steps into one opaque move — and the visible chain is the point.
+Smart operations are split into named tactics the agent chooses between.
+
+Honest wording: results are *mechanically checked*, not *proved*. The
+ledger eliminates model hallucination, not implementation bugs — which is
+why every primitive is verified twice, symbolically and numerically.
+
+## The `do!` agent endpoint
+
+A cell starting with `do!` hands the rest of the cell to an agent (OpenAI
+Agents SDK over OpenRouter) whose only way to do math is calling the
+verified primitives:
+
+- Steps stream into the result cell as they are verified, each rendered as
+  `sN#hash [ok] op: input ⟹ result` with its per-step assumptions;
+  failed checks show in red.
+- `[[n]]` references the result of cell *n* — plain math cells and `do!`
+  cells chain freely, so a derivation can span the notebook.
+- All `do!` cells share one notebook-wide ledger; each cell renders the
+  steps it added, and a replay verifies the entire chain.
+- The agent designates the cell's final value (validated by parsing), which
+  becomes what later cells see through `[[n]]`.
+- **Plotting**: the agent can render matplotlib/seaborn figures — but the
+  code runs *outside* the kernel, in a Pyodide WASM sandbox under Deno's
+  deny-by-default permissions (no filesystem, no environment, network only
+  to the package CDNs). Figures appear inline captioned *"illustration, not
+  machine-checked"*: plots are illustrations, never evidence, and never
+  ledger steps.
+
+Configuration (`.env` in the repo root):
+
+| Variable | Meaning |
+|---|---|
+| `OPEN_ROUTER` | OpenRouter API key (required for `do!`) |
+| `OPENROUTER_MODEL` | model slug, default `anthropic/claude-sonnet-5` |
+| `TOYMATH_SANDBOX` | `auto` (default) / `pyodide` / `off` — plot sandbox |
+
+Plotting needs [Deno](https://deno.com) (`brew install deno`); without it
+the plot tool simply isn't offered to the agent.
+
+## The verified primitives
+
+Every transforming primitive returns one JSON record
+`{ok, op, args, input, result, assumptions, check}` where `check` is the
+independent numeric spot-check. The same primitives back the `do!` agent,
+the CLI, and the Claude Code skill.
+
+| Primitive | What it does |
+|---|---|
+| `substitute(expr, var, value)` | replace a variable, juxtaposition-safe |
+| `apply_both_sides(eq, op, arg)` | `+ - * / ^` on both sides of `=` or an inequality; records `arg ≠ 0` when dividing by a symbol; flips the relation when multiplying an inequality by a negative |
+| `expand(expr)` | distribute and canonicalize; outside the rational fragment it works over *opaque atoms*, so `2\sin x + 3\sin x → 5\sin x` |
+| `collect(expr, var)` | group by powers of a variable — `x\sin x + x\cos x → (\sin x + \cos x)x` |
+| `evaluate(expr)` | exact arithmetic; on an equation reports `holds: true/false` |
+| `differentiate(expr, var)` | exact on the rational fragment, ~20 mechanical rules beyond it; verified by central differences |
+| `rewrite(expr, lemma, direction)` | apply a registered identity (`diff_squares`, …) — the lemma library is the extensibility point |
+| `factor_gcd` / `factor_quadratic` | named factorings in place of a general `factor` |
+| `integrate_power_rule` / `integrate_table` / `integrate_by_parts(u, dv)` / `integrate_substitute(u, u_var, new_integrand)` | integration as agent-chosen tactics; antiderivatives verified by differentiating back |
+| `equal?(e1, e2)` | the checker: verdict **yes / no / unknown** — canonical on the rational fragment, numeric oracle beyond it, honest about undecidability |
+
+The most under-appreciated one is `apply_both_sides`: mainstream CAS hide
+it behind `solve`. For verified derivations it is the whole game — it makes
+equation solving transparent, step-by-step, and mechanically sound.
+
+### CLI
+
+The same workflow scripts from a terminal (one deterministic JSON object
+per call, `--session` appends to a replayable ledger):
+
+```bash
+python toymath_cli.py apply "2x + 3 = 7" - 3 --session d.json
+python toymath_cli.py expand "2x+3 - 3 = 7 - 3" --session d.json   # -> 2x = 4
+python toymath_cli.py collect "x \sin x + x \cos x" x              # -> (\sin x + \cos x)x
+python toymath_cli.py equal "\sin(2x)" "2 \sin x \cos x"           # -> yes
+python toymath_cli.py replay --session d.json                      # re-verify everything
+```
+
+A Claude Code skill (`.claude/skills/toymath/`) teaches an agent the same
+protocol — and the `do!` endpoint generates its instructions from that very
+skill file, so the two can't drift apart.
+
+See [doc/PRIMITIVES.md](doc/PRIMITIVES.md) for the full design: the trust
+model, opaque atoms, the ledger format, and what is deliberately absent.
+
+## The classic kernel
+
+The foundation is a Jupyter kernel with LaTeX as both input and output:
+
+```
+Input (LaTeX) → Parser → Notation Graph (DAG) → Processor → Output (LaTeX)
+```
+
+- **`notation.py`** — expressions live in a notation graph with structural
+  sharing (Symbol, Func, Notation)
+- **`processor.py`** — a fixed-point iteration engine: transformations are
+  applied until nothing changes
+- **`cmd_*.py`** — short named commands, auto-discovered
+- **`LatexParser.py` / `LatexWriter.py`** — LaTeX in, LaTeX out
+
+Evaluation is **explicit**: numeric constants evaluate automatically
+(`\frac{1}{2} + \frac{1}{3}` → `\frac{5}{6}`), while symbolic
+transformations happen when you ask for them with a `!`-command:
+
+```latex
+\frac{1}{2} + \frac{1}{3}      % → 5/6 (automatic numeric evaluation)
+mul! x^{-1}x                   % → 1 (power cancellation)
+mul! (a/b)^2                   % → a²/b² (power expansion)
+add! \frac{a}{b}+\frac{c}{d}   % → \frac{ad+bc}{bd} (fraction addition)
+add! {mul! (a+b)(c+d)} + x     % commands compose; nesting defers to the next iteration
+```
+
+| Command | Purpose |
+|---------|---------|
+| `mul!` | multiplication: expansion, distribution, fraction and power rules |
+| `add!` | addition: like terms, common denominators |
+| `do!` | the agent endpoint described above |
+| `goal` / `rules` | Prolog-style logic layer: goals and transformation rules |
+| `dump` / `track` / `debug` | introspection: notation graph, tracing |
+| `echo-on` / `echo-off` / `clear` | session control |
+
+Console mode without Jupyter: `python console.py`.
 
 ## Installation
 
-### Requirements
-- Python >= 3.11
-- [uv](https://docs.astral.sh/uv/) - Fast Python package manager
-- Jupyter Lab >= 4.2
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/semyonc/toymath.git
-cd toymath
-```
-
-2. Create virtual environment and install dependencies:
-```bash
-# Create venv with uv
-uv venv
-
-# Activate virtual environment
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies with uv
-uv pip install -e .
-
-# Or install from requirements.txt
-uv pip install -r requirements.txt
-```
-
-4. Install as Jupyter kernel:
-```bash
-jupyter kernelspec install kernel_spec --user
-```
-
-## Quick Start (with uv)
+Requirements: Python ≥ 3.11, [uv](https://docs.astral.sh/uv/),
+JupyterLab ≥ 4.2 (installed by the requirements), optionally
+[Deno](https://deno.com) for `do!` plotting.
 
 ```bash
-# Clone and setup
 git clone https://github.com/semyonc/toymath.git && cd toymath
 
-# Install with uv (handles venv creation and dependencies)
-uv sync
+# environment
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
 
-# Or manually
-uv venv && source .venv/bin/activate && uv pip install -r requirements.txt
+# register the kernel
+jupyter kernelspec install kernel_spec --user
 
-# Run tests
-uv run pytest engine/
+# for the do! endpoint: put the OpenRouter key in .env
+echo 'OPEN_ROUTER=sk-or-...' >> .env
 
-# Launch Jupyter
-uv run jupyter lab
+# launch
+jupyter lab        # pick the "Toy Math" kernel
 ```
 
-## Usage
-
-### Jupyter Notebook
-
-Launch Jupyter Lab and select the ToyMath kernel:
-```bash
-uv run jupyter lab
-```
-
-Example notebook operations:
-```latex
-\frac{1}{2} + \frac{1}{3}  % → 5/6 (automatic numeric evaluation)
-mul! x^{-1}x               % → 1 (explicit multiplication with power cancellation)
-mul! (a/b)^2               % → a²/b² (explicit power expansion)
-add! \frac{a}{b}+\frac{c}{d} % → \frac{ad+bc}{bd} (explicit fraction addition)
-```
-
-> **Note**: Commands ending with `!` (like `mul!` and `add!`) provide explicit control over evaluation.
-> See [Processing Commands](#processing-commands) for details.
-
-### Console Mode
+## Running tests
 
 ```bash
-uv run python console.py
+pytest                                  # all suites
+pytest engine/unittests.py              # classic engine
+pytest engine/unittests_frac.py         # fractions
+pytest engine/unittests_primitives.py   # verified-derivation primitives
+pytest engine/unittests_do.py           # do! endpoint (offline, scripted agent)
+
+TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py   # + live OpenRouter round-trip
+TOYMATH_PLOT_TESTS=1 pytest engine/unittests_do.py   # + live Deno/Pyodide sandbox
 ```
 
-## Processing Commands
+The offline suites include a scripted fake model, so the whole agent loop
+is tested without network access.
 
-ToyMath uses **explicit processing commands** (marked with `!`) to control when and how expressions are evaluated. This design choice provides fine-grained control over the evaluation process and makes the evaluation model transparent.
-
-### Why Processing Commands?
-
-Unlike traditional computer algebra systems that automatically evaluate expressions, ToyMath uses an **explicit evaluation model**:
-
-1. **Transparency**: You see exactly when and how transformations occur
-2. **Control**: Choose which operations to expand and which to leave symbolic
-3. **Debugging**: Step through transformations to understand the evaluation process
-4. **Composability**: Chain commands together for complex transformations
-
-### Core Processing Commands
-
-| Command | Purpose | Example | Result |
-|---------|---------|---------|--------|
-| `mul!` | Multiply expressions and expand products | `mul! x^{-1}x` | `1` |
-| `add!` | Add expressions and combine like terms | `add! \frac{a}{b} + \frac{c}{d}` | `\frac{ad+bc}{bd}` |
-
-### Arithmetic Command Details
-
-#### `mul!` - Multiplication Command
-
-**Purpose**: Explicitly evaluate multiplication operations including:
-- Power expansion: `(a)^n` → `a·a·...·a` (n times)
-- Fraction multiplication: `\frac{a}{b} × \frac{c}{d}` → `\frac{ac}{bd}`
-- Power cancellation: `x^{-1} × x` → `1`
-- Distribution: `a(b+c)` → `ab + ac`
-
-**Examples**:
-```latex
-mul! xy                    % → xy (expands product)
-mul! x^3                   % → xxx
-mul! (a/b)(c/d)           % → \frac{ac}{bd}
-mul! x^{-2}x^2            % → 1
-mul! \frac{a}{b}(x+y)     % → \frac{ax+ay}{b}
-```
-
-**Why explicit?** Automatic expansion can lead to unwieldy expressions. With `mul!`, you control when products are expanded.
-
-#### `add!` - Addition Command
-
-**Purpose**: Explicitly evaluate addition operations including:
-- Fraction addition: `\frac{a}{b} + \frac{c}{d}` → `\frac{ad+bc}{bd}`
-- Like term collection: `2x + 3x` → `5x`
-- Simplification: `a + 0` → `a`
-
-**Examples**:
-```latex
-add! \frac{1}{2} + \frac{1}{3}  % → \frac{5}{6}
-add! a + \frac{x}{y}            % → \frac{ay+x}{y}
-add! 2x + 3x                    % → 5x
-```
-
-**Why explicit?** You can choose to keep sums unexpanded (e.g., `a+b`) or combine them into a single fraction.
-
-### Utility Commands
-
-| Command | Purpose | Example |
-|---------|---------|---------|
-| `goal` | Execute Prolog-style goals | `goal solve(x, a+b=c)` |
-| `rules` | Display active transformation rules | `rules` |
-| `clear` | Clear state/context | `clear` |
-| `closure` | Compute transitive closure | `closure R` |
-| `dump` | Debug: dump notation graph | `dump expr` |
-| `track` | Enable/disable execution tracing | `track` |
-| `echo-on` | Enable echo mode | `echo-on` |
-| `echo-off` | Disable echo mode | `echo-off` |
-| `debug` | Debug mode control | `debug` |
-
-### Command Composition
-
-Commands can be nested to build complex transformations:
-
-```latex
-% Expand then add fractions
-add! {mul! (a+b)(c+d)} + x
-
-% Multiple operations
-mul! (add! x+y)^2
-```
-
-### Automatic vs. Explicit Evaluation
-
-**Automatic** (no command):
-- Numeric constants are evaluated: `\frac{1}{2} + \frac{1}{3}` → `\frac{5}{6}`
-- Variables remain symbolic: `x + y` → `x + y`
-
-**Explicit** (with command):
-- `mul!` / `add!` force evaluation and transformations
-- Gives control over expansion depth
-- Enables step-by-step simplification
-
-### Fixed-Point Iteration
-
-Commands execute until reaching a **fixed point** (no more changes):
-
-```latex
-mul! x^3  →  {mul! xx}x  →  {mul! x}xx  →  xxx  (fixed point)
-```
-
-Each iteration applies transformations once; nested commands trigger new iterations.
-
-## Running Tests
-
-```bash
-# Core tests (40 tests)
-uv run pytest engine/unittests.py
-
-# Fraction operations tests (53 tests)
-uv run pytest engine/unittests_frac.py
-
-# All tests
-uv run pytest engine/
-```
-
-## Project Structure
+## Project structure
 
 ```
 toymath/
-├── engine/           # Core engine
-│   ├── cmd_*.py     # Transformation commands
-│   ├── notation.py  # Notation graph structures
-│   ├── processor.py # Evaluation engine
-│   ├── comparer.py  # Pattern matching
-│   └── ...
-├── examples/        # Example notebooks
-├── obsolete/        # Deprecated code
-└── pyproject.toml   # Project configuration
+├── engine/
+│   ├── polyrat.py          # canonical core: Poly/RatFunc for the rational fragment
+│   ├── primitives.py       # the verified primitives + numeric oracle
+│   ├── ledger.py           # step ledger: record, render, replay
+│   ├── agent_do.py         # do! endpoint: agent, tools, prompt from the skill
+│   ├── plot_sandbox.py     # sandboxed plotting (Pyodide under Deno)
+│   ├── pyodide_runner.mjs  # vendored Deno runner for the plot sandbox
+│   ├── notation.py         # notation graph structures
+│   ├── processor.py        # classic fixed-point engine
+│   ├── cmd_*.py            # classic kernel commands
+│   └── unittests*.py       # test suites
+├── toymath_cli.py          # agent-facing CLI
+├── toymathkernel.py        # Jupyter kernel entry point
+├── .claude/skills/toymath/ # Claude Code skill (also the do! prompt source)
+├── doc/                    # PRIMITIVES.md, NOTATION.md, images
+└── examples/               # example notebooks
 ```
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) - Developer guide and architecture
-- [NOTATION.md](NOTATION.md) - Notation graph system details
-
-## Development
-
-### Adding Commands
-
-Create `engine/cmd_yourname.py`:
-
-```python
-class YourCommand(object):
-    arity = 1
-
-    def exec(self, processor, sym, f):
-        # Transform expression
-        pass
-
-def create_actions():
-    return {'yourname': YourCommand()}
-```
-
-### Code Style
-
-The project uses:
-- **Black** for code formatting
-- **isort** for import sorting
-- **Ruff** for linting
-- **pytest** for testing
-
-Development tools with uv:
-```bash
-# Format code
-uv run black engine/
-
-# Sort imports
-uv run isort engine/
-
-# Lint with ruff
-uv run ruff check engine/
-
-# Type checking (if mypy is installed)
-uv run mypy engine/
-```
-
-### Updating Dependencies
-
-```bash
-# Update all packages to latest versions
-uv pip install --upgrade -r requirements.txt
-
-# Freeze current environment
-uv pip list --format=freeze > requirements.txt
-```
+- [doc/PRIMITIVES.md](doc/PRIMITIVES.md) — the verified-derivation design
+- [doc/NOTATION.md](doc/NOTATION.md) — notation graph internals
+- [CLAUDE.md](CLAUDE.md) — developer guide
 
 ## License
 

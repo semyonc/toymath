@@ -8,7 +8,7 @@ ToyMath is a symbolic mathematics system implemented as a Jupyter kernel that pa
 
 ## Core Architecture
 
-See [NOTATION.md](NOTATION.md) for detailed notation graph system documentation.
+See [doc/NOTATION.md](doc/NOTATION.md) for detailed notation graph system documentation.
 
 ### Execution Flow
 
