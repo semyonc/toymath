@@ -11,7 +11,7 @@ trace where every step was validated by code, not by the model's confidence:
 do! differentiate x^3 - 3x, find where the derivative is zero, plot with those points marked
 ```
 
-![A do! cell: six verified ledger steps, a sandboxed plot of the critical points, and the chainable result](doc/Pic1.png)
+<img src="doc/Pic1.png" alt="A do! cell: six verified ledger steps, a sandboxed plot of the critical points, and the chainable result" width="850">
 
 Underneath sits the original ToyMath: a Jupyter kernel that parses LaTeX,
 represents expressions as a notation graph (DAG), and transforms them with a
