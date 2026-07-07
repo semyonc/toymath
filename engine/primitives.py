@@ -819,8 +819,11 @@ def _atomize_walk(sym, notation, out_n, store):
             if isinstance(a, Symbol) and notation.get(a) is None \
                     and a.name == '\\int':
                 # unevaluated integral: the rest of the product is one atom
-                span = notation.setf(Notation.P_LIST, args[i:]) \
-                    if len(args[i:]) > 1 else a
+                # (taken from the unfiltered factors, so \, survives)
+                raw = list(f.args)
+                tail = raw[raw.index(a):]
+                span = notation.setf(Notation.P_LIST, tail) \
+                    if len(tail) > 1 else a
                 out_args.append(store.atom(span, notation))
                 break
             if is_head(a):
@@ -850,6 +853,109 @@ def _atomized_ratfunc(sym, notation, store):
     return to_ratfunc(new_sym, out_n)
 
 
+def _paren_payload(sym, notation):
+    """Inner expression of a ()-GROUP (the wrapper Substitutor adds around
+    substituted atoms), or None."""
+    f = notation.getf(sym, Notation.GROUP)
+    if f is not None and f.props.get('br') == '()':
+        return f.args[0]
+    return None
+
+
+def _is_signed_or_sum(sym, notation):
+    return any(notation.getf(sym, op) is not None
+               for op in (Notation.S_LIST, Notation.PLUS, Notation.MINUS))
+
+
+def _plist_head_kind(a, notation):
+    """'func' for \\sin-style factor heads (incl. \\sin^2), 'oper' for
+    \\int-style big operators, None otherwise."""
+    if isinstance(a, Symbol) and notation.get(a) is None:
+        if a.name in FUNC_NAMES:
+            return 'func'
+        if a.name in Notation.p_oper:
+            return 'oper'
+    if _func_power(a, notation) is not None:
+        return 'func'
+    return None
+
+
+def _relax_atom_parens(sym, notation):
+    """Cosmetic pass over an atom-substituted result: drop the () wrappers
+    Substitutor adds wherever the expression stays unambiguous — at the
+    root, in additive-term position, and as the trailing factor of a
+    product not captured by a preceding function head. The oracle check
+    and the write_latex validation still guard every emitted result."""
+    out_n = Notation()
+    return _relax_walk(sym, notation, out_n), out_n
+
+
+def _relax_walk(sym, notation, out_n):
+    payload = _paren_payload(sym, notation)
+    if payload is not None:
+        # term/root position: parens only matter around sums and signs
+        if _is_signed_or_sum(payload, notation):
+            inner = _relax_walk(payload, notation, out_n)
+            return out_n.setf(Notation.GROUP, (inner,), br='()')
+        return Replicator(notation, out_n)(payload)
+    for op in (Notation.PLUS, Notation.MINUS):
+        f = notation.getf(sym, op)
+        if f is not None:
+            return out_n.setf(op, (_relax_walk(f.args[0], notation, out_n),))
+    f = notation.getf(sym, Notation.S_LIST)
+    if f is not None:
+        return out_n.setf(Notation.S_LIST,
+                          [_relax_walk(t, notation, out_n) for t in f.args])
+    f = notation.getf(sym, Notation.P_LIST)
+    if f is not None:
+        return _relax_plist(f, notation, out_n)
+    if isinstance(sym, Symbol):
+        ff = notation.get(sym)
+        if ff is not None and ff.sym.name in FRAC_NAMES:
+            def frac_arg(a):
+                g = notation.getf(a, Notation.GROUP)
+                if g is not None and g.props.get('br') == '{}':
+                    inner = _relax_walk(g.args[0], notation, out_n)
+                    return out_n.setf(Notation.GROUP, (inner,), br='{}')
+                return _relax_walk(a, notation, out_n)
+            return out_n.setf(ff.sym, (frac_arg(ff.args[0]),
+                                       frac_arg(ff.args[1])), **ff.props)
+    return Replicator(notation, out_n)(sym)
+
+
+def _relax_plist(f, notation, out_n):
+    args = list(f.args)
+    new_args = []
+    for idx, a in enumerate(args):
+        payload = _paren_payload(a, notation)
+        if payload is None:
+            new_args.append(Replicator(notation, out_n)(a))
+            continue
+        if _is_signed_or_sum(payload, notation):
+            # collected coefficient sums keep their parens; relax inside
+            inner = _relax_walk(payload, notation, out_n)
+            new_args.append(out_n.setf(Notation.GROUP, (inner,), br='()'))
+            continue
+        last = idx == len(args) - 1
+        prev_head = idx > 0 and _plist_head_kind(args[idx - 1],
+                                                 notation) is not None
+        pf = notation.getf(payload, Notation.P_LIST)
+        if last and not prev_head:
+            if pf is not None \
+                    and _plist_head_kind(pf.args[0], notation) is not None:
+                # function-application span: splice its factors in
+                new_args.extend(Replicator(notation, out_n)(m)
+                                for m in pf.args)
+                continue
+            if pf is None:
+                new_args.append(Replicator(notation, out_n)(payload))
+                continue
+        new_args.append(Replicator(notation, out_n)(a))
+    if len(new_args) == 1:
+        return new_args[0]
+    return out_n.setf(Notation.P_LIST, new_args)
+
+
 def _atomized_canonical(sym, notation):
     """Canonical latex of an expression outside the fragment.
     Returns (latex, atom_count); raises NotInFragment if impossible."""
@@ -861,6 +967,7 @@ def _atomized_canonical(sym, notation):
         return write_latex(res_s, res_n), 0
     final_n = Notation()
     final_s = Substitutor(res_n, final_n, store.mapping())(res_s)
+    final_s, final_n = _relax_atom_parens(final_s, final_n)
     return write_latex(final_s, final_n), len(store.exprs)
 
 
@@ -924,70 +1031,74 @@ def expand(expr):
 
 
 def collect(expr, var):
-    """Group a polynomial by powers of `var` (descending). On an equation,
-    collects each side."""
+    """Group a polynomial by powers of `var` (descending); outside the
+    rational fragment, collects over opaque atoms. On an equation,
+    collects each side; rational functions collect numerator and
+    denominator separately."""
     args = {'expr': expr, 'var': var}
     try:
         sym, notation = parse_latex(expr)
         split = _comp_split(sym, notation)
         if split:
             lhs, rhs, rel = split
-            sides = []
-            for side in (lhs, rhs):
-                rf = to_ratfunc(side, notation)
-                if not rf.is_poly():
-                    return _error('collect', args,
-                                  'collect currently supports polynomials '
-                                  'only')
-                if var in rf.num.variables():
-                    sides.append(_collect_poly(rf.num, var))
-                else:
-                    out_n = Notation()
-                    sides.append(
-                        write_latex(poly_to_notation(rf.num, out_n), out_n))
+            sides = [_collect_side(s, notation, var, require_var=False)
+                     for s in (lhs, rhs)]
             rec = _result('collect', args, expr,
                           f'{sides[0]} {rel} {sides[1]}')
             rec['check'] = _merge_checks(
                 numeric_spot_check(write_latex(lhs, notation), sides[0]),
                 numeric_spot_check(write_latex(rhs, notation), sides[1]))
             return rec
-        rf = to_ratfunc(sym, notation)
+        result = _collect_side(sym, notation, var, require_var=True)
     except PrimitiveError as e:
         return _error('collect', args, str(e))
     except ZeroDivisionError:
         return _error('collect', args, 'expression contains division by zero')
     except NotInFragment as e:
         return _error('collect', args, f'outside the rational fragment: {e}')
-    if not rf.is_poly():
-        # rational function: collect numerator and denominator separately
-        if (var not in rf.num.variables()
-                and var not in rf.den.variables()):
-            return _error('collect', args,
-                          f'variable {var!r} does not occur in expression')
+    return _checked(_result('collect', args, expr, result))
 
-        def side_str(p):
-            if var in p.variables():
-                return _collect_poly(p, var)
-            out_n = Notation()
-            return write_latex(poly_to_notation(p, out_n), out_n)
 
-        result = f'\\frac{{{side_str(rf.num)}}}{{{side_str(rf.den)}}}'
-        try:
-            parse_latex(result)
-        except PrimitiveError as e:
-            return _error('collect', args,
-                          f'internal: unparseable result: {e}')
-        return _checked(_result('collect', args, expr, result))
-    poly = rf.num
-    if var not in poly.variables():
-        return _error('collect', args,
-                      f'variable {var!r} does not occur in expression')
-    result = _collect_poly(poly, var)
+def _collect_side(side, notation, var, require_var):
+    """Collected latex for one side; collects over opaque atoms when the
+    side leaves the rational fragment."""
+    store = None
+    try:
+        rf = to_ratfunc(side, notation)
+    except NotInFragment:
+        store = _AtomStore()
+        rf = _atomized_ratfunc(side, notation, store)
+    if require_var and var not in rf.variables():
+        note = (' (opaque subexpressions are not entered)'
+                if store is not None else '')
+        raise PrimitiveError(
+            f'variable {var!r} does not occur in expression{note}')
+    out_n = Notation()
+    res = _collect_rf_sym(rf, var, out_n)
+    if store is not None and store.exprs:
+        fin_n = Notation()
+        res = Substitutor(out_n, fin_n, store.mapping())(res)
+        res, out_n = _relax_atom_parens(res, fin_n)
+    result = write_latex(res, out_n)
     try:
         parse_latex(result)
     except PrimitiveError as e:
-        return _error('collect', args, f'internal: unparseable result: {e}')
-    return _checked(_result('collect', args, expr, result))
+        raise PrimitiveError(f'internal: unparseable result: {e}')
+    return result
+
+
+def _collect_rf_sym(rf, var, notation):
+    """Collected notation for a RatFunc; a side without `var` prints in
+    plain canonical order."""
+    def side(p):
+        if var in p.variables():
+            return _collect_poly_sym(p, var, notation)
+        return poly_to_notation(p, notation)
+    if rf.is_poly():
+        return side(rf.num)
+    num = notation.setf(Notation.GROUP, (side(rf.num),), br='{}')
+    den = notation.setf(Notation.GROUP, (side(rf.den),), br='{}')
+    return notation.setf(Symbol('\\frac'), (num, den))
 
 
 def _rel_holds(rel, a, b):
@@ -1004,36 +1115,43 @@ def _rel_holds(rel, a, b):
     return a >= b
 
 
-def _collect_poly(poly, var):
-    # bucket terms by exponent of var
+def _collect_poly_sym(poly, var, notation):
+    """Collected-by-var notation: descending powers of `var`, coefficient
+    sums parenthesized, single-term coefficients inlined."""
     buckets = {}
     for mono, coeff in poly.terms.items():
         d = dict(mono)
         k = d.pop(var, 0)
         rest = tuple(sorted(d.items()))
         buckets.setdefault(k, {})[rest] = coeff
-    parts = []
-    for k in sorted(buckets, reverse=True):
+    if not buckets:
+        return IntegerValue(0)
+    terms = []
+    for i, k in enumerate(sorted(buckets, reverse=True)):
         coeff_poly = Poly(buckets[k])
-        out_n = Notation()
-        coeff_s = write_latex(poly_to_notation(coeff_poly, out_n), out_n)
         if k == 0:
-            part = _paren(coeff_s) if _is_sum_str(coeff_s) else coeff_s
+            term = poly_to_notation(coeff_poly, notation)
+            if len(coeff_poly.terms) > 1:
+                term = notation.setf(Notation.GROUP, (term,), br='()')
+        elif len(coeff_poly.terms) == 1:
+            # single-term coefficient: merge var^k into the monomial and
+            # reuse the canonical term builder (sign handling included)
+            ((mono, coeff),) = tuple(coeff_poly.terms.items())
+            merged = tuple(sorted(dict(mono, **{var: k}).items()))
+            term = poly_to_notation(Poly({merged: coeff}), notation)
         else:
-            var_s = var if k == 1 else f'{var}^{{{k}}}'
-            if coeff_s == '1':
-                part = var_s
-            elif coeff_s == '-1':
-                part = f'-{var_s}'
-            elif _is_sum_str(coeff_s):
-                part = f'{_paren(coeff_s)}{var_s}'
-            else:
-                part = f'{coeff_s}{var_s}'
-        parts.append(part)
-    result = parts[0]
-    for p in parts[1:]:
-        result += p if p.startswith('-') else ' + ' + p
-    return result
+            inner = poly_to_notation(coeff_poly, notation)
+            group = notation.setf(Notation.GROUP, (inner,), br='()')
+            var_f = Symbol(var) if k == 1 else notation.setf(
+                Notation.INDEX,
+                (Symbol(var), (None, None, IntegerValue(k), None)))
+            term = notation.setf(Notation.P_LIST, (group, var_f))
+        if i > 0 and notation.getf(term, Notation.MINUS) is None:
+            term = notation.setf(Notation.PLUS, (term,))
+        terms.append(term)
+    if len(terms) == 1:
+        return terms[0]
+    return notation.setf(Notation.S_LIST, terms)
 
 
 def _is_sum_str(s):

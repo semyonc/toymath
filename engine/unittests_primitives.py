@@ -71,6 +71,22 @@ class TestPolyRat(unittest.TestCase):
         with self.assertRaises(ZeroDivisionError):
             rf('\\frac{x}{0}')
 
+    def test_multivariate_exact_division_cancels(self):
+        # exact trial division in the constructor: complete cancellation
+        # when one side divides the other, even multivariate
+        r = rf('\\frac{x^2-y^2}{x+y}')
+        self.assertTrue(r.is_poly())
+        self.assertEqual(r, rf('x-y'))
+        self.assertEqual(rf('\\frac{x+y}{(x+y)^2}'),
+                         rf('\\frac{1}{x+y}'))
+
+    def test_partial_common_factor_stays(self):
+        # no full multivariate GCD: partial factors stay uncancelled but
+        # cross-multiplying equality still decides exactly
+        r = rf('\\frac{(x+y)(x-z)}{(x+y)(x-w)}')
+        self.assertFalse(r.is_poly())
+        self.assertEqual(r, rf('\\frac{x-z}{x-w}'))
+
     def test_deterministic_output(self):
         self.assertEqual(canon('(x+1)(x-2)'), canon('(x-2)(x+1)'))
 
@@ -207,6 +223,48 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         r = P.collect('a x + 2x + 1 = b x', 'x')
         self.assertTrue(r['ok'])
         self.assertEqual(r['check']['status'], 'agree')
+
+    def test_collect_over_atoms(self):
+        r = P.collect('x \\sin x + x \\cos x', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin x+ \\cos x)x')
+
+    def test_collect_over_atoms_mixed_powers(self):
+        r = P.collect('2 e^x + x e^x + x^2', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(P.equal_exprs(
+            r['result'], 'x^2 + e^x x + 2 e^x')['verdict'], 'yes')
+
+    def test_collect_equation_over_atoms(self):
+        r = P.collect('x \\sin x + x \\cos x = 0', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin x+ \\cos x)x = 0')
+
+    def test_collect_var_only_inside_atoms_rejected(self):
+        r = P.collect('\\sin x + \\cos x', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_atom_output_drops_redundant_parens(self):
+        self.assertEqual(P.expand('2 \\sin x + 3 \\sin x')['result'],
+                         '5 \\sin x')
+        self.assertEqual(P.expand('x \\sin x + 2 x \\sin x')['result'],
+                         '3x \\sin x')
+        self.assertEqual(P.expand('\\sin x + \\cos x - \\sin x')['result'],
+                         '\\cos x')
+
+    def test_atom_output_keeps_needed_parens(self):
+        # an atom raised to a power must stay parenthesized
+        r = P.expand('(\\sin x)^2 + 1')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('( \\sin x)^{2}', r['result'])
+
+    def test_atom_integral_keeps_thin_space(self):
+        r = P.expand('x \\sin x + \\int x \\, dx - x \\sin x')
+        self.assertEqual(r['result'], '\\int x \\, dx')
 
     def test_evaluate_fractions(self):
         r = P.evaluate('\\frac{2}{3} + \\frac{1}{6}')

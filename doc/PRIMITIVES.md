@@ -12,11 +12,11 @@ touch the fixed-point rewrite rules.
 
 | Module | Purpose |
 |---|---|
-| `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly` (`{monomial: Fraction}`), `RatFunc` with cancellation in the constructor (monomial GCD, univariate Euclidean GCD, sign/content normalization), `to_ratfunc` / `ratfunc_to_notation` |
+| `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly` (`{monomial: Fraction}`), `RatFunc` with cancellation in the constructor (monomial GCD, univariate Euclidean GCD, multivariate exact trial division, sign/content normalization), `to_ratfunc` / `ratfunc_to_notation` |
 | `engine/primitives.py` | The seven primitives + `equal_exprs` checker + numeric oracle |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification, chain-continuity detection |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
-| `engine/unittests_primitives.py` | 62 tests |
+| `engine/unittests_primitives.py` | 132 tests |
 
 ## The primitives
 
@@ -44,7 +44,12 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    the ledger. No new rewrite rules; atom identity ignores transparent
    grouping (`\sin(x)` ≡ `\sin x`).
 4. **collect(expr, var)** — polynomial grouped by powers of `var`.
-   Accepts equations.
+   Accepts equations and rational functions (numerator and denominator
+   collected separately). Outside the rational fragment it collects over
+   the same opaque atoms as `expand`: `x\sin x + x\cos x` →
+   `(\sin x + \cos x)x`, the natural setup step before dividing both
+   sides by the collected coefficient. Opaque subexpressions are not
+   entered — collecting `\sin x + \cos x` by `x` is refused honestly.
 5. **evaluate(expr)** — exact `Fraction` arithmetic when no free variables
    remain; on an equation reports `holds: true/false` (solution checking).
    Falls back to float for non-rational constants.
@@ -123,9 +128,12 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 
 ## Known limitations
 
-- Multivariate polynomial GCD is monomial-level only (univariate is full
-  Euclidean); `equal?` compensates by cross-multiplying, so verdicts stay
-  exact, but printed fractions may not be fully cancelled.
+- Multivariate cancellation covers monomial factors and the
+  one-side-divides-the-other case via exact trial division
+  (`(x²-y²)/(x+y)` → `x-y`, `(\sin x+\cos x)x / (\sin x+\cos x)` → `x`);
+  *partial* multivariate common factors still print uncancelled
+  (univariate is full Euclidean). `equal?` compensates by
+  cross-multiplying, so verdicts stay exact either way.
 - `apply_both_sides` on inequalities refuses `*`/`/` by expressions of
   unknown sign (no case splitting) and `^` entirely.
 - `rewrite` rewrites the first matching subterm (innermost, parse order)
@@ -140,6 +148,11 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 Results print through a PrettyWriter that drops the `{2}`-style value
 braces of the legacy writer wherever the pretty string parses back to the
 same expression (validated per call via a group-stripped normal form);
-anything ambiguous falls back to the verbose form. Ledger `replay`
+anything ambiguous falls back to the verbose form. Atom-substituted
+results additionally drop the parentheses the substitution machinery adds
+wherever the expression stays unambiguous (`5(\sin x)` → `5 \sin x`,
+`x(\sin x)` → `x \sin x`), keeping them where they bind (`(\sin x)^2`,
+coefficient sums like `(\sin x + \cos x)x`); the pass is purely cosmetic
+and every emitted result is still oracle-checked. Ledger `replay`
 tolerates formatting drift across versions by falling back to a semantic
 `equal?` comparison when recorded and replayed strings differ.

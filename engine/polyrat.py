@@ -215,6 +215,37 @@ class Poly(object):
         k = Fraction(k)
         return Poly({m: c * k for m, c in self.terms.items()})
 
+    def div_exact(self, other):
+        """Exact multivariate division: the quotient q with
+        self == q * other, or None when `other` does not divide `self`.
+        Leading-term elimination under lex order: when the division is
+        exact, every remainder's leading term stays divisible by other's
+        leading term, so a failed step proves non-divisibility."""
+        if other.is_zero() or self.is_zero():
+            return None
+        varlist = sorted(self.variables() | other.variables())
+
+        def key(mono):
+            d = dict(mono)
+            return tuple(d.get(v, 0) for v in varlist)
+
+        lead_o = max(other.terms, key=key)
+        lc_o = other.terms[lead_o]
+        rem = Poly(self.terms)
+        q = {}
+        while not rem.is_zero():
+            lead_r = max(rem.terms, key=key)
+            d = dict(lead_r)
+            for v, e in lead_o:
+                d[v] = d.get(v, 0) - e
+                if d[v] < 0:
+                    return None
+            m = tuple(sorted((v, e) for v, e in d.items() if e))
+            c = rem.terms[lead_r] / lc_o
+            q[m] = c
+            rem = rem - Poly({m: c}) * other
+        return Poly(q)
+
     def sorted_terms(self):
         return sorted(self.terms.items(), key=lambda kv: _mono_key(kv[0]))
 
@@ -326,6 +357,18 @@ class RatFunc(object):
                     qb, _ = _uni_divmod(ub, g)
                     num = _from_univariate(qa, var)
                     den = _from_univariate(qb, var)
+        # 2b. multivariate exact division: when one side divides the other,
+        #     cancellation is complete ((x+y)x/(x+y) -> x) without needing
+        #     a full multivariate GCD; partial common factors still stay
+        #     uncancelled (cross-multiplying __eq__ compensates)
+        if len(vs) > 1 and not den.is_const():
+            q = num.div_exact(den)
+            if q is not None:
+                num, den = q, Poly.const(1)
+            elif not num.is_const():
+                q = den.div_exact(num)
+                if q is not None:
+                    num, den = Poly.const(1), q
         # 3. content + sign normalization: den gets positive leading coeff,
         #    den content becomes 1
         cd = den.content()
