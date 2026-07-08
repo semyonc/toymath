@@ -25,12 +25,12 @@ it appends each verified step to a replayable ledger.
 | Command | Example | Meaning |
 |---|---|---|
 | `apply EQ OP ARG` | `apply "2x + 3 = 7" - 3` | op ∈ `+ - * / ^` to both sides. Multiplying or dividing an equation by a symbolic expression records the assumption `arg ≠ 0`. Inequalities (`<`, `>`, `\le`, `\ge`, …) work too: the relation flips under `*`/`/` by a negative constant, and symbolic-sign factors are refused |
-| `expand EXPR` | `expand "(x+1)(x-2)"` | distribute products/powers; also simplifies each side of an equation. Outside the rational fragment it canonicalizes over opaque atoms: `2\sin x + 3\sin x` → `5(\sin x)`, and it assembles tactic results like `x(-\cos x) - (-\sin x + C)` |
+| `expand EXPR` | `expand "(x+1)(x-2)"` | distribute products/powers; also simplifies each side of an equation. Outside the rational fragment it canonicalizes over opaque atoms: `2\sin x + 3\sin x` → `5 \sin x`, `(\sin x)^2 - \sin^2 x` → `0` (both power spellings are one atom), and it assembles tactic results like `x(-\cos x) - (-\sin x + C)` |
 | `collect EXPR VAR` | `collect "ax + 2x" x` | group by powers of VAR |
 | `substitute EXPR VAR VAL` | `substitute "x^2+1" x 3` | replace a variable |
 | `evaluate EXPR` | `evaluate "2(2)+3 = 7"` | exact arithmetic; on an equation reports `holds: true/false` |
 | `diff EXPR VAR` | `diff "x \sin x" x` | derivative, checked by central differences |
-| `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root, or at the first matching subterm (reported as `at`) |
+| `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root, or at the first matching subterm (reported as `at`). Power terms also match perfect-power constants and monomials: `x^2-4` → `(x+2)(x-2)`, `4x^2-9` → `(2x+3)(2x-3)`, `x^3-8` via `diff_cubes` (binding reported as `numeric`) |
 | `integrate_power_rule EXPR VAR` | `integrate_power_rule "3x^2+2x" x` | term-by-term power rule; accepts `\int ... dx` wrappers; refuses the `1/x` case (that is the table's log rule) |
 | `integrate_table EXPR VAR` | `integrate_table "2\cos x" x` | sin, cos, e^x, sinh, cosh, `1/x`→`ln x` (records `x > 0`); closed under sums and constant factors |
 | `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |

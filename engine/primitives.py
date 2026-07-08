@@ -21,6 +21,7 @@ import random
 import hashlib
 import re
 from fractions import Fraction
+from itertools import combinations
 
 from notation import Notation, Symbol, Func
 from LatexParser import MathParser
@@ -454,6 +455,24 @@ def _error(op, args, message):
 
 
 def _checked(rec, assumptions=None):
+    # when input and result are the same relation, spot-check per side
+    # (a relation itself is not numerically evaluable)
+    try:
+        s1, n1 = parse_latex(rec['input'])
+        s2, n2 = parse_latex(rec['result'])
+        sp1 = _comp_split(s1, n1)
+        sp2 = _comp_split(s2, n2)
+    except PrimitiveError:
+        sp1 = sp2 = None
+    if sp1 is not None and sp2 is not None and sp1[2] == sp2[2]:
+        rec['check'] = _merge_checks(
+            numeric_spot_check(write_latex(sp1[0], n1),
+                               write_latex(sp2[0], n2),
+                               assumptions=assumptions),
+            numeric_spot_check(write_latex(sp1[1], n1),
+                               write_latex(sp2[1], n2),
+                               assumptions=assumptions))
+        return rec
     rec['check'] = numeric_spot_check(rec['input'], rec['result'],
                                       assumptions=assumptions)
     return rec
@@ -830,9 +849,28 @@ def _atomize_walk(sym, notation, out_n, store):
                 inner, j = _func_arg_span(args, i, notation, is_head)
                 if not inner:
                     raise NotInFragment(f'{a!r} without argument')
-                span_syms = [a] + inner
-                span = notation.setf(Notation.P_LIST, span_syms)
-                out_args.append(store.atom(span, notation))
+                n = None
+                fp = _func_power(a, notation)
+                if fp is not None:
+                    try:
+                        n = _index_power(fp[1], notation)
+                    except NotInFragment:
+                        n = None
+                if n is not None and n >= 2:
+                    # \sin^{n} arg becomes atom(\sin arg)^n: the power joins
+                    # the polynomial layer, so \sin^2 x and (\sin x)^2 share
+                    # one canonical form. \sin^{-1} (arcsin reading) and
+                    # non-integer powers stay opaque.
+                    base = notation.setf(Notation.P_LIST,
+                                         [Symbol(fp[0])] + inner)
+                    out_args.append(out_n.setf(
+                        Notation.INDEX,
+                        (store.atom(base, notation),
+                         (None, None, IntegerValue(n), None))))
+                else:
+                    span_syms = [a] + inner
+                    span = notation.setf(Notation.P_LIST, span_syms)
+                    out_args.append(store.atom(span, notation))
                 i = j
             else:
                 out_args.append(_atomize_walk(a, notation, out_n, store))
@@ -880,11 +918,61 @@ def _plist_head_kind(a, notation):
     return None
 
 
+def _powered_func_payload(sym, notation):
+    """INDEX((single function application), n) with a plain positive integer
+    power n >= 2 -> (head_name, arg_syms, n), or None. This is the shape the
+    atomizer builds for \\sin^{n}-style factors, printable back in that
+    standard form where the position is unambiguous."""
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return None
+    sub, sup_l, power, sup_r = f.args[1]
+    if sub is not None or sup_l is not None or sup_r is not None \
+            or power is None:
+        return None
+    p = power
+    if isinstance(p, Symbol):
+        g = notation.getf(p, Notation.GROUP)
+        if g is not None:
+            p = g.args[0]
+    if not isinstance(p, IntegerValue) or p.val < 2:
+        return None
+    payload = _paren_payload(f.args[0], notation)
+    if payload is None:
+        return None
+    pf = notation.getf(payload, Notation.P_LIST)
+    if pf is None:
+        return None
+    head = pf.args[0]
+    if not (isinstance(head, Symbol) and notation.get(head) is None
+            and head.name in FUNC_NAMES and head.name in _UNARY_TABLE):
+        return None
+    args = list(pf.args)
+
+    def is_head(a):
+        return _plist_head_kind(a, notation) is not None
+
+    inner, j = _func_arg_span(args, 0, notation, is_head)
+    if not inner or j != len(args):
+        # the payload is more than one function application; keep parens
+        return None
+    return head.name, inner, p.val
+
+
+def _emit_powered_func(pw, notation, out_n):
+    """Factors [\\sin^{n}, arg...] for a validated powered-func payload."""
+    name, inner, n = pw
+    head = out_n.setf(Notation.INDEX,
+                      (Symbol(name), (None, None, IntegerValue(n), None)))
+    return [head] + [Replicator(notation, out_n)(m) for m in inner]
+
+
 def _relax_atom_parens(sym, notation):
     """Cosmetic pass over an atom-substituted result: drop the () wrappers
     Substitutor adds wherever the expression stays unambiguous — at the
     root, in additive-term position, and as the trailing factor of a
-    product not captured by a preceding function head. The oracle check
+    product not captured by a preceding function head — and print powered
+    atoms back as \\sin^{2}x in those same positions. The oracle check
     and the write_latex validation still guard every emitted result."""
     out_n = Notation()
     return _relax_walk(sym, notation, out_n), out_n
@@ -897,7 +985,14 @@ def _relax_walk(sym, notation, out_n):
         if _is_signed_or_sum(payload, notation):
             inner = _relax_walk(payload, notation, out_n)
             return out_n.setf(Notation.GROUP, (inner,), br='()')
-        return Replicator(notation, out_n)(payload)
+        # recurse: instantiated lemma templates nest Substitutor wrappers
+        return _relax_walk(payload, notation, out_n)
+    comp = notation.getf(sym, Notation.COMP)
+    if comp is not None:
+        rel = comp.sym.props.get('op')
+        return out_n.setf(Symbol('comp', op=rel),
+                          (_relax_walk(comp.args[0], notation, out_n),
+                           _relax_walk(comp.args[1], notation, out_n)))
     for op in (Notation.PLUS, Notation.MINUS):
         f = notation.getf(sym, op)
         if f is not None:
@@ -920,6 +1015,11 @@ def _relax_walk(sym, notation, out_n):
                 return _relax_walk(a, notation, out_n)
             return out_n.setf(ff.sym, (frac_arg(ff.args[0]),
                                        frac_arg(ff.args[1])), **ff.props)
+    pw = _powered_func_payload(sym, notation)
+    if pw is not None:
+        # term/root position: ( \sin x)^{2} prints as \sin^{2}x
+        return out_n.setf(Notation.P_LIST,
+                          _emit_powered_func(pw, notation, out_n))
     return Replicator(notation, out_n)(sym)
 
 
@@ -927,8 +1027,16 @@ def _relax_plist(f, notation, out_n):
     args = list(f.args)
     new_args = []
     for idx, a in enumerate(args):
+        last = idx == len(args) - 1
+        prev_head = idx > 0 and _plist_head_kind(args[idx - 1],
+                                                 notation) is not None
         payload = _paren_payload(a, notation)
         if payload is None:
+            pw = _powered_func_payload(a, notation)
+            if pw is not None and last and not prev_head:
+                # trailing ( \sin x)^{2} factor prints as \sin^{2}x
+                new_args.extend(_emit_powered_func(pw, notation, out_n))
+                continue
             new_args.append(Replicator(notation, out_n)(a))
             continue
         if _is_signed_or_sum(payload, notation):
@@ -936,9 +1044,6 @@ def _relax_plist(f, notation, out_n):
             inner = _relax_walk(payload, notation, out_n)
             new_args.append(out_n.setf(Notation.GROUP, (inner,), br='()'))
             continue
-        last = idx == len(args) - 1
-        prev_head = idx > 0 and _plist_head_kind(args[idx - 1],
-                                                 notation) is not None
         pf = notation.getf(payload, Notation.P_LIST)
         if last and not prev_head:
             if pf is not None \
@@ -947,7 +1052,8 @@ def _relax_plist(f, notation, out_n):
                 new_args.extend(Replicator(notation, out_n)(m)
                                 for m in pf.args)
                 continue
-            if pf is None:
+            if pf is None and not isinstance(payload, Value):
+                # bare values keep their parens: x(2), never x{2}
                 new_args.append(Replicator(notation, out_n)(payload))
                 continue
         new_args.append(Replicator(notation, out_n)(a))
@@ -1601,6 +1707,135 @@ def list_lemmas():
                        for l in LEMMAS.values()]}
 
 
+def _int_nth_root(k, n):
+    """Exact integer n-th root of k >= 0, or None."""
+    if k < 0:
+        return None
+    if k in (0, 1):
+        return k
+    r = round(k ** (1.0 / n))
+    for cand in (r - 1, r, r + 1):
+        if cand >= 0 and cand ** n == k:
+            return cand
+    return None
+
+
+def _perfect_power_root(sym, notation, n):
+    """n-th root of a monomial binding (4 -> 2, 4x^2 -> 2x, x^4 -> x^2 for
+    n=2), returned as (root_sym, root_notation); None when the binding is
+    not a perfect n-th power monomial."""
+    try:
+        rf = to_ratfunc(sym, notation)
+    except (NotInFragment, ZeroDivisionError):
+        return None
+    if not rf.is_poly():
+        return None
+    terms = list(rf.num.terms.items())
+    if len(terms) != 1:
+        return None
+    mono, coeff = terms[0]
+    if coeff <= 0:
+        return None
+    cn = _int_nth_root(coeff.numerator, n)
+    cd = _int_nth_root(coeff.denominator, n)
+    if cn is None or cd is None:
+        return None
+    if any(e % n for _, e in mono):
+        return None
+    root = Poly({tuple((v, e // n) for v, e in mono): Fraction(cn, cd)})
+    out_n = Notation()
+    return poly_to_notation(root, out_n), out_n
+
+
+def _pattern_stats(sym, notation, counts, power_nodes):
+    """Count leaf-symbol occurrences in a pattern tree; record leaves that
+    appear as INDEX(leaf, n) with a plain integer power n >= 2."""
+    if isinstance(sym, tuple):
+        for t in sym:
+            if t is not None:
+                _pattern_stats(t, notation, counts, power_nodes)
+        return
+    if not isinstance(sym, Symbol):
+        return
+    f = notation.get(sym)
+    if f is None:
+        counts[sym.name] = counts.get(sym.name, 0) + 1
+        return
+    if f.sym == Notation.INDEX:
+        base = f.args[0]
+        sub, sup_l, power, sup_r = f.args[1]
+        if (isinstance(base, Symbol) and notation.get(base) is None
+                and sub is None and sup_l is None and sup_r is None):
+            try:
+                n = _index_power(power, notation)
+            except NotInFragment:
+                n = None
+            if n is not None and n >= 2:
+                counts[base.name] = counts.get(base.name, 0) + 1
+                power_nodes.setdefault(base.name, []).append(n)
+                return
+    for a in f.args:
+        _pattern_stats(a, notation, counts, power_nodes)
+
+
+def _lemma_power_variants(src, params):
+    """Variants of a lemma source pattern where a^n power terms whose
+    parameter occurs nowhere else are replaced by wildcards to be bound as
+    perfect n-th power monomials: 'a^2 - b^2' then also matches x^2 - 4
+    (b := 2), 4x^2 - 9 (a := 2x, b := 3) or x^4 - y^4. Returns
+    [(variant_src, variant_params, {wildcard: (param, n)})], fewer
+    replacements first so structural bindings keep priority."""
+    try:
+        sym, notation = parse_latex(src)
+    except PrimitiveError:
+        return []
+    counts, power_nodes = {}, {}
+    _pattern_stats(sym, notation, counts, power_nodes)
+    candidates = [(p, power_nodes[p][0]) for p in params
+                  if counts.get(p) == 1
+                  and len(power_nodes.get(p, ())) == 1]
+    if not candidates:
+        return []
+    used = set(params) | set(re.findall(r'[A-Za-z]', src))
+    fresh_pool = [ch for ch in 'cdefghklmnpqrstuvw' if ch not in used]
+    variants = []
+    for size in range(1, len(candidates) + 1):
+        for combo in combinations(candidates, size):
+            if len(fresh_pool) < size:
+                continue
+            cur = src
+            powermap = {}
+            v_params = [p for p in params
+                        if p not in {c[0] for c in combo}]
+            ok = True
+            for k, (p, n) in enumerate(combo):
+                fresh = fresh_pool[k]
+                pat = re.compile(r'(?<![A-Za-z\\])' + re.escape(p)
+                                 + r'\s*\^\s*(?:\{' + str(n) + r'\}|'
+                                 + str(n) + r')(?![0-9])')
+                cur, cnt = pat.subn(fresh, cur, count=1)
+                if cnt != 1:
+                    ok = False
+                    break
+                powermap[fresh] = (p, n)
+                v_params.append(fresh)
+            if not ok:
+                continue
+            # verify the string surgery on the reparsed variant
+            try:
+                v_sym, v_not = parse_latex(cur)
+            except PrimitiveError:
+                continue
+            v_counts = {}
+            _pattern_stats(v_sym, v_not, v_counts, {})
+            if any(v_counts.get(p, 0) != 0 for p, _ in combo):
+                continue
+            if any(v_counts.get(w, 0) != 1 for w in powermap):
+                continue
+            variants.append((cur, v_params, powermap))
+    return variants
+
+
 def rewrite(expr, lemma_name, direction='forward'):
     """Apply a registered equality lemma at the root of the expression."""
     args = {'expr': expr, 'lemma': lemma_name, 'direction': direction}
@@ -1618,19 +1853,55 @@ def rewrite(expr, lemma_name, direction='forward'):
         sym, notation = parse_latex(expr)
     except PrimitiveError as e:
         return _error('rewrite', args, str(e))
-    pat = comparer.pattern(src, [(p, NotationParam.Any) for p in lemma.params])
-    subst = pat.match(sym, notation)
-    target = sym if subst is not None else None
-    matches = 1 if subst is not None else 0
-    if subst is None:
-        # search subterms in parse order (children precede parents, so the
-        # first hit is an innermost match); rewrite the first, count the rest
+
+    def find_match(pat_src, pat_params, powermap):
+        """(target, subst, numeric_binds, matches) for one pattern; the
+        root is preferred, then subterms in parse order (children precede
+        parents, so the first hit is an innermost match). Wildcards from
+        powermap must bind perfect n-th power monomials, whose roots are
+        returned bound to the original lemma parameter."""
+        pat = comparer.pattern(pat_src,
+                               [(p, NotationParam.Any) for p in pat_params])
+
+        def validate(s):
+            bound = {}
+            for wild, (orig, n) in powermap.items():
+                if wild not in s:
+                    return None
+                root = _perfect_power_root(s[wild], notation, n)
+                if root is None:
+                    return None
+                bound[orig] = root
+            return bound
+
+        s = pat.match(sym, notation)
+        if s is not None:
+            v = validate(s)
+            if v is not None:
+                return sym, s, v, 1
+        target, best_s, best_v, matches = None, None, None, 0
         for node in notation.rel:
             s = pat.match(node, notation)
-            if s is not None:
-                matches += 1
-                if target is None:
-                    target, subst = node, s
+            if s is None:
+                continue
+            v = validate(s)
+            if v is None:
+                continue
+            matches += 1
+            if target is None:
+                target, best_s, best_v = node, s, v
+        return target, best_s, best_v, matches
+
+    target, subst, numeric, matches = find_match(src, lemma.params, {})
+    if subst is None:
+        # numeric fallback: a^n pattern terms may bind perfect n-th power
+        # monomials (x^2 - 4 matches diff_squares with b := 2)
+        for v_src, v_params, v_map in _lemma_power_variants(src,
+                                                            lemma.params):
+            target, subst, numeric, matches = find_match(v_src, v_params,
+                                                         v_map)
+            if subst is not None:
+                break
     if subst is None:
         return _error('rewrite', args,
                       f'expression does not match pattern {src!r} '
@@ -1638,14 +1909,18 @@ def rewrite(expr, lemma_name, direction='forward'):
     tsym, tnotation = parse_latex(dst)
     mapping = {}
     for p in lemma.params:
-        if p not in subst:
+        if p in numeric:
+            mapping[Symbol(p)] = numeric[p]
+        elif p in subst:
+            mapping[Symbol(p)] = (subst[p], notation)
+        else:
             return _error('rewrite', args,
                           f'pattern variable {p!r} unbound')
-        mapping[Symbol(p)] = (subst[p], notation)
     extra = {}
     if target is sym:
         out_n = Notation()
         out_s = Substitutor(tnotation, out_n, mapping)(tsym)
+        out_s, out_n = _relax_atom_parens(out_s, out_n)
         result = write_latex(out_s, out_n)
     else:
         # replace the matched subterm inside a clone of the graph
@@ -1657,8 +1932,12 @@ def rewrite(expr, lemma_name, direction='forward'):
             work.repf(target, Func(Notation.GROUP, (inst,), br='()'))
         else:
             work.repf(target, f_inst)
-        result = write_latex(sym, work)
+        out_s, out_n = _relax_atom_parens(sym, work)
+        result = write_latex(out_s, out_n)
         extra = {'at': at_s, 'matches': matches}
+    if numeric:
+        extra['numeric'] = {p: write_latex(s, n)
+                            for p, (s, n) in numeric.items()}
     rec = _result('rewrite', args, expr, result, extra=extra)
     return _checked(rec)
 

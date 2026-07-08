@@ -257,10 +257,16 @@ class TestExpandCollectEvaluate(unittest.TestCase):
                          '\\cos x')
 
     def test_atom_output_keeps_needed_parens(self):
-        # an atom raised to a power must stay parenthesized
+        # a powered atom prints in standard \sin^{2}x form where the
+        # position is unambiguous...
         r = P.expand('(\\sin x)^2 + 1')
         self.assertEqual(r['check']['status'], 'agree')
-        self.assertIn('( \\sin x)^{2}', r['result'])
+        self.assertEqual(r['result'], '\\sin^{2}x+1')
+        # ...but keeps its parens as a non-trailing product factor, where
+        # \sin^{2}x \cos^{2}x would rebind the argument
+        r = P.expand('\\sin^2 x \\cos^2 x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin x)^{2} \\cos^{2}x')
 
     def test_atom_integral_keeps_thin_space(self):
         r = P.expand('x \\sin x + \\int x \\, dx - x \\sin x')
@@ -284,6 +290,55 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         r = P.evaluate('2(3) + 3 = 7')
         self.assertTrue(r['ok'])
         self.assertFalse(r['holds'])
+
+
+class TestAtomPowers(unittest.TestCase):
+    # gen 8: \sin^{n} x enters the atom layer as atom(\sin x)^n, so both
+    # power spellings meet in one canonical form
+
+    def test_power_forms_share_one_atom(self):
+        r = P.expand('(\\sin x)^2 - \\sin^2 x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '0')
+
+    def test_equal_power_forms_is_canonical(self):
+        r = P.equal_exprs('\\sin^2 x', '(\\sin x)^2')
+        self.assertEqual(r['verdict'], 'yes')
+        self.assertIn('atoms', r['method'])
+
+    def test_powers_merge_in_products(self):
+        r = P.expand('\\sin^2 x \\sin x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '\\sin^{3}x')
+
+    def test_like_powered_terms_merge(self):
+        r = P.expand('2\\sin^2 x + 3\\sin^2 x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '5 \\sin^{2}x')
+
+    def test_collect_powered_atoms(self):
+        r = P.collect('x \\sin^2 x + x \\cos^2 x', 'x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin^{2}x+ \\cos^{2}x)x')
+
+    def test_grouped_argument_power(self):
+        r = P.expand('\\sin^2(x+1) - (\\sin(x+1))^2')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '0')
+
+    def test_distinct_powered_atoms_not_collapsed(self):
+        # soundness: sin^2 and cos^2 stay distinct atoms; no fake identity
+        r = P.expand('\\sin^2 x + \\cos^2 x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '\\sin^{2}x+ \\cos^{2}x')
+
+    def test_inverse_function_power_stays_opaque(self):
+        # \sin^{-1} keeps its arcsin reading: one opaque atom, no power
+        r = P.expand('\\sin^{-1} x + \\sin^{-1} x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\sin^{-', r['result'])
 
 
 class TestDifferentiate(unittest.TestCase):
@@ -415,6 +470,69 @@ class TestSubtermRewrite(unittest.TestCase):
         self.assertTrue(r['ok'])
         self.assertEqual(P.equal_exprs(r['result'],
                                        '1 + a^2 - b^2')['verdict'], 'yes')
+
+
+class TestNumericPowerRewrite(unittest.TestCase):
+    # gen 8: a^n pattern terms may bind perfect n-th power monomials
+
+    def test_square_literal(self):
+        r = P.rewrite('x^2 - 4', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(x+2)(x-2)')
+        self.assertEqual(r['numeric'], {'b': '2'})
+
+    def test_literal_on_the_left(self):
+        r = P.rewrite('4 - x^2', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(2+x)(2-x)')
+        self.assertEqual(r['numeric'], {'a': '2'})
+
+    def test_monomial_roots(self):
+        r = P.rewrite('4x^2 - 9', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(2x+3)(2x-3)')
+
+    def test_even_symbolic_powers(self):
+        r = P.rewrite('x^4 - y^4', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(x^{2}+y^{2})(x^{2}-y^{2})')
+
+    def test_cube_literals(self):
+        r = P.rewrite('x^3 - 8', 'diff_cubes')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['numeric'], {'b': '2'})
+        r = P.rewrite('x^3 + 27', 'sum_cubes')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['numeric'], {'b': '3'})
+
+    def test_fraction_square(self):
+        r = P.rewrite('x^2 - \\frac{1}{4}', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['numeric']['b'], '\\frac {1} {2}')
+
+    def test_imperfect_powers_still_refused(self):
+        for expr in ('x^2 - 3', 'x^2 - y', 'x^2 - 4x'):
+            r = P.rewrite(expr, 'diff_squares')
+            self.assertFalse(r['ok'], expr)
+
+    def test_structural_match_keeps_priority(self):
+        r = P.rewrite('x^2 - y^2', 'diff_squares')
+        self.assertEqual(r['result'], '(x+y)(x-y)')
+        self.assertNotIn('numeric', r)
+
+    def test_numeric_subterm(self):
+        r = P.rewrite('\\frac{x^2 - 4}{x + 2}', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['at'], 'x^{2}-4')
+        self.assertEqual(P.equal_exprs(r['result'], 'x - 2')['verdict'],
+                         'yes')
+
+    def test_equation_rewrite_is_checked(self):
+        # relation-aware _checked: per-side oracle instead of skipped
+        r = P.rewrite('x^2 - 4 = 0', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(x+2)(x-2)=0')
 
 
 class TestCollectRational(unittest.TestCase):

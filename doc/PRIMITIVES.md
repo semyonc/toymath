@@ -19,7 +19,7 @@ touch the fixed-point rewrite rules.
 | `engine/agent_do.py` | The `do!` Jupyter endpoint: OpenRouter-backed agent (OpenAI Agents SDK) whose only way to do math is calling the primitives |
 | `engine/plot_sandbox.py` | Sandboxed plotting backends for the do! agent (backend seam; v1: Pyodide under Deno) |
 | `engine/pyodide_runner.mjs` | Vendored Deno script: runs agent plot code in the Pyodide WASM sandbox, captures matplotlib figures as base64 PNGs |
-| `engine/unittests_primitives.py` | 132 tests |
+| `engine/unittests_primitives.py` | 150 tests |
 | `engine/unittests_do.py` | do! endpoint tests (scripted fake model; live OpenRouter test behind `TOYMATH_LIVE_TESTS=1`) |
 
 ## The primitives
@@ -43,10 +43,13 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    rational fragment it canonicalizes over *opaque atoms*: maximal
    non-fragment subtrees (`\cos x`, `e^x`, unevaluated `\int ...`) become
    opaque variables, the same polyrat engine runs, and the subtrees are
-   substituted back — so like terms merge (`2\sin x + 3\sin x → 5(\sin
-   x)`), cancellations happen, and tactic-chain assemblies finish inside
+   substituted back — so like terms merge (`2\sin x + 3\sin x → 5 \sin x`),
+   cancellations happen, and tactic-chain assemblies finish inside
    the ledger. No new rewrite rules; atom identity ignores transparent
-   grouping (`\sin(x)` ≡ `\sin x`).
+   grouping (`\sin(x)` ≡ `\sin x`), and function powers enter the
+   polynomial layer (`\sin^2 x` is `atom(\sin x)^2`, so
+   `(\sin x)^2 - \sin^2 x → 0` and `\sin^2 x \cdot \sin x → \sin^3 x`;
+   `\sin^{-1}` keeps its arcsin reading and stays opaque).
 4. **collect(expr, var)** — polynomial grouped by powers of `var`.
    Accepts equations and rational functions (numerator and denominator
    collected separately). Outside the rational fragment it collects over
@@ -64,7 +67,12 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    (`diff_squares`, `square_of_sum`, `cube_of_sum`, `diff_cubes`, …) matched
    at the root or, failing that, at the first matching subterm (reported as
    `at`, with the total match count); the lemma library is the
-   extensibility point.
+   extensibility point. Power terms in a pattern also bind perfect-power
+   constants and monomials when the structural match fails: `x^2 - 4` →
+   `(x+2)(x-2)`, `4x^2 - 9` → `(2x+3)(2x-3)`, `x^3 - 8` via `diff_cubes`
+   (the derived binding is reported as `numeric`); imperfect powers
+   (`x^2 - 3`) are still refused, and rewriting inside an equation is
+   oracle-checked per side.
 8. **factor_gcd(expr)** / **factor_quadratic(expr, var)** — named
    factorings in place of a general `factor`. `factor_quadratic` factors
    over Q via the discriminant, reports the roots, and honestly refuses
@@ -198,8 +206,12 @@ same expression (validated per call via a group-stripped normal form);
 anything ambiguous falls back to the verbose form. Atom-substituted
 results additionally drop the parentheses the substitution machinery adds
 wherever the expression stays unambiguous (`5(\sin x)` → `5 \sin x`,
-`x(\sin x)` → `x \sin x`), keeping them where they bind (`(\sin x)^2`,
-coefficient sums like `(\sin x + \cos x)x`); the pass is purely cosmetic
-and every emitted result is still oracle-checked. Ledger `replay`
-tolerates formatting drift across versions by falling back to a semantic
-`equal?` comparison when recorded and replayed strings differ.
+`x(\sin x)` → `x \sin x`), print powered atoms in standard notation where
+the position cannot rebind the argument (`\sin^{2}x`, but
+`( \sin x)^{2} \cos^{2}x` keeps the parens), and keep them where they
+bind (coefficient sums like `(\sin x + \cos x)x`); instantiated rewrite
+templates go through the same pass (`(x+2)(x-2)`, not `(x+(2))(x-(2))`).
+The pass is purely cosmetic and every emitted result is still
+oracle-checked. Ledger `replay` tolerates formatting drift across
+versions by falling back to a semantic `equal?` comparison when recorded
+and replayed strings differ.
