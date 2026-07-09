@@ -37,6 +37,8 @@ class Replicator(object):
         'vgroup': 'enter_vgroup',
         'sgroup': 'enter_sgroup',
         '\\array': 'enter_array',
+        '\\pmatrix': 'enter_array',
+        '\\matrix': 'enter_array',
         '\\cases': 'enter_array'
     }
 
@@ -234,6 +236,12 @@ class Replicator(object):
         if res is not None:
             return res
         res = self._probe(sym, "\\array")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\pmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\matrix")
         if res is not None:
             return res
         res = self._probe(sym, "\\cases")

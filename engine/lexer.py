@@ -103,6 +103,8 @@ class MathLexer(object):
         'cal',
         'boxed',
         'array',
+        'pmatrix',
+        'matrix',
         'cr',
         'cases',
         'in',

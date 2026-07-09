@@ -52,9 +52,30 @@ class EvalError(Exception):
 # parse / write helpers
 # ---------------------------------------------------------------------------
 
+_MATRIX_ENV_RE = re.compile(
+    r'\\begin\{(pmatrix|matrix)\}'
+    r'((?:(?!\\begin\{(?:pmatrix|matrix)\}|\\end\{(?:pmatrix|matrix)\}).)*?)'
+    r'\\end\{\1\}', re.DOTALL)
+
+
+def _normalize_matrix_envs(latex):
+    """LaTeX matrix environments -> the grammar's plain-TeX commands:
+    \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} -> \\pmatrix{a & b \\cr c & d}.
+    Innermost-first so nested matrices normalize too."""
+    def repl(m):
+        body = m.group(2).replace('\\\\', ' \\cr ')
+        return f'\\{m.group(1)}{{{body}}}'
+    prev = None
+    while prev != latex:
+        prev = latex
+        latex = _MATRIX_ENV_RE.sub(repl, latex)
+    return latex
+
+
 def parse_latex(latex):
     # the lexer has no bare < / > tokens, only the \lt / \gt commands
-    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', latex)
+    normalized = _normalize_matrix_envs(latex)
+    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
     notation = Notation()
     try:
@@ -216,9 +237,99 @@ def _is_func_name(sym, notation):
             and sym.name in _UNARY_TABLE)
 
 
+# ---------------------------------------------------------------------------
+# matrix-aware oracle arithmetic. Matrices evaluate to lists of lists of
+# floats; the helpers keep multiplication ORDERED, so the oracle can
+# disprove AB = BA for literal matrices. This shares nothing with the
+# symbolic path — it is the independent leg of the trust design.
+# ---------------------------------------------------------------------------
+
+_ARRAY_EVAL_NAMES = ('\\array', '\\pmatrix', '\\matrix')
+
+
+def _num_shape(m):
+    return (len(m), len(m[0]) if m else 0)
+
+
+def _num_add(a, b):
+    am, bm = isinstance(a, list), isinstance(b, list)
+    if am and bm:
+        if _num_shape(a) != _num_shape(b):
+            raise EvalError('matrix shape mismatch in +')
+        return [[x + y for x, y in zip(r1, r2)] for r1, r2 in zip(a, b)]
+    if am or bm:
+        raise EvalError('matrix + scalar')
+    return a + b
+
+
+def _num_neg(a):
+    if isinstance(a, list):
+        return [[-x for x in row] for row in a]
+    return -a
+
+
+def _num_mul(a, b):
+    am, bm = isinstance(a, list), isinstance(b, list)
+    if am and bm:
+        ra, ca = _num_shape(a)
+        rb, cb = _num_shape(b)
+        if ca != rb:
+            raise EvalError('matrix shape mismatch in *')
+        return [[sum(a[i][k] * b[k][j] for k in range(ca))
+                 for j in range(cb)] for i in range(ra)]
+    if am:
+        return [[x * b for x in row] for row in a]
+    if bm:
+        return [[a * x for x in row] for row in b]
+    return a * b
+
+
+def _num_pow(b, p):
+    if isinstance(p, list):
+        raise EvalError('matrix exponent')
+    if isinstance(b, list):
+        n = int(p)
+        if p != n or n < 1:
+            raise EvalError('matrix power must be a positive integer')
+        out = b
+        for _ in range(n - 1):
+            out = _num_mul(out, b)
+        return out
+    if b == 0 and p < 0:
+        raise ZeroDivisionError
+    if b < 0 and p != int(p):
+        raise ValueError('negative base, fractional power')
+    return math.pow(b, p)
+
+
+def _num_abs(v):
+    if isinstance(v, list):
+        return max((abs(x) for row in v for x in row), default=0.0)
+    return abs(v)
+
+
+def _num_agree(v1, v2, tol):
+    """True/False when the values are comparable; None when a scalar meets
+    a non-vanishing matrix (nothing to conclude)."""
+    m1, m2 = isinstance(v1, list), isinstance(v2, list)
+    if m1 and m2:
+        if _num_shape(v1) != _num_shape(v2):
+            return False
+        scale = max(1.0, _num_abs(v1), _num_abs(v2))
+        return all(abs(x - y) / scale <= tol
+                   for r1, r2 in zip(v1, v2) for x, y in zip(r1, r2))
+    if m1 or m2:
+        if _num_abs(v1) <= tol and _num_abs(v2) <= tol:
+            return True   # a fully cancelled matrix prints as scalar 0
+        return None
+    scale = max(1.0, abs(v1), abs(v2))
+    return abs(v1 - v2) / scale <= tol
+
+
 def numeric_eval(sym, notation, env):
-    """Evaluate expression to a float. Raises EvalError outside the numeric
-    fragment, ZeroDivisionError/ValueError on bad sample points."""
+    """Evaluate expression to a float, or to a list-of-lists of floats for
+    matrix literals. Raises EvalError outside the numeric fragment,
+    ZeroDivisionError/ValueError on bad sample points."""
     if isinstance(sym, IntegerValue):
         return float(sym.val)
     if isinstance(sym, FracValue):
@@ -241,19 +352,25 @@ def numeric_eval(sym, notation, env):
               Notation.PLUS):
         return numeric_eval(f.args[0], notation, env)
     if op == Notation.MINUS:
-        return -numeric_eval(f.args[0], notation, env)
+        return _num_neg(numeric_eval(f.args[0], notation, env))
     if op == Notation.S_LIST:
-        return sum(numeric_eval(t, notation, env) for t in f.args)
+        total = None
+        for t in f.args:
+            v = numeric_eval(t, notation, env)
+            total = v if total is None else _num_add(total, v)
+        return total
     if op == Notation.P_LIST:
         return _eval_plist(f.args, notation, env)
     if op == Notation.SLASH:
         d = numeric_eval(f.args[1], notation, env)
+        if isinstance(d, list):
+            raise EvalError('division by a matrix')
         if d == 0:
             raise ZeroDivisionError
-        return numeric_eval(f.args[0], notation, env) / d
+        return _num_mul(numeric_eval(f.args[0], notation, env), 1.0 / d)
     if op == Notation.STAR:
-        return (numeric_eval(f.args[0], notation, env)
-                * numeric_eval(f.args[1], notation, env))
+        return _num_mul(numeric_eval(f.args[0], notation, env),
+                        numeric_eval(f.args[1], notation, env))
     if op == Notation.INDEX:
         sub, sup_l, power, sup_r = f.args[1]
         if sub is not None or sup_l is not None or sup_r is not None:
@@ -263,32 +380,52 @@ def numeric_eval(sym, notation, env):
             return numeric_eval(base, notation, env)
         b = numeric_eval(base, notation, env)
         p = numeric_eval(power, notation, env)
-        if b == 0 and p < 0:
-            raise ZeroDivisionError
-        if b < 0 and p != int(p):
-            raise ValueError('negative base, fractional power')
-        return math.pow(b, p)
+        return _num_pow(b, p)
     if op == Notation.FUNC:
         fname, arg = f.args[0], f.args[1]
         if isinstance(fname, Symbol) and fname.name in _UNARY_TABLE:
-            return _UNARY_TABLE[fname.name](numeric_eval(arg, notation, env))
+            v = numeric_eval(arg, notation, env)
+            if isinstance(v, list):
+                raise EvalError('matrix argument to a function')
+            return _UNARY_TABLE[fname.name](v)
         raise EvalError(f'unknown function {fname!r}')
     if op.name in FRAC_NAMES:
         d = numeric_eval(f.args[1], notation, env)
+        if isinstance(d, list):
+            raise EvalError('division by a matrix')
         if d == 0:
             raise ZeroDivisionError
-        return numeric_eval(f.args[0], notation, env) / d
+        return _num_mul(numeric_eval(f.args[0], notation, env), 1.0 / d)
     if op.name == '\\sqrt':
         if len(f.args) == 1:
             v = numeric_eval(f.args[0], notation, env)
+            if isinstance(v, list):
+                raise EvalError('sqrt of a matrix')
             if v < 0:
                 raise ValueError('sqrt of negative sample')
             return math.sqrt(v)
         n = numeric_eval(f.args[1], notation, env)
         v = numeric_eval(f.args[0], notation, env)
+        if isinstance(v, list) or isinstance(n, list):
+            raise EvalError('root of a matrix')
         if v < 0:
             raise ValueError('root of negative sample')
         return math.pow(v, 1.0 / n)
+    if op.name in _ARRAY_EVAL_NAMES:
+        rows = []
+        width = None
+        for row in f.args:
+            vals = [numeric_eval(c, notation, env) for c in row]
+            if any(isinstance(v, list) for v in vals):
+                raise EvalError('nested matrix literal')
+            if width is None:
+                width = len(vals)
+            elif len(vals) != width:
+                raise EvalError('ragged matrix literal')
+            rows.append(vals)
+        if not rows or width == 0:
+            raise EvalError('empty matrix literal')
+        return rows
     raise EvalError(f'cannot evaluate operation {op.name}')
 
 
@@ -350,14 +487,18 @@ def _eval_plist(args, notation, env):
                 raise EvalError(f'{fname} without argument')
             inner = 1.0
             for t in inner_syms:
-                inner *= numeric_eval(t, notation, env)
+                inner = _num_mul(inner, numeric_eval(t, notation, env))
+            if isinstance(inner, list):
+                raise EvalError('matrix argument to a function')
             v = _UNARY_TABLE[fname](inner)
             if power is not None:
                 v = math.pow(v, numeric_eval(power, notation, env))
-            result *= v
+            result = _num_mul(result, v)
             i = j
         else:
-            result *= numeric_eval(a, notation, env)
+            # _num_mul keeps left-to-right order: matrix factors must
+            # multiply in the order they appear
+            result = _num_mul(result, numeric_eval(a, notation, env))
             i += 1
     return result
 
@@ -422,7 +563,8 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         tried += 1
         env = _sample_point(variables, rng)
         try:
-            if any(abs(numeric_eval(gs, gn, env)) < 1e-4 for gs, gn in guards):
+            if any(_num_abs(numeric_eval(gs, gn, env)) < 1e-4
+                   for gs, gn in guards):
                 continue
         except (EvalError, ZeroDivisionError, ValueError, OverflowError):
             continue
@@ -439,8 +581,10 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
                 mismatch = {'point': env,
                             'defined': 'rhs' if k1 == 'domain' else 'lhs'}
             continue
-        scale = max(1.0, abs(v1), abs(v2))
-        if abs(v1 - v2) / scale > tol:
+        agree = _num_agree(v1, v2, tol)
+        if agree is None:
+            continue
+        if not agree:
             return {'status': 'disagree', 'point': env,
                     'lhs': v1, 'rhs': v2}
         agreed += 1
@@ -585,8 +729,10 @@ def _substitute_check(expr, result, var, value, samples=8, seed=20260705):
             v2 = numeric_eval(s2, n2, env)
         except (EvalError, ZeroDivisionError, ValueError, OverflowError):
             continue
-        scale = max(1.0, abs(v1), abs(v2))
-        if abs(v1 - v2) / scale > 1e-6:
+        agree = _num_agree(v1, v2, 1e-6)
+        if agree is None:
+            continue
+        if not agree:
             return {'status': 'disagree', 'point': env, 'lhs': v1, 'rhs': v2}
         agreed += 1
     if agreed == 0:
@@ -832,6 +978,48 @@ class _AtomStore(object):
 _NON_EXPR_OPS = (Notation.COMP, Notation.C_LIST, Notation.O_LIST,
                  Notation.A_LIST)
 
+# matrix/vector objects: array literals and \vec-marked symbols. \cases is
+# excluded on purpose (piecewise scalar). Bare symbols read as scalars until
+# a declaration mechanism exists.
+_MATRIX_FUNCS = frozenset(('\\array', '\\pmatrix', '\\matrix', '\\vec'))
+
+
+def _is_matrix_valued(sym, notation):
+    """True when the subtree contains a matrix/vector object anywhere."""
+    if not isinstance(sym, Symbol):
+        return False
+    f = notation.get(sym)
+    if f is None:
+        return False
+    if f.sym.name in _MATRIX_FUNCS:
+        return True
+
+    def scan(items):
+        for it in items:
+            if isinstance(it, (list, tuple)):
+                if scan(it):
+                    return True
+            elif isinstance(it, Symbol) and _is_matrix_valued(it, notation):
+                return True
+        return False
+
+    return scan(f.args)
+
+
+def _is_matrix_object(sym, notation):
+    """A single matrix/vector object under transparent grouping only.
+    Powers of ONE object commute with each other, so A^n may stay in the
+    polynomial layer while (AB)^n and (A+B)^n may not."""
+    while isinstance(sym, Symbol):
+        f = notation.get(sym)
+        if f is None:
+            return False
+        if f.sym in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP):
+            sym = f.args[0]
+            continue
+        return f.sym.name in _MATRIX_FUNCS
+    return False
+
 
 def _atomize_walk(sym, notation, out_n, store):
     """Copy sym into out_n replacing maximal non-fragment subtrees with
@@ -860,6 +1048,10 @@ def _atomize_walk(sym, notation, out_n, store):
         terms = [_atomize_walk(t, notation, out_n, store) for t in f.args]
         return out_n.setf(op, terms)
     if op == Notation.SLASH or op.name in FRAC_NAMES:
+        if _is_matrix_valued(f.args[1], notation):
+            # dividing BY a matrix-valued expression is not scalar algebra
+            # (A/A is not 1); the whole quotient stays opaque
+            return store.atom(sym, notation)
         a = _atomize_walk(f.args[0], notation, out_n, store)
         b = _atomize_walk(f.args[1], notation, out_n, store)
         return out_n.setf(f.sym, (a, b), **f.props)
@@ -869,6 +1061,12 @@ def _atomize_walk(sym, notation, out_n, store):
                 and power is not None:
             try:
                 _index_power(power, notation)
+                if _is_matrix_valued(f.args[0], notation) \
+                        and not _is_matrix_object(f.args[0], notation):
+                    # (AB)^n / (A+B)^n: commutative expansion would
+                    # fabricate cross terms like 2AB; keep the whole
+                    # power as one atom
+                    return store.atom(sym, notation)
                 base = _atomize_walk(f.args[0], notation, out_n, store)
                 pw = Replicator(notation, out_n)(power)
                 return out_n.setf(op, (base, (None, None, pw, None)))
@@ -886,24 +1084,61 @@ def _atomize_walk(sym, notation, out_n, store):
             fp = _func_power(a, notation)
             return fp is not None and fp[0] in FUNC_NAMES
 
-        out_args = []
+        # pass 1: group factors into multiplicative units without atomizing
+        # ('int' tail span / 'head' function application / plain 'factor')
+        units = []
         i = 0
         while i < len(args):
             a = args[i]
             if isinstance(a, Symbol) and notation.get(a) is None \
                     and a.name == '\\int':
-                # unevaluated integral: the rest of the product is one atom
+                # unevaluated integral: the rest of the product is one unit
                 # (taken from the unfiltered factors, so \, survives)
                 raw = list(f.args)
                 tail = raw[raw.index(a):]
                 span = notation.setf(Notation.P_LIST, tail) \
                     if len(tail) > 1 else a
-                out_args.append(store.atom(span, notation))
+                units.append(('int', span))
                 break
             if is_head(a):
                 inner, j = _func_arg_span(args, i, notation, is_head)
                 if not inner:
                     raise NotInFragment(f'{a!r} without argument')
+                units.append(('head', (a, inner)))
+                i = j
+            else:
+                units.append(('factor', a))
+                i += 1
+
+        # pass 2: the noncommutative quote. When two or more units are
+        # matrix-valued, their ordered product becomes ONE atom (a word in
+        # the free algebra) — polyrat's sorted monomials would otherwise
+        # prove AB = BA. Scalar units commute out and stay polynomial.
+        def unit_syms(u):
+            kind, payload = u
+            if kind == 'head':
+                return [payload[0]] + payload[1]
+            return [payload]
+
+        flags = [any(_is_matrix_valued(m, notation) for m in unit_syms(u))
+                 for u in units]
+        word = None
+        if sum(flags) >= 2:
+            parts = []
+            for u, fl in zip(units, flags):
+                if fl:
+                    parts.extend(unit_syms(u))
+            span = notation.setf(Notation.P_LIST, parts)
+            word = store.atom(span, notation)
+            units = [u for u, fl in zip(units, flags) if not fl]
+
+        # pass 3: atomize the remaining scalar units as before
+        out_args = []
+        for kind, payload in units:
+            if kind == 'int':
+                out_args.append(store.atom(payload, notation))
+            elif kind == 'head':
+                a, inner = payload
                 n = None
                 fp = _func_power(a, notation)
                 if fp is not None:
@@ -926,10 +1161,11 @@ def _atomize_walk(sym, notation, out_n, store):
                     span_syms = [a] + inner
                     span = notation.setf(Notation.P_LIST, span_syms)
                     out_args.append(store.atom(span, notation))
-                i = j
             else:
-                out_args.append(_atomize_walk(a, notation, out_n, store))
-                i += 1
+                out_args.append(_atomize_walk(payload, notation, out_n,
+                                              store))
+        if word is not None:
+            out_args.append(word)
         if len(out_args) == 1:
             return out_args[0]
         return out_n.setf(Notation.P_LIST, out_args)
@@ -1412,6 +1648,10 @@ def evaluate(expr):
         v = numeric_eval(sym, notation, {})
     except (EvalError, ZeroDivisionError, ValueError) as e:
         return _error('evaluate', args, f'cannot evaluate: {e}')
+    if isinstance(v, list):
+        return _error('evaluate', args,
+                      'matrix-valued expression: evaluate returns scalars; '
+                      'expand collects matrix terms instead')
     return _result('evaluate', args, expr, repr(round(v, 12)),
                    extra={'exact': False})
 
@@ -1720,10 +1960,13 @@ def _derivative_check(expr, deriv, var, samples=8, seed=20260705):
             env_m = dict(env)
             env_p[var] = env[var] + h
             env_m[var] = env[var] - h
-            d_num = (numeric_eval(s1, n1, env_p)
-                     - numeric_eval(s1, n1, env_m)) / (2 * h)
+            f_p = numeric_eval(s1, n1, env_p)
+            f_m = numeric_eval(s1, n1, env_m)
         except (EvalError, ZeroDivisionError, ValueError, OverflowError):
             continue
+        if any(isinstance(v, list) for v in (d_sym, f_p, f_m)):
+            continue   # matrix-valued: central differences not supported
+        d_num = (f_p - f_m) / (2 * h)
         scale = max(1.0, abs(d_sym), abs(d_num))
         if abs(d_sym - d_num) / scale > 1e-4:
             return {'status': 'disagree', 'point': env,
@@ -2653,8 +2896,14 @@ def equal_exprs(expr1, expr2):
                            'outside both domains')
         return rec
     if check['status'] == 'disagree':
-        return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
-                'method': 'numeric-oracle', 'counterexample': check['point']}
+        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
+               'method': 'numeric-oracle', 'counterexample': check['point']}
+        if 'lhs' in check:
+            # for constant inputs (e.g. literal matrices) the evaluated
+            # values are the whole witness — the point alone is empty
+            rec['lhs'] = check['lhs']
+            rec['rhs'] = check['rhs']
+        return rec
     if check['status'] == 'domain-differs':
         defined, undefined = (('expr1', 'expr2') if check['defined'] == 'lhs'
                               else ('expr2', 'expr1'))

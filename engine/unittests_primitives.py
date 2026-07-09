@@ -893,6 +893,136 @@ class TestSubtermRelax(unittest.TestCase):
                          '(x^{2}+4)(x^{2}-4)=0')
 
 
+# classic non-commuting pair: AB = diag(1,0), BA = diag(0,1)
+MAT_A = '\\pmatrix{0 & 1 \\cr 0 & 0}'
+MAT_B = '\\pmatrix{0 & 0 \\cr 1 & 0}'
+
+
+class TestMatrixParsing(unittest.TestCase):
+    # gen 10: \begin{pmatrix}/\begin{matrix} normalize to the grammar's
+    # plain-TeX commands and round-trip through the writer
+
+    def test_pmatrix_env(self):
+        s, n = P.parse_latex('\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}')
+        self.assertEqual(P.write_latex(s, n), '\\pmatrix{1 & 2 \\cr 3 & 4}')
+
+    def test_matrix_env(self):
+        s, n = P.parse_latex('\\begin{matrix} x & 2x \\\\ 1 & x \\end{matrix}')
+        self.assertEqual(P.write_latex(s, n), '\\matrix{x & 2x \\cr 1 & x}')
+
+    def test_nested_envs(self):
+        s, n = P.parse_latex('\\begin{pmatrix} \\begin{matrix} 1 \\end{matrix}'
+                             ' & 2 \\\\ 3 & 4 \\end{pmatrix}')
+        self.assertEqual(P.write_latex(s, n),
+                         '\\pmatrix{\\matrix{1} & 2 \\cr 3 & 4}')
+
+    def test_plain_tex_form_roundtrips(self):
+        s, n = P.parse_latex(MAT_A)
+        out = P.write_latex(s, n)
+        self.assertEqual(out, MAT_A)
+        s2, n2 = P.parse_latex(out)
+        self.assertEqual(P.write_latex(s2, n2), out)
+
+    def test_substitute_into_cells(self):
+        r = P.substitute('\\pmatrix{x & 2x \\cr 1 & x}', 'x', '3')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\pmatrix', r['result'])
+
+
+class TestNoncommutativeAtoms(unittest.TestCase):
+    # gen 10: products with >= 2 matrix-valued factors atomize as ONE
+    # ordered word, so commutative polyrat can never prove AB = BA
+
+    def test_commutator_does_not_vanish(self):
+        r = P.expand(f'{MAT_A}{MAT_B} - {MAT_B}{MAT_A}')
+        self.assertTrue(r['ok'])
+        self.assertNotEqual(r['result'], '0')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_same_word_still_collects(self):
+        r = P.expand(f'{MAT_A}{MAT_B} + {MAT_A}{MAT_B}')
+        self.assertTrue(r['result'].startswith('2'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_scalars_commute_out(self):
+        r = P.expand(f'{MAT_A} x - x {MAT_A}')
+        self.assertEqual(r['result'], '0')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_matrix_sum_power_stays_opaque(self):
+        r = P.expand(f'({MAT_A} + {MAT_B})^2')
+        self.assertIn('^{2}', r['result'])   # no fabricated 2AB expansion
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_single_matrix_power_collects(self):
+        r = P.expand(f'{MAT_A}^2 + {MAT_A}^2')
+        self.assertTrue(r['result'].startswith('2'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_scalar_division_works(self):
+        r = P.expand(f'\\frac{{{MAT_A}}}{{2}} + \\frac{{{MAT_A}}}{{2}}')
+        self.assertEqual(r['result'], MAT_A)
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_division_by_matrix_stays_opaque(self):
+        r = P.expand(f'\\frac{{1}}{{{MAT_A}}} {MAT_A}')
+        self.assertNotEqual(r['result'], '1')   # A^{-1}A is not scalar 1
+
+    def test_vec_scalar_collect(self):
+        r = P.expand('2\\vec v + 3\\vec v')
+        self.assertEqual(r['result'], '5 \\vec v')
+
+    def test_vec_words_do_not_commute(self):
+        r = P.expand('\\vec u \\vec v - \\vec v \\vec u')
+        self.assertNotEqual(r['result'], '0')
+
+    def test_collect_matrix_coefficients(self):
+        r = P.collect(f'x {MAT_A} + x {MAT_B}', 'x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertTrue(r['result'].endswith('x'))
+
+    def test_evaluate_refuses_matrices(self):
+        r = P.evaluate(f'{MAT_A} + {MAT_A}')
+        self.assertFalse(r['ok'])
+        self.assertIn('matrix', r['error'])
+
+
+class TestMatrixOracle(unittest.TestCase):
+    # gen 10: the oracle evaluates literal matrices with ORDERED
+    # multiplication — it can disprove commutation, not just skip
+
+    def test_equal_disproves_commutation(self):
+        r = P.equal_exprs(f'{MAT_A}{MAT_B}', f'{MAT_B}{MAT_A}')
+        self.assertEqual(r['verdict'], 'no')
+        self.assertEqual(r['lhs'], [[1.0, 0.0], [0.0, 0.0]])
+        self.assertEqual(r['rhs'], [[0.0, 0.0], [0.0, 1.0]])
+
+    def test_equal_confirms_product(self):
+        r = P.equal_exprs(f'{MAT_A}{MAT_B}', '\\pmatrix{1 & 0 \\cr 0 & 0}')
+        self.assertEqual(r['verdict'], 'yes')
+
+    def test_equal_same_word_canonical(self):
+        r = P.equal_exprs(f'{MAT_A}{MAT_B}', f'({MAT_A})({MAT_B})')
+        self.assertEqual(r['verdict'], 'yes')
+
+    def test_scaling_vs_addition(self):
+        r = P.equal_exprs(f'2{MAT_A}', f'{MAT_A}+{MAT_A}')
+        self.assertEqual(r['verdict'], 'yes')
+
+    def test_shape_mismatch_is_no(self):
+        r = P.equal_exprs('\\pmatrix{1 & 2 \\cr 3 & 4}', '\\pmatrix{1 & 2}')
+        self.assertEqual(r['verdict'], 'no')
+
+    def test_cancelled_matrix_agrees_with_scalar_zero(self):
+        c = P.numeric_spot_check(f'{MAT_A} - {MAT_A}', '0')
+        self.assertEqual(c['status'], 'agree')
+
+    def test_symbolic_vectors_stay_skipped(self):
+        r = P.equal_exprs('\\vec u \\vec v', '\\vec v \\vec u')
+        self.assertEqual(r['verdict'], 'unknown')
+
+
 class TestLedger(unittest.TestCase):
     def test_record_replay(self):
         path = os.path.join(tempfile.mkdtemp(), 'session.json')

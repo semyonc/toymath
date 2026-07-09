@@ -74,6 +74,22 @@ Antiderivatives carry `+ C` (a fresh symbol, reported as `constant`); the
 oracle checks them by central-difference differentiation against the
 integrand.
 
+## Matrices and vectors (literal, phase 1)
+
+`\begin{pmatrix} a & b \\ c & d \end{pmatrix}` and `\begin{matrix}…\end{matrix}`
+parse (normalized to plain-TeX `\pmatrix{a & b \cr c & d}`), round-trip, and
+`substitute` reaches the cells. `expand`/`collect` do scalar-linear algebra
+over matrix terms: `M + M → 2M`, `2\vec v + 3\vec v → 5\vec v`, `xA − Ax → 0`
+(scalars commute). **Ordered products never commute**: a product of two or
+more matrix-valued factors is treated as one opaque word, so `AB − BA` does
+NOT collapse and `(A+B)^2` stays unexpanded. For literal matrices the oracle
+does real matrix arithmetic — it verifies these steps at sample points and
+`equal` can disprove commutation (`equal "AB" "BA"` → no, with both evaluated
+matrices as witness). Honest refusals: `evaluate` rejects matrix-valued
+expressions, division by a matrix stays opaque (`A^{-1}A` is not `1`), and
+there is no `mat_mul`/`det` yet — do not multiply matrices by hand; say the
+tactic does not exist.
+
 ## Rules
 
 - If `check.status` is `"disagree"`, the step is wrong — do not use its

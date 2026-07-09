@@ -27,6 +27,8 @@ class LaTexWriter(object):
         'sgroup': 'write_sgroup',
         'func': 'write_func',
         '\\array': 'write_array',
+        '\\pmatrix': 'write_array',
+        '\\matrix': 'write_array',
         '\\cases': 'write_array',
         '\\text': 'write_text',
         '\\textbf': 'write_text',
@@ -253,6 +255,8 @@ class LaTexWriter(object):
                 and not self._probe(sym, "\\textsf") \
                 and not self._probe(sym, "\\texttt") \
                 and not self._probe(sym, "\\array") \
+                and not self._probe(sym, "\\pmatrix") \
+                and not self._probe(sym, "\\matrix") \
                 and not self._probe(sym, "\\cases"):
             f = self.notation.getf(sym, Notation.REF)
             if f is not None:

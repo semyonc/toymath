@@ -449,7 +449,9 @@ class MathParser(object):
          p[0] = self.notation.setf(Notation.FUNC, (index_expr, p[5]), fmt='operatorname')
 
      def p_scalar_array(self, p):
-         '''scalar : array '{' row-list '}' '''
+         '''scalar : array '{' row-list '}'
+                   | pmatrix '{' row-list '}'
+                   | matrix '{' row-list '}' '''
          p[0] = self.notation.setf(Symbol(p[1]), p[3])
 
      def p_scalar_cases(self, p):
