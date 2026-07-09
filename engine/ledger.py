@@ -155,7 +155,8 @@ class Ledger(object):
                 'assumptions': self.assumptions}
 
     _MARKS = {'agree': 'verified', 'exact': 'exact',
-              'skipped': 'unchecked', 'disagree': 'FAILED'}
+              'skipped': 'unchecked', 'disagree': 'FAILED',
+              'domain-differs': 'DOMAIN DIFFERS'}
 
     def render_markdown(self):
         """Render the derivation as Markdown with LaTeX math blocks."""
@@ -198,7 +199,7 @@ class Ledger(object):
         for step in self.steps:
             check = step['check'].get('status', '?')
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
-                    'disagree': 'XX'}.get(check, '?')
+                    'disagree': 'XX', 'domain-differs': 'D!'}.get(check, '?')
             branch = '' if step.get('continues') in (True, None) else ' (branch)'
             lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch} "
                          f"{step['op']}: {step['input']}  ==>  "

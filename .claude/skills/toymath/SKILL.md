@@ -37,7 +37,7 @@ it appends each verified step to a replayable ledger.
 | `integrate_substitute EXPR VAR U_EXPR U_VAR NEW_INTEGRAND` | `integrate_substitute "2x \cos(x^2)" x "x^2" u "\cos(u)"` | u-substitution: you supply u and the integrand rewritten in u; toymath verifies `f(u(x))·u'(x)` equals the integrand and returns `\int f(u) du`; back-substitute with `substitute` after integrating |
 | `factor_gcd EXPR` | `factor_gcd "6x^2+9x"` | pull out the common factor → `3x(2x+3)` |
 | `factor_quadratic EXPR VAR` | `factor_quadratic "x^2-5x+6" x` | rational roots → `(x-2)(x-3)`; reports roots; refuses irrational cases |
-| `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown |
+| `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown. A `no` with method `domain mismatch` means the sides agree in value but one is defined where the other is not (`\ln(x^2)` vs `2\ln x`) — equality may hold on a restricted domain; a `yes` may carry a `note` that it was checked only on the common domain |
 | `lemmas` | | list rewrite lemmas |
 | `show --session f [--format md]` | | render the ledger (Markdown with `--format md`) |
 | `replay --session f` | | re-verify every recorded step |
@@ -78,6 +78,9 @@ integrand.
 
 - If `check.status` is `"disagree"`, the step is wrong — do not use its
   result; report the discrepancy.
+- If `check.status` is `"domain-differs"`, the result changed where the
+  expression is defined (a definedness witness point is reported) — treat
+  it as valid only with an explicit domain assumption, and surface that.
 - Surface recorded `assumptions` (e.g. `y ≠ 0`) to the user; the derivation
   is conditional on them.
 - `equal` verdict `unknown` means unverified — say so honestly.

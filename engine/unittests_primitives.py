@@ -815,6 +815,84 @@ class TestEqual(unittest.TestCase):
         self.assertEqual(P.equal_exprs('x = 2', 'x + 2')['verdict'], 'no')
 
 
+class TestDomainAwareOracle(unittest.TestCase):
+    # gen 9: a sample point where exactly one side is defined is a
+    # definedness witness — the sides differ as real functions
+
+    def test_log_square_is_not_two_log(self):
+        r = P.equal_exprs('\\ln(x^2)', '2 \\ln x')
+        self.assertEqual(r['verdict'], 'no')
+        self.assertIn('domain mismatch', r['method'])
+        self.assertIn('counterexample', r)
+        # ...but the agent learns equality may hold on a restricted domain
+        self.assertIn('restricted domain', r['note'])
+
+    def test_log_product_is_not_sum_of_logs(self):
+        r = P.equal_exprs('\\ln(xy)', '\\ln x + \\ln y')
+        self.assertEqual(r['verdict'], 'no')
+        self.assertIn('domain mismatch', r['method'])
+
+    def test_sqrt_times_sqrt_is_not_x(self):
+        r = P.equal_exprs('\\sqrt{x}\\sqrt{x}', 'x')
+        self.assertEqual(r['verdict'], 'no')
+        self.assertIn('domain mismatch', r['method'])
+
+    def test_common_restricted_domain_is_reported(self):
+        # both sides live on x > 0: yes, with the caveat recorded
+        r = P.equal_exprs('\\frac{x}{\\sqrt{x}}', '\\sqrt{x}')
+        self.assertEqual(r['verdict'], 'yes')
+        self.assertIn('both sides are defined', r['note'])
+
+    def test_everywhere_identities_have_no_caveat(self):
+        r = P.equal_exprs('\\sin^2 x + \\cos^2 x', '1')
+        self.assertEqual(r['verdict'], 'yes')
+        self.assertNotIn('note', r)
+
+    def test_value_counterexample_still_wins(self):
+        # both sides defined at x < 0, values differ: plain 'no'
+        r = P.equal_exprs('\\sqrt{x^2}', 'x')
+        self.assertEqual(r['verdict'], 'no')
+        self.assertEqual(r['method'], 'numeric-oracle')
+
+    def test_spot_check_status_fields(self):
+        c = P.numeric_spot_check('\\ln(x^2)', '2 \\ln x')
+        self.assertEqual(c['status'], 'domain-differs')
+        self.assertEqual(c['defined'], 'lhs')
+        self.assertGreater(c['mismatches'], 0)
+        self.assertGreater(c['common_samples'], 0)
+
+    def test_merge_prefers_domain_differs(self):
+        c = P._merge_checks({'status': 'agree', 'samples': 8},
+                            {'status': 'domain-differs', 'mismatches': 3,
+                             'common_samples': 5, 'defined': 'rhs',
+                             'point': {'x': -1.0}})
+        self.assertEqual(c['status'], 'domain-differs')
+
+
+class TestSubtermRelax(unittest.TestCase):
+    # gen 9: subterm-rewrite surgery results relax like root results
+
+    def test_factored_subterm_prints_clean(self):
+        r = P.rewrite('(x^{2}+4)(x^{2}-4)', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(x^{2}+4)(x+2)(x-2)')
+
+    def test_rewrite_inside_function_argument(self):
+        r = P.rewrite('\\sin(x^{2}-4)', 'diff_squares')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '\\sin ((x+2)(x-2))')
+
+    def test_verbatim_powers_keep_single_braces(self):
+        s, n = P.parse_latex('x^{2}+x^{12}')
+        self.assertEqual(P.write_latex(s, n), 'x^{2}+x^{12}')
+
+    def test_root_and_equation_outputs_unchanged(self):
+        self.assertEqual(P.rewrite('x^2 - 4', 'diff_squares')['result'],
+                         '(x+2)(x-2)')
+        self.assertEqual(P.rewrite('x^4 - 16 = 0', 'diff_squares')['result'],
+                         '(x^{2}+4)(x^{2}-4)=0')
+
+
 class TestLedger(unittest.TestCase):
     def test_record_replay(self):
         path = os.path.join(tempfile.mkdtemp(), 'session.json')

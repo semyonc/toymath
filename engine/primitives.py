@@ -75,9 +75,22 @@ class PrettyWriter(LaTexWriter):
         self._keep_braces = 0
 
     def write_index_item(self, sym):
+        # reparsing wraps INDEX dims in a {}-group; when it holds a bare
+        # integer the value's own repr braces suffice: x^{12}, not x^{{12}}
+        item = None
+        if isinstance(sym, Symbol):
+            g = self.notation.getf(sym, Notation.GROUP)
+            if g is not None and g.props.get('br') == '{}' \
+                    and 'quoted' not in g.props \
+                    and isinstance(g.args[0], IntegerValue) \
+                    and g.args[0].val >= 0:
+                item = g.args[0]
         self._keep_braces += 1
         try:
-            super(PrettyWriter, self).write_index_item(sym)
+            if item is not None:
+                self.write_raw_term(item)
+            else:
+                super(PrettyWriter, self).write_index_item(sym)
         finally:
             self._keep_braces -= 1
 
@@ -361,11 +374,29 @@ def _sample_point(variables, rng):
     return env
 
 
+def _eval_kind(sym, notation, env):
+    """numeric_eval classified: (None, value) on success, ('domain', None)
+    when the point lies outside the expression's domain (log/root of a
+    negative sample, a pole), ('oracle', None) when the oracle cannot
+    evaluate the expression at all and the point proves nothing."""
+    try:
+        return None, numeric_eval(sym, notation, env)
+    except (ValueError, ZeroDivisionError):
+        return 'domain', None
+    except (EvalError, OverflowError):
+        return 'oracle', None
+
+
 def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
                        seed=20260705, tol=1e-6):
     """Independently check latex1 == latex2 at random sample points.
-    Returns a dict {'status': 'agree'|'disagree'|'skipped', ...}.
-    Respects recorded assumptions: sample points violating them are skipped."""
+    Returns {'status': 'agree'|'disagree'|'domain-differs'|'skipped', ...}.
+    A point where exactly one side is defined is a definedness witness:
+    the sides differ as real functions even if values agree elsewhere
+    ('domain-differs'). Points outside both domains are skipped but
+    counted ('undefined_points'), so an 'agree' restricted to a common
+    domain says so. Respects recorded assumptions: sample points
+    violating them are skipped."""
     try:
         s1, n1 = parse_latex(latex1)
         s2, n2 = parse_latex(latex2)
@@ -384,25 +415,45 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     rng = random.Random(seed)
     agreed = 0
     tried = 0
+    undefined_both = 0
+    mismatches = 0
+    mismatch = None
     while agreed < samples and tried < samples * 8:
         tried += 1
         env = _sample_point(variables, rng)
         try:
             if any(abs(numeric_eval(gs, gn, env)) < 1e-4 for gs, gn in guards):
                 continue
-            v1 = numeric_eval(s1, n1, env)
-            v2 = numeric_eval(s2, n2, env)
         except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        k1, v1 = _eval_kind(s1, n1, env)
+        k2, v2 = _eval_kind(s2, n2, env)
+        if 'oracle' in (k1, k2):
+            continue
+        if k1 == 'domain' and k2 == 'domain':
+            undefined_both += 1
+            continue
+        if k1 == 'domain' or k2 == 'domain':
+            mismatches += 1
+            if mismatch is None:
+                mismatch = {'point': env,
+                            'defined': 'rhs' if k1 == 'domain' else 'lhs'}
             continue
         scale = max(1.0, abs(v1), abs(v2))
         if abs(v1 - v2) / scale > tol:
             return {'status': 'disagree', 'point': env,
                     'lhs': v1, 'rhs': v2}
         agreed += 1
+    if mismatch is not None:
+        return {'status': 'domain-differs', 'mismatches': mismatches,
+                'common_samples': agreed, **mismatch}
     if agreed == 0:
         return {'status': 'skipped',
                 'reason': 'no evaluable sample points'}
-    return {'status': 'agree', 'samples': agreed}
+    result = {'status': 'agree', 'samples': agreed}
+    if undefined_both:
+        result['undefined_points'] = undefined_both
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -720,15 +771,19 @@ def _op_expr(side, op, arg):
 
 
 def _merge_checks(c1, c2):
-    if c1['status'] == 'disagree':
-        return c1
-    if c2['status'] == 'disagree':
-        return c2
+    for status in ('disagree', 'domain-differs'):
+        if c1['status'] == status:
+            return c1
+        if c2['status'] == status:
+            return c2
     if c1['status'] == 'agree' and c2['status'] == 'agree':
         merged = {'status': 'agree'}
         samples = [c['samples'] for c in (c1, c2) if 'samples' in c]
         if samples:
             merged['samples'] = min(samples)
+        undefined = sum(c.get('undefined_points', 0) for c in (c1, c2))
+        if undefined:
+            merged['undefined_points'] = undefined
         return merged
     return {'status': 'skipped',
             'reason': c1.get('reason') or c2.get('reason') or 'partial'}
@@ -1052,11 +1107,26 @@ def _relax_plist(f, notation, out_n):
                 new_args.extend(Replicator(notation, out_n)(m)
                                 for m in pf.args)
                 continue
+            if pf is not None \
+                    and _paren_payload(pf.args[0], notation) is not None:
+                # trailing ((x+2)(x-2)) from a subterm rewrite:
+                # multiplication is flat, splice the relaxed factors in
+                inner = _relax_plist(pf, notation, out_n)
+                inf = out_n.getf(inner, Notation.P_LIST)
+                new_args.extend(inf.args if inf is not None else [inner])
+                continue
             if pf is None and not isinstance(payload, Value):
                 # bare values keep their parens: x(2), never x{2}
-                new_args.append(Replicator(notation, out_n)(payload))
+                new_args.append(_relax_walk(payload, notation, out_n))
                 continue
-        new_args.append(Replicator(notation, out_n)(a))
+        # kept parens still get relaxed inside: instantiated lemma
+        # templates nest Substitutor wrappers arbitrarily deep
+        g = notation.getf(a, Notation.GROUP)
+        if 'quoted' in g.props:
+            new_args.append(Replicator(notation, out_n)(a))
+            continue
+        inner = _relax_walk(payload, notation, out_n)
+        new_args.append(out_n.setf(Notation.GROUP, (inner,), **g.props))
     if len(new_args) == 1:
         return new_args[0]
     return out_n.setf(Notation.P_LIST, new_args)
@@ -2574,11 +2644,29 @@ def equal_exprs(expr1, expr2):
         pass
     check = numeric_spot_check(expr1, expr2, samples=20)
     if check['status'] == 'agree':
-        return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'yes',
-                'method': 'numeric-oracle (probabilistic)',
-                'samples': check['samples']}
+        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'yes',
+               'method': 'numeric-oracle (probabilistic)',
+               'samples': check['samples']}
+        if check.get('undefined_points'):
+            rec['note'] = ('compared only where both sides are defined; '
+                           f"{check['undefined_points']} sample points fell "
+                           'outside both domains')
+        return rec
     if check['status'] == 'disagree':
         return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
                 'method': 'numeric-oracle', 'counterexample': check['point']}
+    if check['status'] == 'domain-differs':
+        defined, undefined = (('expr1', 'expr2') if check['defined'] == 'lhs'
+                              else ('expr2', 'expr1'))
+        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
+               'method': 'numeric-oracle (domain mismatch)',
+               'counterexample': check['point'],
+               'reason': f'{defined} is defined at the counterexample point '
+                         f'but {undefined} is not'}
+        if check.get('common_samples'):
+            rec['note'] = (f"values agree at all {check['common_samples']} "
+                           'sampled points where both sides are defined; '
+                           'equality may hold on a restricted domain')
+        return rec
     return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'unknown',
             'method': 'none', 'reason': check.get('reason')}
