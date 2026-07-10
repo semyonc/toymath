@@ -132,9 +132,67 @@ skill file, so the two can't drift apart.
 See [doc/PRIMITIVES.md](doc/PRIMITIVES.md) for the full design: the trust
 model, opaque atoms, the ledger format, and what is deliberately absent.
 
+## Commands, and how they compose
+
+A `do!` cell is free-form. A **notebook command** is a `do!` you can name and
+reuse: a Markdown file in `commands/` with a `$ARGUMENTS` placeholder becomes
+a `name!` cell prefix.
+
+```markdown
+---
+name: int
+description: Apply symbolic integration, step by step
+expr: true
+---
+Apply symbolic integration for $ARGUMENTS ...
+```
+
+Now `int! x^3` runs the agent with that focused instruction, and `commands!`
+lists everything available. Discovery mirrors the classic kernel's `cmd_*`
+auto-registration — drop a file in `commands/`, and the command exists.
+
+Mark a command `expr: true` and it is no longer just a whole-cell prefix: it
+**composes inside an expression**, alongside plain math and other commands.
+
+```
+{diff! {int! x^3}}          →  x^3        integrate, then differentiate
+{int! x^2} + {int! x^2}     →  ⅔x³ + 2C   one call (memoised); sum checked
+2 {diff! x^2} - 1           →  4x - 1
+```
+
+Each `{…!}` is resolved inner-to-outer into a verified sub-derivation
+(identical sub-expressions cost a single agent call). The arithmetic **glue**
+between the results is then handed to `expand`, so the composition is
+confirmed by the numeric oracle — **not by another LLM call**. The cell's
+ledger is the union of every sub-derivation and the final combine, and
+`replay` verifies the whole composite.
+
+### Three layers, no blind trust
+
+This is the shape of the whole system, and composite commands are where it
+becomes literal:
+
+- **Strategy — the LLM.** Chooses the next move, or the whole plan.
+- **Mechanism — deterministic algebra.** Computes it: the verified
+  primitives (`expand`, `differentiate`, …) and, underneath them, the classic
+  fixed-point rewrite engine.
+- **Verification — the numeric oracle.** Shares nothing with the mechanism
+  and re-checks every result at random sample points.
+
+No layer trusts another on faith. The model's prose can never enter the
+ledger — only tool calls can — so it cannot hallucinate a step; and any bug
+in the algebra is caught by the oracle from the opposite side. A composite
+like `{diff! {int! x^3}}` is just the point where all three meet in one
+expression: the LLM resolves each command, the procedural `expand` combines
+the pieces, and the oracle signs off on the combination. Strategy is cheap
+and fallible, mechanism is fast but not self-verifying, verification is
+independent and deliberately dumb — and the interesting behaviour is in how
+they check each other.
+
 ## The classic kernel
 
-The foundation is a Jupyter kernel with LaTeX as both input and output:
+Underneath all of this is the original ToyMath: a Jupyter kernel with LaTeX
+as both input and output.
 
 ```
 Input (LaTeX) → Parser → Notation Graph (DAG) → Processor → Output (LaTeX)
@@ -144,26 +202,38 @@ Input (LaTeX) → Parser → Notation Graph (DAG) → Processor → Output (LaTe
   sharing (Symbol, Func, Notation)
 - **`processor.py`** — a fixed-point iteration engine: transformations are
   applied until nothing changes
-- **`cmd_*.py`** — short named commands, auto-discovered
 - **`LatexParser.py` / `LatexWriter.py`** — LaTeX in, LaTeX out
+- **`cmd_*.py`** — short `!`-commands, auto-discovered
 
-Evaluation is **explicit**: numeric constants evaluate automatically
-(`\frac{1}{2} + \frac{1}{3}` → `\frac{5}{6}`), while symbolic
-transformations happen when you ask for them with a `!`-command:
+Numeric constants evaluate automatically; symbolic transformations happen
+when you ask for them with a `!`-command:
 
 ```latex
 \frac{1}{2} + \frac{1}{3}      % → 5/6 (automatic numeric evaluation)
 mul! x^{-1}x                   % → 1 (power cancellation)
 mul! (a/b)^2                   % → a²/b² (power expansion)
 add! \frac{a}{b}+\frac{c}{d}   % → \frac{ad+bc}{bd} (fraction addition)
-add! {mul! (a+b)(c+d)} + x     % commands compose; nesting defers to the next iteration
+add! {mul! (a+b)(c+d)} + x     % commands compose; nesting defers a step
 ```
 
-| Command | Purpose |
-|---------|---------|
-| `mul!` | multiplication: expansion, distribution, fraction and power rules |
-| `add!` | addition: like terms, common denominators |
-| `do!` | the agent endpoint described above |
+These `mul!` / `add!` commands were the original way ToyMath did algebra, and
+they no longer carry much of the weight. The verified primitives have
+superseded them for real work: `expand` already multiplies, distributes, and
+cancels, and every result it returns is oracle-checked — which the classic
+rewrite rules are not. So read the classic engine as the **substrate**
+ToyMath grew out of: the LaTeX parser, the notation graph, and the
+command-node machinery. That last part still earns its keep — the parser has
+always turned `{name! arg}` into a command node, and that is exactly the
+syntax the composite `int!` / `diff!` commands reuse. The old command layer
+and the new agentic one share one grammar; the classic `add! {mul! …}`
+nesting above and the verified `{diff! {int! …}}` are the same idea, a
+generation apart.
+
+| Command | Role |
+|---------|------|
+| `mul!` / `add!` | the original symbolic algebra — superseded by the verified `expand` / `collect`, kept as the substrate |
+| `do!` | the free-form agent endpoint |
+| `int!` / `diff!` / `commands!` | notebook & composite commands (above) |
 | `goal` / `rules` | Prolog-style logic layer: goals and transformation rules |
 | `dump` / `track` / `debug` | introspection: notation graph, tracing |
 | `echo-on` / `echo-off` / `clear` | session control |
@@ -219,12 +289,16 @@ toymath/
 │   ├── primitives.py       # the verified primitives + numeric oracle
 │   ├── ledger.py           # step ledger: record, render, replay
 │   ├── agent_do.py         # do! endpoint: agent, tools, prompt from the skill
+│   ├── prompt_commands.py  # discoverable name! commands from commands/*.md
+│   ├── expr_commands.py    # inline composition: {diff! {int! x^3}} resolver
 │   ├── plot_sandbox.py     # sandboxed plotting (Pyodide under Deno)
 │   ├── pyodide_runner.mjs  # vendored Deno runner for the plot sandbox
 │   ├── notation.py         # notation graph structures
 │   ├── processor.py        # classic fixed-point engine
+│   ├── mathShell.py        # kernel cell dispatch (math, do!, name!, composite)
 │   ├── cmd_*.py            # classic kernel commands
 │   └── unittests*.py       # test suites
+├── commands/               # notebook & composite command templates (int.md, …)
 ├── toymath_cli.py          # agent-facing CLI
 ├── toymathkernel.py        # Jupyter kernel entry point
 ├── .claude/skills/toymath/ # Claude Code skill (also the do! prompt source)
