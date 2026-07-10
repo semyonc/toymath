@@ -207,6 +207,37 @@ do! solve [[3]] for x, recording every assumption
   (`run_plot(code, timeout)`) is container-agnostic, so a Docker /
   llm-sandbox backend can be added later.
 
+## Notebook commands (`int!`, `diff!`, `solve!`, …)
+
+`do!` takes a free-form instruction; a **notebook command** is a saved,
+named instruction template. Each is a Markdown file in `commands/` with a
+SKILL-compatible YAML frontmatter and a body containing the `$ARGUMENTS`
+placeholder:
+
+```markdown
+---
+name: int
+description: Apply symbolic integration to the argument, step by step
+---
+Apply symbolic integration for $ARGUMENTS ...
+```
+
+A cell that starts with `int!` renders the template (`$ARGUMENTS` → the rest
+of the cell, after `[[n]]` back-references resolve) and runs it through the
+same `do!` agent. Discovery mirrors the `cmd_*.py` auto-registration
+(`prompt_commands.load_commands()` globs the directory); `commands!` (or
+`help!`) lists what is available and reloads the registry so a newly-added
+file goes live without a kernel restart. Only a *registered* name at the
+start of a cell diverts, so ordinary math such as `n!` (factorial) is
+untouched.
+
+A command adds **no new authority**: it only seeds the agent, which can
+still only call the oracle-checked primitives, and only tool executions
+write ledger steps. So `int!` is not an autonomous `integrate` — it is a
+convenience shortcut for a `do!` run, and a hallucinated step stays
+structurally impossible. The template can *steer* (which tactics to prefer,
+what to record) but cannot bypass verification.
+
 ## Output format
 
 Results print through a PrettyWriter that drops the `{2}`-style value

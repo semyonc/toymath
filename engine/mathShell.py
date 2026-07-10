@@ -9,11 +9,16 @@ from processor import MathProcessor
 from LatexWriter import LaTexWriter
 from prolog import PrologModel
 from ledger import Ledger
+import prompt_commands
 
 from IPython.display import HTML, Javascript
 from engine import display
 
 BACKREF_RE = re.compile(r'\[\[\s*(\d+)\s*\]\]')
+# a cell that starts with `name!` (letter/underscore start) may be a
+# prompt-command; only a *registered* name diverts, so math like `n! + 1`
+# (factorial) still parses normally
+CMD_PREFIX_RE = re.compile(r'^([A-Za-z_]\w*)!')
 
 def split_lines(self, code):
     bracket = 0
@@ -52,6 +57,9 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
+        # discoverable do!-style commands from the repo commands/ directory;
+        # commands! reloads this registry so newly-added files go live
+        self.commands = prompt_commands.load_commands()
 
     def trace_step(self, sym, notation, index):
         if self.trace:
@@ -77,15 +85,53 @@ class MathShell(object):
 
     def exec(self, code, execution_count, add_to_history=False, cell_id=None):
         stripped = code.strip()
-        if stripped.startswith('do!'):
-            # agent endpoint: the whole rest of the cell is the instruction
-            self.exec_do(stripped[len('do!'):].strip(), execution_count,
-                         add_to_history)
+        m = CMD_PREFIX_RE.match(stripped)
+        if m and self.dispatch_command(m.group(1), stripped[m.end():].strip(),
+                                       execution_count, add_to_history):
             return
         lines = [line for line in split_lines(self, code)]
         for index, line in enumerate(lines):
             last = index == len(lines) - 1
             self.exec_stmt(line, execution_count, add_to_history and last, last)
+
+    def dispatch_command(self, name, rest, execution_count, add_to_history):
+        """Handle a `name!` cell prefix. Returns True when it was a command
+        (do!, a registered prompt-command, or the commands!/help! listing),
+        False when `name` is not a command so the cell is ordinary math
+        (e.g. `n!` factorial)."""
+        if name in ('commands', 'help'):
+            self.show_commands()
+            return True
+        if name == 'do':
+            # the free-form agent endpoint: rest is the instruction verbatim
+            self.exec_do(rest, execution_count, add_to_history)
+            return True
+        cmd = self.commands.get(name)
+        if cmd is None:
+            return False
+        if not rest:
+            self._do_error(f'{name}! needs an argument')
+            return True
+        instruction = prompt_commands.render(cmd, rest)
+        self.exec_do(instruction, execution_count, add_to_history)
+        return True
+
+    def show_commands(self):
+        """Render the discoverable command list. Reloads the registry first
+        so a newly-added commands/*.md file goes live without a restart."""
+        self.commands = prompt_commands.load_commands()
+        rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
+                f'<code>{_html.escape(c.name)}!</code></td>'
+                f'<td style="color:#444">{_html.escape(c.description)}</td>'
+                '</tr>'
+                for c in sorted(self.commands.values())]
+        table = ('<table>' + ''.join(rows) + '</table>') if rows else (
+            '<div style="color:#888">no commands defined yet '
+            '(add <code>commands/&lt;name&gt;.md</code> files)</div>')
+        display(HTML('<div><b>notebook commands</b>' + table
+                     + '<div style="color:#888;margin-top:4px">plus '
+                     '<code>do!</code> (free-form instruction) and '
+                     '<code>commands!</code> (this list)</div></div>'))
 
     def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False

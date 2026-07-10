@@ -368,6 +368,135 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn(agent_do.API_KEY_VAR, self._html())
 
 
+class TestPromptCommandModel(unittest.TestCase):
+    """The discovery/parse model in prompt_commands.py (no shell, no agent)."""
+
+    def test_repo_commands_load(self):
+        import prompt_commands as pc
+        reg = pc.load_commands()
+        for name in ('int', 'diff', 'solve'):
+            self.assertIn(name, reg)
+            self.assertIn('$ARGUMENTS', reg[name].template)
+
+    def test_render_substitutes_arguments(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command(
+            '---\nname: int\ndescription: d\n---\nIntegrate $ARGUMENTS now',
+            'int')
+        self.assertEqual(pc.render(cmd, 'x^2'), 'Integrate x^2 now')
+
+    def test_fallback_name_from_stem(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command('---\ndescription: d\n---\n$ARGUMENTS', 'foo')
+        self.assertEqual(cmd.name, 'foo')
+
+    def test_rejects_missing_frontmatter(self):
+        import prompt_commands as pc
+        with self.assertRaises(ValueError):
+            pc.parse_command('bare body $ARGUMENTS', 'x')
+
+    def test_rejects_missing_description(self):
+        import prompt_commands as pc
+        with self.assertRaises(ValueError):
+            pc.parse_command('---\nname: x\n---\n$ARGUMENTS', 'x')
+
+    def test_rejects_missing_placeholder(self):
+        import prompt_commands as pc
+        with self.assertRaises(ValueError):
+            pc.parse_command('---\nname: x\ndescription: d\n---\nno slot', 'x')
+
+    def test_rejects_reserved_name(self):
+        import prompt_commands as pc
+        with self.assertRaises(ValueError):
+            pc.parse_command('---\nname: do\ndescription: d\n---\n$ARGUMENTS',
+                             'do')
+
+    def test_bad_file_is_skipped_not_fatal(self):
+        import tempfile
+        import prompt_commands as pc
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'good.md'), 'w') as fh:
+                fh.write('---\nname: good\ndescription: g\n---\n$ARGUMENTS')
+            with open(os.path.join(d, 'bad.md'), 'w') as fh:
+                fh.write('no frontmatter, no placeholder')
+            reg = pc.load_commands(d)
+        self.assertIn('good', reg)
+        self.assertNotIn('bad', reg)
+
+
+class TestPromptCommandDispatch(unittest.TestCase):
+    """Kernel dispatch of `name!` cells (mocked agent — offline)."""
+
+    def setUp(self):
+        import engine
+        self.displays = []
+        engine.setHandler(lambda *objs, **kw: self.displays.extend(objs))
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def _capture_instruction(self):
+        box = {}
+
+        def fake_run(instruction, **kw):
+            box['instruction'] = instruction
+            return {'ok': True, 'steps': [], 'assumptions': [],
+                    'final_result': None, 'summary': None}
+        return box, fake_run
+
+    def test_command_prefix_renders_template(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! \\int x^2 \\, dx', 1, add_to_history=True)
+        self.assertIn('Apply symbolic integration for', box['instruction'])
+        self.assertIn('\\int x^2', box['instruction'])
+
+    def test_backref_resolves_inside_command_args(self):
+        self.shell.exec('2 + 3', 1, add_to_history=True)  # result 5
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('diff! [[1]]', 2, add_to_history=True)
+        self.assertIn('5', box['instruction'])
+        self.assertNotIn('[[1]]', box['instruction'])
+
+    def test_unregistered_prefix_is_not_a_command(self):
+        # `n!` (factorial) must fall through to the math path
+        called = []
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: called.append(1)):
+            handled = self.shell.dispatch_command('n', '+ 1', 1, False)
+        self.assertFalse(handled)
+        self.assertEqual(called, [])
+
+    def test_empty_argument_reports_error(self):
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: self.fail('must not run')):
+            self.shell.exec('int!', 1, add_to_history=True)
+        self.assertIn('needs an argument', self._html())
+
+    def test_commands_listing_makes_no_api_call(self):
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: self.fail('no agent for list')):
+            self.shell.exec('commands!', 1)
+        out = self._html()
+        self.assertIn('notebook commands', out)
+        self.assertIn('int', out)
+
+    def test_command_steps_land_in_shared_ledger(self):
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda: ScriptedModel(SOLVE_SCRIPT)):
+            self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
+        self.assertEqual(len(self.shell.ledger.steps), 2)
+        self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
+
+
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',
                      'set TOYMATH_LIVE_TESTS=1 for a live OpenRouter test')
 class TestLiveOpenRouter(unittest.TestCase):
