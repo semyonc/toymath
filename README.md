@@ -40,6 +40,18 @@ preserve. Instead, the agent composes smaller tactics such as
 `apply_both_sides`, `expand`, `factor_quadratic`, `integrate_by_parts`, and
 `substitute`.
 
+This restraint is not only an interface choice — it is what the mathematics
+allows. By [Richardson's theorem](https://en.wikipedia.org/wiki/Richardson%27s_theorem)
+(1968), once expressions are built from a variable, rational constants and π,
+arithmetic, `sin`, `exp`, and absolute value, deciding whether an expression
+is identically zero is undecidable — and with it, deciding equality. A
+complete, always-correct `simplify` cannot exist; every CAS trades quietly
+between incompleteness and heuristics. ToyMath draws the boundary explicitly
+instead: exact canonical algebra on the decidable polynomial/rational
+fragment, an independent probabilistic oracle beyond it, and an honest
+`unknown` where neither applies. Strategy — the part no algorithm can
+complete — goes to the agent.
+
 Results are described as **mechanically checked**, not proved. Canonical
 algebra is exact where supported; the independent oracle is reproducible but
 probabilistic outside that fragment. Assumptions such as `a + b \ne 0` remain
