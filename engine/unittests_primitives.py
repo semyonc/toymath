@@ -1094,5 +1094,54 @@ class TestOracleCatchesLies(unittest.TestCase):
         self.assertEqual(c['status'], 'agree')
 
 
+class TestAbsoluteValue(unittest.TestCase):
+    # gen 12: |...| was parsed as a transparent bracket, so BOTH the
+    # symbolic path AND the oracle silently read |x| as x — a soundness
+    # hole where the two trust legs shared the blind spot. |...| is now an
+    # opaque atom and the oracle computes real |.|.
+
+    def test_abs_is_not_its_argument(self):
+        r = P.equal_exprs('|x|', 'x')
+        self.assertEqual(r['verdict'], 'no')
+
+    def test_abs_of_negative_constant(self):
+        self.assertEqual(P.equal_exprs('|{-5}|', '5')['verdict'], 'yes')
+        self.assertEqual(P.equal_exprs('|{-5}|', '-5')['verdict'], 'no')
+
+    def test_expand_keeps_abs_opaque_and_checks(self):
+        r = P.expand('|x|')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '|x|')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_like_abs_terms_collect_over_atoms(self):
+        r = P.expand('2|x| + |x|')
+        self.assertEqual(r['result'], '3|x|')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_square_of_abs_equals_square(self):
+        # |x^2| == x^2 because x^2 >= 0; the oracle decides this correctly
+        self.assertEqual(P.equal_exprs('|x^2|', 'x^2')['verdict'], 'yes')
+
+    def test_left_right_bars_also_opaque(self):
+        r = P.equal_exprs('\\left|x-1\\right|', 'x-1')
+        self.assertEqual(r['verdict'], 'no')
+
+    def test_evaluate_constant_abs(self):
+        r = P.evaluate('|{-5}|')
+        self.assertTrue(r['ok'])
+        self.assertEqual(float(r['result']), 5.0)
+
+    def test_differentiate_abs_refuses(self):
+        r = P.differentiate('|x|', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('absolute value', r['error'])
+
+    def test_oracle_evaluates_real_abs(self):
+        # the numeric leg alone must see |.|, independent of the symbolic path
+        c = P.numeric_spot_check('|x|', 'x')
+        self.assertEqual(c['status'], 'disagree')
+
+
 if __name__ == '__main__':
     unittest.main()

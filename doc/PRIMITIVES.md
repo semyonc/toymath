@@ -157,6 +157,12 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
   group right after the function is the whole argument; otherwise the run of
   tight factors up to the next function/group binds (`\sin 2x` = sin(2x),
   `\cos(x) y` = cos(x)·y).
+- Absolute value `|...|` is an opaque atom, not a transparent bracket: like
+  terms collect (`2|x| + |x|` → `3|x|`), `equal?` distinguishes `|x|` from
+  `x`, and the oracle computes real `|·|`, but no `|.|`-specific tactic is
+  provided and `differentiate` refuses it. Bare `|expr|` parses only around a
+  single scalar (`|x|`, `|x^2|`); wrap products/sums as `\left|x-1\right|` or
+  `|{x-1}|`. `\lfloor·\rfloor`/`\lceil·\rceil` are not yet modelled.
 
 ## The `do!` endpoint (Jupyter)
 

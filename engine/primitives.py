@@ -350,6 +350,13 @@ def numeric_eval(sym, notation, env):
     op = f.sym
     if op in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
               Notation.PLUS):
+        if f.props.get('br') == '||':
+            # absolute value bars — the oracle computes real |·|, sharing
+            # nothing with the symbolic atom path.
+            v = numeric_eval(f.args[0], notation, env)
+            if isinstance(v, list):
+                raise EvalError('absolute value of a matrix')
+            return abs(v)
         return numeric_eval(f.args[0], notation, env)
     if op == Notation.MINUS:
         return _num_neg(numeric_eval(f.args[0], notation, env))
@@ -1039,6 +1046,10 @@ def _atomize_walk(sym, notation, out_n, store):
     if op in _NON_EXPR_OPS:
         raise NotInFragment(f'{op.name} is not an expression')
     if op in (Notation.GROUP, Notation.V_GROUP):
+        if f.props.get('br') == '||':
+            # |expr| is absolute value, not grouping: the whole bar term is
+            # one opaque atom (identity keeps the bars, so |x| != x).
+            return store.atom(sym, notation)
         inner = _atomize_walk(f.args[0], notation, out_n, store)
         return out_n.setf(op, (inner,), **f.props)
     if op in (Notation.PLUS, Notation.MINUS):
@@ -1734,6 +1745,9 @@ def _diff(sym, notation, var):
         return s, '0'
     op = f.sym
     if op == Notation.GROUP:
+        if f.props.get('br') == '||':
+            raise PrimitiveError(
+                'cannot differentiate absolute value (not in the rule set)')
         e, d = _diff(f.args[0], notation, var)
         return _paren(e), d
     if op == Notation.PLUS:
