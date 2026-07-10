@@ -19,6 +19,9 @@ BACKREF_RE = re.compile(r'\[\[\s*(\d+)\s*\]\]')
 # prompt-command; only a *registered* name diverts, so math like `n! + 1`
 # (factorial) still parses normally
 CMD_PREFIX_RE = re.compile(r'^([A-Za-z_]\w*)!')
+# any `name!` token anywhere in a cell — used to spot an inline expr command
+# ({diff! {int! x^3}}); the registry check filters out factorials
+EXPR_TOKEN_RE = re.compile(r'([A-Za-z_][\w-]*)!')
 
 def split_lines(self, code):
     bracket = 0
@@ -89,6 +92,9 @@ class MathShell(object):
         if m and self.dispatch_command(m.group(1), stripped[m.end():].strip(),
                                        execution_count, add_to_history):
             return
+        if self.has_expr_command(stripped):
+            self.exec_composite(stripped, execution_count, add_to_history)
+            return
         lines = [line for line in split_lines(self, code)]
         for index, line in enumerate(lines):
             last = index == len(lines) - 1
@@ -109,12 +115,22 @@ class MathShell(object):
         cmd = self.commands.get(name)
         if cmd is None:
             return False
+        if cmd.expr:
+            # an expr command composes inline; let exec_composite handle it
+            # (even whole-cell `int! x^3`) so behaviour is uniform
+            return False
         if not rest:
             self._do_error(f'{name}! needs an argument')
             return True
         instruction = prompt_commands.render(cmd, rest)
         self.exec_do(instruction, execution_count, add_to_history)
         return True
+
+    def has_expr_command(self, text):
+        """True when the cell contains a registered expr command anywhere,
+        so it must be evaluated as a composite expression."""
+        return any(name in self.commands and self.commands[name].expr
+                   for name in EXPR_TOKEN_RE.findall(text))
 
     def show_commands(self):
         """Render the discoverable command list. Reloads the registry first
@@ -251,6 +267,74 @@ class MathShell(object):
                 display(HTML('$' + output + '$'))
             except Exception:
                 # unparseable result: still shown above, just not chainable
+                self._do_error('final result could not be parsed for '
+                               '[[n]] chaining')
+
+    def exec_composite(self, code, execution_count, add_to_history):
+        """Evaluate a cell with inline expr commands ({diff! {int! x^3}}):
+        resolve each command to its verified do! result inner-to-outer, then
+        combine the results with the expand primitive so the arithmetic glue
+        is oracle-checked (no extra LLM call proves the composition)."""
+        import agent_do
+        import expr_commands
+        import primitives
+        try:
+            text = self.resolve_backrefs(code)
+        except ValueError as e:
+            self._do_error(str(e))
+            return
+        try:
+            sym, notation = primitives.parse_latex(text)
+        except primitives.PrimitiveError as e:
+            self._do_error(str(e))
+            return
+
+        def on_step(step):
+            try:
+                display(HTML(self.render_do_step(step)))
+            except Exception:
+                pass  # rendering must never fail a derivation step
+
+        resolver = expr_commands.ExprResolver(
+            notation, Notation(), self.commands, self.ledger, on_step,
+            agent_do.run_instruction)
+        try:
+            root = resolver(sym)
+        except (expr_commands.ExprCommandError, agent_do.DoAgentError) as e:
+            self._do_error(str(e))
+            return
+
+        composite = LaTexWriter(resolver.output_notation)(root)
+        # verified glue: the numeric oracle proves the composition
+        rec = primitives.expand(composite)
+        assumptions = []
+        for run in resolver.subruns:
+            for a in run.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+        if rec.get('ok'):
+            step = self.ledger.record(rec)
+            on_step(step)
+            for a in rec.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+            final = rec['result']
+        else:
+            # expand could not combine (rare) - show the resolved composite,
+            # but be honest that the glue was not oracle-checked
+            self._do_error('composition not verified: '
+                           + rec.get('error', 'expand failed'))
+            final = composite
+        if assumptions:
+            asm = '; '.join(f'${a["text"]}$' for a in assumptions)
+            display(HTML(f'<div style="color:#888">assumptions: {asm}</div>'))
+        if final:
+            try:
+                outsym = self.parser.parse(final)
+                output = self.output(outsym, self.parsedNotation,
+                                     execution_count, add_to_history)
+                display(HTML('$' + output + '$'))
+            except Exception:
                 self._do_error('final result could not be parsed for '
                                '[[n]] chaining')
 

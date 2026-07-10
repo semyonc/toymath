@@ -1,6 +1,7 @@
 ---
 name: int
 description: Apply symbolic integration to the argument, step by step
+expr: true
 ---
 Apply symbolic integration for $ARGUMENTS.
 

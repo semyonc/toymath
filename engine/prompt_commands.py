@@ -40,7 +40,8 @@ _PLACEHOLDER = '$ARGUMENTS'
 _COMMANDS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'commands')
 
-PromptCommand = namedtuple('PromptCommand', ('name', 'description', 'template'))
+PromptCommand = namedtuple('PromptCommand',
+                           ('name', 'description', 'template', 'expr'))
 
 
 def _split_frontmatter(text):
@@ -74,7 +75,10 @@ def parse_command(text, fallback_name):
         raise ValueError('frontmatter is missing a description')
     if _PLACEHOLDER not in body:
         raise ValueError(f'template body does not contain {_PLACEHOLDER}')
-    return PromptCommand(name, description, body.strip())
+    # expr:true makes the command composable INSIDE an expression
+    # ({diff! {int! x^3}}); plain commands stay whole-cell prefixes.
+    expr = bool(meta.get('expr', False))
+    return PromptCommand(name, description, body.strip(), expr)
 
 
 def load_commands(directory=_COMMANDS_DIR):

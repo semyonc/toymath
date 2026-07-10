@@ -238,6 +238,41 @@ convenience shortcut for a `do!` run, and a hallucinated step stays
 structurally impossible. The template can *steer* (which tactics to prefer,
 what to record) but cannot bypass verification.
 
+## Composite commands — the LLM / procedural bridge
+
+A command whose frontmatter carries `expr: true` may appear **inside** an
+expression and compose with plain math and with other commands:
+
+```
+{diff! {int! x^3}}          →  x^3       (two verified sub-derivations)
+{int! x^2} + {int! x^2}     →  ⅔x³ + 2C  (one call, memoised, glue checked)
+2 {diff! x^2} - 1           →  4x - 1
+```
+
+`ExprResolver` (`engine/expr_commands.py`) walks the parsed tree — the
+parser already builds a command node for every `{name! …}` — and replaces
+each `expr` command with the verified `final_result` of its `do!` run,
+**inner-to-outer** (a command's argument is resolved before the command
+runs, so `{diff! {int! x^3}}` integrates first, then differentiates).
+Identical sub-expressions are memoised, so they cost one call, and a
+per-cell cap bounds the number of agent runs.
+
+The arithmetic **glue** between results is then handed to the `expand`
+primitive, so the composition is checked by the **numeric oracle** — not by
+another LLM. This is the whole point: `{int! x^2} + {int! x^2}` is combined
+and its `⅔x³ + 2C` result is spot-checked against random sample points,
+deterministically, at no token cost. The cell's ledger is the union of each
+command's sub-derivation plus the final `expand` step, so `replay` verifies
+the entire composite.
+
+Only `expr` commands compose; a plain or unknown `name!` inside a composite
+cell is refused, so **everything in the cell is either agent-verified or
+expand-verified**. The glue is deliberately the verified `expand` (not the
+legacy `cmd_*` rewrite rules) — `expand` multiplies and cancels, so you
+rarely need a procedural `mul!` at all. Verification is never bypassed; the
+bridge only lets the strategic (LLM) and mechanical (oracle-checked
+algebra) layers interleave at the level of a single expression.
+
 ## Output format
 
 Results print through a PrettyWriter that drops the `{2}`-style value

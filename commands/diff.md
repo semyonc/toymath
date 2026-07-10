@@ -1,6 +1,7 @@
 ---
 name: diff
 description: Differentiate the argument, showing each rule applied
+expr: true
 ---
 Differentiate $ARGUMENTS with respect to its variable.
 

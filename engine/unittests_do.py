@@ -390,6 +390,15 @@ class TestPromptCommandModel(unittest.TestCase):
         cmd = pc.parse_command('---\ndescription: d\n---\n$ARGUMENTS', 'foo')
         self.assertEqual(cmd.name, 'foo')
 
+    def test_expr_flag_parsed(self):
+        import prompt_commands as pc
+        plain = pc.parse_command('---\nname: a\ndescription: d\n---\n$ARGUMENTS',
+                                 'a')
+        self.assertFalse(plain.expr)
+        inline = pc.parse_command(
+            '---\nname: b\ndescription: d\nexpr: true\n---\n$ARGUMENTS', 'b')
+        self.assertTrue(inline.expr)
+
     def test_rejects_missing_frontmatter(self):
         import prompt_commands as pc
         with self.assertRaises(ValueError):
@@ -452,17 +461,18 @@ class TestPromptCommandDispatch(unittest.TestCase):
         return box, fake_run
 
     def test_command_prefix_renders_template(self):
+        # solve! is a plain (non-expr) command: whole-cell prefix -> exec_do
         box, fake = self._capture_instruction()
         with mock.patch.object(agent_do, 'run_instruction', fake):
-            self.shell.exec('int! \\int x^2 \\, dx', 1, add_to_history=True)
-        self.assertIn('Apply symbolic integration for', box['instruction'])
-        self.assertIn('\\int x^2', box['instruction'])
+            self.shell.exec('solve! 2x = 4', 1, add_to_history=True)
+        self.assertIn('Solve', box['instruction'])
+        self.assertIn('2x = 4', box['instruction'])
 
     def test_backref_resolves_inside_command_args(self):
         self.shell.exec('2 + 3', 1, add_to_history=True)  # result 5
         box, fake = self._capture_instruction()
         with mock.patch.object(agent_do, 'run_instruction', fake):
-            self.shell.exec('diff! [[1]]', 2, add_to_history=True)
+            self.shell.exec('solve! [[1]]', 2, add_to_history=True)
         self.assertIn('5', box['instruction'])
         self.assertNotIn('[[1]]', box['instruction'])
 
@@ -478,7 +488,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
     def test_empty_argument_reports_error(self):
         with mock.patch.object(agent_do, 'run_instruction',
                                lambda *a, **k: self.fail('must not run')):
-            self.shell.exec('int!', 1, add_to_history=True)
+            self.shell.exec('solve!', 1, add_to_history=True)
         self.assertIn('needs an argument', self._html())
 
     def test_commands_listing_makes_no_api_call(self):
@@ -495,6 +505,131 @@ class TestPromptCommandDispatch(unittest.TestCase):
             self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
         self.assertEqual(len(self.shell.ledger.steps), 2)
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
+
+
+def _ok(result):
+    return {'ok': True, 'final_result': result, 'assumptions': [],
+            'steps': [], 'summary': None}
+
+
+def _fail(error='no scripted answer'):
+    return {'ok': False, 'error': error, 'assumptions': [], 'steps': [],
+            'final_result': None}
+
+
+class TestExprComposite(unittest.TestCase):
+    """Inline composition of expr commands ({diff! {int! x^3}}) — the LLM /
+    procedural bridge. Agent mocked; the glue is really oracle-checked."""
+
+    def setUp(self):
+        import engine
+        self.displays = []
+        engine.setHandler(lambda *objs, **kw: self.displays.extend(objs))
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def test_nested_resolves_inner_to_outer(self):
+        calls = []
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            calls.append(instruction)
+            if instruction.startswith('Apply symbolic integration'):
+                return _ok('\\frac{x^4}{4} + C')
+            if instruction.startswith('Differentiate'):
+                return _ok('x^3')
+            return _fail()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
+        self.assertEqual(len(calls), 2)          # int! then diff!
+        self.assertTrue(calls[0].startswith('Apply symbolic integration'))
+        self.assertTrue(calls[1].startswith('Differentiate'))
+        import primitives
+        chained = self.shell.resolve_backrefs('[[1]]')
+        self.assertEqual(primitives.equal_exprs(chained, 'x^3')['verdict'],
+                         'yes')
+        # the verified glue is one recorded, oracle-checked expand step
+        self.assertEqual(len(self.shell.ledger.steps), 1)
+        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+        self.assertEqual(self.shell.ledger.steps[-1]['check']['status'],
+                         'agree')
+
+    def test_duplicate_subexpression_memoized(self):
+        calls = []
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            calls.append(instruction)
+            return _ok('\\frac{x^3}{3} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^2} + {int! x^2}', 1, add_to_history=True)
+        self.assertEqual(len(calls), 1)          # identical arg -> one call
+        # glue combined and oracle-checked: x^3/3 + x^3/3 + 2C
+        step = self.shell.ledger.steps[-1]
+        self.assertEqual(step['op'], 'expand')
+        self.assertIn('2C', step['result'].replace(' ', ''))
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_whole_cell_expr_routes_to_composite(self):
+        calls = []
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            calls.append(instruction)
+            return _ok('\\frac{x^4}{4} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^3', 1, add_to_history=True)  # no braces
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+
+    def test_non_expr_command_in_composite_refused(self):
+        # solve! is not expr; mixed into a composite it must be refused
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: _ok('x')):
+            self.shell.exec('{diff! x} + {solve! x}', 1, add_to_history=True)
+        self.assertIn('not an inline expr command', self._html())
+
+    def test_factorial_is_not_a_composite(self):
+        # the router must not hijack `n!` (n is not a registered command);
+        # only a real expr command routes to the composite evaluator
+        self.assertFalse(self.shell.has_expr_command('n! + 1'))
+        self.assertTrue(self.shell.has_expr_command('{diff! x}'))
+
+    def test_backref_resolves_in_composite_argument(self):
+        self.shell.exec('x^3', 1, add_to_history=True)
+        calls = []
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            calls.append(instruction)
+            return _ok('3x^2')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{diff! [[1]]}', 2, add_to_history=True)
+        self.assertNotIn('[[1]]', calls[0])      # backref resolved before agent
+        self.assertIn('x^{', calls[0])           # ...to the x^3 expression
+
+    def test_agent_failure_surfaces(self):
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: _fail('boom')):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        self.assertIn('boom', self._html())
+
+    def test_resolver_call_cap(self):
+        # unit-level: a low cap trips on distinct sub-expressions
+        import primitives
+        import expr_commands
+        from notation import Notation
+        cmds = self.shell.commands
+        sym, notation = primitives.parse_latex('{int! x} + {int! x^2}')
+        r = expr_commands.ExprResolver(
+            notation, Notation(), cmds, self.shell.ledger, None,
+            lambda *a, **k: _ok('F'), max_calls=1)
+        with self.assertRaises(expr_commands.ExprCommandError):
+            r(sym)
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',
