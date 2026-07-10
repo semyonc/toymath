@@ -244,8 +244,9 @@ A command whose frontmatter carries `expr: true` may appear **inside** an
 expression and compose with plain math and with other commands:
 
 ```
-{diff! {int! x^3}}          →  x^3       (two verified sub-derivations)
-{int! x^2} + {int! x^2}     →  ⅔x³ + 2C  (one call, memoised, glue checked)
+{diff! {int! x^3}}          →  x^3            (two verified sub-derivations)
+{int! x^2} + {int! x^2}     →  ⅔x³ + C + C₁   (one call, memoised, glue checked)
+{int! x^2} - {int! x^2}     →  C - C₁         (an arbitrary constant, NOT 0)
 2 {diff! x^2} - 1           →  4x - 1
 ```
 
@@ -260,10 +261,22 @@ per-cell cap bounds the number of agent runs.
 The arithmetic **glue** between results is then handed to the `expand`
 primitive, so the composition is checked by the **numeric oracle** — not by
 another LLM. This is the whole point: `{int! x^2} + {int! x^2}` is combined
-and its `⅔x³ + 2C` result is spot-checked against random sample points,
+and its result is spot-checked against random sample points,
 deterministically, at no token cost. The cell's ledger is the union of each
 command's sub-derivation plus the final `expand` step, so `replay` verifies
 the entire composite.
+
+A command that **mints** symbols is effectful, not a pure function.
+`int!` declares its integration constant in frontmatter (`fresh: C`), and
+the resolver renames the minted symbol per splice on collision
+(`C → C₁, C₂, …`): two independent antiderivatives never share one
+constant, so `{int! f} - {int! f}` yields the honest `C - C₁` instead of
+silently collapsing to 0, and a `C` the user wrote in the cell is never
+captured. A fresh name that also occurs in the command's own *argument* is
+bound to that argument, not minted, and keeps its name. Subscripted names
+like `C₁`, `x₁` are atomic variables — independent of their base symbol —
+in both trust legs: the symbolic path treats them as opaque atoms and the
+numeric oracle samples them as ordinary free variables.
 
 Only `expr` commands compose; a plain or unknown `name!` inside a composite
 cell is refused, so **everything in the cell is either agent-verified or

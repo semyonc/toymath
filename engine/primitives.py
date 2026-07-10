@@ -191,6 +191,38 @@ def canonical_or_same(latex):
 # free symbols
 # ---------------------------------------------------------------------------
 
+def _subscript_var(sym, notation):
+    """`x_{1}`-style INDEX used as an atomic variable: a leaf, non-function
+    base carrying a pure numeral right subscript (dims slot 3). Returns the
+    canonical variable key ('x_{1}') or None. Such a name is INDEPENDENT of
+    its base (x_{1} is not an occurrence of x); symbolic subscripts (x_i,
+    a_{n+1}) stay outside and keep raising oracle ignorance. A power on the
+    node (x_{1}^{2}, dims slot 2) is allowed - the key names the variable,
+    the caller handles the power."""
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return None
+    sub_l, sup_l, _power, sub = f.args[1]
+    if sub is None or sub_l is not None or sup_l is not None:
+        return None
+    base = f.args[0]
+    if not (isinstance(base, Symbol) and notation.get(base) is None):
+        return None
+    name = base.name
+    if (name in FUNC_NAMES or name in CONSTANT_NAMES
+            or name in Notation.styles or name in Notation.p_oper):
+        return None
+    val = sub
+    while isinstance(val, Symbol):
+        g = notation.vgetf(val, [Notation.GROUP, Notation.V_GROUP])
+        if g is None:
+            return None
+        val = g.args[0]
+    if not isinstance(val, IntegerValue):
+        return None
+    return '%s_{%d}' % (name, val.val)
+
+
 def free_symbols(sym, notation):
     res = set()
 
@@ -209,6 +241,11 @@ def free_symbols(sym, notation):
                         or name in Notation.styles):
                     return
                 res.add(name)
+                return
+            key = _subscript_var(s, notation)
+            if key is not None:
+                res.add(key)
+                visit(f.args[1][2])  # a power on the subscripted variable
                 return
             visit(f.args)
 
@@ -381,6 +418,12 @@ def numeric_eval(sym, notation, env):
     if op == Notation.INDEX:
         sub, sup_l, power, sup_r = f.args[1]
         if sub is not None or sup_l is not None or sup_r is not None:
+            key = _subscript_var(sym, notation)
+            if key is not None and key in env:
+                v = env[key]
+                if power is None:
+                    return v
+                return _num_pow(v, numeric_eval(power, notation, env))
             raise EvalError('subscripted symbol')
         base = f.args[0]
         if power is None:
@@ -639,6 +682,22 @@ class Substitutor(Replicator):
             if res is not None:
                 return res
         return t
+
+    def enter_index(self, sym, f):
+        # a subscripted variable (x_{1}) is an atomic name, independent of
+        # its base: substituting x must not capture it (x := 2 would turn
+        # x_{1} into 2_{1}). Copy base and subscript verbatim; a power on
+        # the node (x_{1}^{x}) still substitutes normally.
+        if _subscript_var(sym, self.notation) is not None:
+            plain = Replicator(self.notation, self.output_notation)
+            sub_l, sup_l, power, sub = f.args[1]
+            dims = (None, None,
+                    None if power is None else self.enter_scalar(power),
+                    plain.enter_scalar(sub))
+            return self.output_notation.repf(
+                self.mapsym(sym),
+                Func(f.sym, (plain.enter_scalar(f.args[0]), dims)))
+        return super(Substitutor, self).enter_index(sym, f)
 
 
 def _result(op, args, input_latex, result_latex, assumptions=None,

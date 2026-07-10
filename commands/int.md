@@ -2,6 +2,7 @@
 name: int
 description: Apply symbolic integration to the argument, step by step
 expr: true
+fresh: C
 ---
 Apply symbolic integration for $ARGUMENTS.
 

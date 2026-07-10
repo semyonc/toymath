@@ -1143,5 +1143,55 @@ class TestAbsoluteValue(unittest.TestCase):
         self.assertEqual(c['status'], 'disagree')
 
 
+class TestSubscriptedVariables(unittest.TestCase):
+    # gen 15: x_{1}-style names are atomic variables INDEPENDENT of their
+    # base. The oracle samples them (before: every check on C_{1}-style
+    # constants was skipped as unevaluable), and substitute must not capture
+    # them through the base (x := 2 turning x_{1} into 2_{1}).
+
+    def test_distinct_subscripts_are_distinct_variables(self):
+        r = P.equal_exprs('x_{1}', 'x_{2}')
+        self.assertEqual(r['verdict'], 'no')     # was 'unknown'
+
+    def test_subscripted_terms_commute_over_atoms(self):
+        r = P.equal_exprs('x_{1}+x_{2}', 'x_{2}+x_{1}')
+        self.assertEqual(r['verdict'], 'yes')
+
+    def test_constant_difference_is_oracle_checked(self):
+        # the composite-glue shape: independent integration constants
+        r = P.expand('(\\frac{x^3}{3}+C_{1})-(\\frac{x^3}{3}+C_{2})')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'].replace(' ', ''), 'C_{1}-C_{2}')
+        self.assertEqual(r['check']['status'], 'agree')  # was 'skipped'
+
+    def test_free_symbols_key_is_the_subscripted_name(self):
+        s, n = P.parse_latex('x + x_{1}')
+        self.assertEqual(P.free_symbols(s, n), {'x', 'x_{1}'})
+
+    def test_substitute_does_not_capture_subscripted_base(self):
+        r = P.substitute('x + x_{1}', 'x', '2')
+        self.assertTrue(r['ok'])
+        flat = r['result'].replace(' ', '')
+        self.assertIn('x_{1}', flat)
+        # no other subscripted-1 name may appear (a captured base would
+        # print as (2)_{1} or 2_{1})
+        self.assertNotIn('_{', flat.replace('x_{1}', ''))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_substitute_refuses_when_only_subscripted_occurs(self):
+        r = P.substitute('x_{1}', 'x', '2')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_powered_subscripted_variable_evaluates(self):
+        c = P.numeric_spot_check('C_{1}^{2}', 'C_{1} C_{1}')
+        self.assertEqual(c['status'], 'agree')
+
+    def test_symbolic_subscript_stays_outside_the_oracle(self):
+        # x_i is not a numeral subscript: oracle ignorance, never a verdict
+        r = P.equal_exprs('x_i', 'x_j')
+        self.assertEqual(r['verdict'], 'unknown')
+
+
 if __name__ == '__main__':
     unittest.main()

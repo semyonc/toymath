@@ -41,7 +41,9 @@ _COMMANDS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'commands')
 
 PromptCommand = namedtuple('PromptCommand',
-                           ('name', 'description', 'template', 'expr'))
+                           ('name', 'description', 'template', 'expr',
+                            'fresh'),
+                           defaults=((),))
 
 
 def _split_frontmatter(text):
@@ -78,7 +80,19 @@ def parse_command(text, fallback_name):
     # expr:true makes the command composable INSIDE an expression
     # ({diff! {int! x^3}}); plain commands stay whole-cell prefixes.
     expr = bool(meta.get('expr', False))
-    return PromptCommand(name, description, body.strip(), expr)
+    # fresh: symbols the command MINTS (an integration constant C). The
+    # composite resolver renames them per splice on collision, so two
+    # independent runs never share one constant.
+    fresh = meta.get('fresh') or ()
+    if isinstance(fresh, str):
+        fresh = [p for p in re.split(r'[,\s]+', fresh.strip()) if p]
+    if not isinstance(fresh, (list, tuple)):
+        raise ValueError('fresh must be a symbol name or a list of names')
+    fresh = tuple(str(n).strip() for n in fresh)
+    for n in fresh:
+        if not _NAME_RE.match(n):
+            raise ValueError(f'invalid fresh symbol name {n!r}')
+    return PromptCommand(name, description, body.strip(), expr, fresh)
 
 
 def load_commands(directory=_COMMANDS_DIR):

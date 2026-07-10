@@ -399,6 +399,22 @@ class TestPromptCommandModel(unittest.TestCase):
             '---\nname: b\ndescription: d\nexpr: true\n---\n$ARGUMENTS', 'b')
         self.assertTrue(inline.expr)
 
+    def test_fresh_field_parsed(self):
+        import prompt_commands as pc
+        plain = pc.parse_command('---\nname: a\ndescription: d\n---\n$ARGUMENTS',
+                                 'a')
+        self.assertEqual(plain.fresh, ())
+        one = pc.parse_command(
+            '---\nname: b\ndescription: d\nfresh: C\n---\n$ARGUMENTS', 'b')
+        self.assertEqual(one.fresh, ('C',))
+        many = pc.parse_command(
+            '---\nname: c\ndescription: d\nfresh: [C, K]\n---\n$ARGUMENTS', 'c')
+        self.assertEqual(many.fresh, ('C', 'K'))
+        with self.assertRaises(ValueError):
+            pc.parse_command(
+                '---\nname: e\ndescription: d\nfresh: "\\\\bad"\n---\n$ARGUMENTS',
+                'e')
+
     def test_rejects_missing_frontmatter(self):
         import prompt_commands as pc
         with self.assertRaises(ValueError):
@@ -570,10 +586,65 @@ class TestExprComposite(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} + {int! x^2}', 1, add_to_history=True)
         self.assertEqual(len(calls), 1)          # identical arg -> one call
-        # glue combined and oracle-checked: x^3/3 + x^3/3 + 2C
+        # glue combined and oracle-checked; the second splice mints its own
+        # constant (C + C_{1}), NOT the dishonest 2C of one shared C
         step = self.shell.ledger.steps[-1]
         self.assertEqual(step['op'], 'expand')
-        self.assertIn('2C', step['result'].replace(' ', ''))
+        flat = step['result'].replace(' ', '')
+        self.assertIn('C', flat)
+        self.assertIn('C_{', flat)
+        self.assertNotIn('2C', flat)
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_independent_constants_do_not_cancel(self):
+        # {int! f} - {int! f} is an arbitrary constant, not 0: the memoised
+        # result is spliced twice but each splice mints its own C
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            return _ok('\\frac{x^3}{3} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^2} - {int! x^2}', 1, add_to_history=True)
+        step = self.shell.ledger.steps[-1]
+        flat = step['result'].replace(' ', '')
+        self.assertNotEqual(flat, '0')
+        self.assertIn('C', flat)
+        self.assertIn('C_{', flat)
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_single_command_keeps_plain_constant(self):
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            return _ok('\\frac{x^3}{3} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^2}', 1, add_to_history=True)
+        step = self.shell.ledger.steps[-1]
+        self.assertIn('C', step['result'])
+        self.assertNotIn('C_{', step['result'])  # no gratuitous renaming
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_user_constant_never_captured(self):
+        # a C the user wrote in the cell must stay distinct from the minted one
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            return _ok('\\frac{x^3}{3} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^2} + C', 1, add_to_history=True)
+        step = self.shell.ledger.steps[-1]
+        flat = step['result'].replace(' ', '')
+        self.assertIn('C_{', flat)               # the minted C was renamed
+        self.assertNotIn('2C', flat)
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_argument_bound_constant_not_renamed(self):
+        # nested {int! {int! x}}: the outer result's C refers to the C in its
+        # own argument (the inner result) - bound, not minted, so not renamed
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            if 'frac' in instruction:  # outer call sees the spliced inner result
+                return _ok('\\frac{x^3}{6} + Cx + K')
+            return _ok('\\frac{x^2}{2} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! {int! x}}', 1, add_to_history=True)
+        step = self.shell.ledger.steps[-1]
+        flat = step['result'].replace(' ', '')
+        self.assertNotIn('C_{', flat)            # arg-bound C keeps its name
+        self.assertIn('K', flat)                 # undeclared names untouched
         self.assertEqual(step['check']['status'], 'agree')
 
     def test_whole_cell_expr_routes_to_composite(self):
