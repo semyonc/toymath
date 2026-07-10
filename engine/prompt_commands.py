@@ -42,8 +42,8 @@ _COMMANDS_DIR = os.path.join(
 
 PromptCommand = namedtuple('PromptCommand',
                            ('name', 'description', 'template', 'expr',
-                            'fresh'),
-                           defaults=((),))
+                            'fresh', 'direct'),
+                           defaults=((), None))
 
 
 def _split_frontmatter(text):
@@ -75,11 +75,23 @@ def parse_command(text, fallback_name):
     description = str(meta.get('description', '')).strip()
     if not description:
         raise ValueError('frontmatter is missing a description')
-    if _PLACEHOLDER not in body:
-        raise ValueError(f'template body does not contain {_PLACEHOLDER}')
     # expr:true makes the command composable INSIDE an expression
     # ({diff! {int! x^3}}); plain commands stay whole-cell prefixes.
     expr = bool(meta.get('expr', False))
+    # direct: <primitive> is the zero-token tier - the command IS one
+    # verified primitive, no agent run. Implies expr (inline-composable);
+    # the body is documentation, so $ARGUMENTS becomes optional.
+    direct = meta.get('direct')
+    if direct is not None:
+        direct = str(direct).strip()
+        import expr_commands
+        if direct not in expr_commands.DIRECT_PRIMITIVES:
+            raise ValueError(
+                f'unknown direct primitive {direct!r} (available: '
+                + ', '.join(sorted(expr_commands.DIRECT_PRIMITIVES)) + ')')
+        expr = True
+    if _PLACEHOLDER not in body and direct is None:
+        raise ValueError(f'template body does not contain {_PLACEHOLDER}')
     # fresh: symbols the command MINTS (an integration constant C). The
     # composite resolver renames them per splice on collision, so two
     # independent runs never share one constant.
@@ -92,7 +104,8 @@ def parse_command(text, fallback_name):
     for n in fresh:
         if not _NAME_RE.match(n):
             raise ValueError(f'invalid fresh symbol name {n!r}')
-    return PromptCommand(name, description, body.strip(), expr, fresh)
+    return PromptCommand(name, description, body.strip(), expr, fresh,
+                         direct)
 
 
 def load_commands(directory=_COMMANDS_DIR):

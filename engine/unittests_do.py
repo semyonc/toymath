@@ -374,9 +374,12 @@ class TestPromptCommandModel(unittest.TestCase):
     def test_repo_commands_load(self):
         import prompt_commands as pc
         reg = pc.load_commands()
-        for name in ('int', 'diff', 'solve'):
+        for name in ('int', 'diff', 'solve', 'expand'):
             self.assertIn(name, reg)
-            self.assertIn('$ARGUMENTS', reg[name].template)
+        self.assertIsNone(reg['int'].direct)      # LLM tactic tier
+        self.assertEqual(reg['diff'].direct, 'differentiate')
+        self.assertEqual(reg['expand'].direct, 'expand')
+        self.assertTrue(reg['diff'].expr)         # direct implies expr
 
     def test_render_substitutes_arguments(self):
         import prompt_commands as pc
@@ -533,6 +536,10 @@ def _fail(error='no scripted answer'):
             'final_result': None}
 
 
+def _never(*args, **kwargs):
+    raise AssertionError('the agent must not be called for direct commands')
+
+
 class TestExprComposite(unittest.TestCase):
     """Inline composition of expr commands ({diff! {int! x^3}}) — the LLM /
     procedural bridge. Agent mocked; the glue is really oracle-checked."""
@@ -553,29 +560,29 @@ class TestExprComposite(unittest.TestCase):
         return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
 
     def test_nested_resolves_inner_to_outer(self):
+        # int! is an LLM tactic (mocked); diff! is a DIRECT command since
+        # gen 16, so the outer differentiation costs no agent call and its
+        # variable is inferred with the minted C excluded
         calls = []
 
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
             if instruction.startswith('Apply symbolic integration'):
                 return _ok('\\frac{x^4}{4} + C')
-            if instruction.startswith('Differentiate'):
-                return _ok('x^3')
             return _fail()
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
-        self.assertEqual(len(calls), 2)          # int! then diff!
+        self.assertEqual(len(calls), 1)          # int! only; diff! is direct
         self.assertTrue(calls[0].startswith('Apply symbolic integration'))
-        self.assertTrue(calls[1].startswith('Differentiate'))
         import primitives
         chained = self.shell.resolve_backrefs('[[1]]')
         self.assertEqual(primitives.equal_exprs(chained, 'x^3')['verdict'],
                          'yes')
-        # the verified glue is one recorded, oracle-checked expand step
-        self.assertEqual(len(self.shell.ledger.steps), 1)
-        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
-        self.assertEqual(self.shell.ledger.steps[-1]['check']['status'],
-                         'agree')
+        # ledger: the direct differentiate step + the oracle-checked glue
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['differentiate', 'expand'])
+        for s in self.shell.ledger.steps:
+            self.assertEqual(s['check']['status'], 'agree')
 
     def test_duplicate_subexpression_memoized(self):
         calls = []
@@ -673,15 +680,14 @@ class TestExprComposite(unittest.TestCase):
 
     def test_backref_resolves_in_composite_argument(self):
         self.shell.exec('x^3', 1, add_to_history=True)
-        calls = []
-
-        def fake(instruction, ledger=None, on_step=None, **kw):
-            calls.append(instruction)
-            return _ok('3x^2')
-        with mock.patch.object(agent_do, 'run_instruction', fake):
+        # diff! is direct: the backref resolves before the primitive runs
+        # and the whole cell costs zero agent calls
+        with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('{diff! [[1]]}', 2, add_to_history=True)
-        self.assertNotIn('[[1]]', calls[0])      # backref resolved before agent
-        self.assertIn('x^{', calls[0])           # ...to the x^3 expression
+        import primitives
+        chained = self.shell.resolve_backrefs('[[2]]')
+        self.assertEqual(primitives.equal_exprs(chained, '3x^2')['verdict'],
+                         'yes')
 
     def test_agent_failure_surfaces(self):
         with mock.patch.object(agent_do, 'run_instruction',
@@ -701,6 +707,136 @@ class TestExprComposite(unittest.TestCase):
             lambda *a, **k: _ok('F'), max_calls=1)
         with self.assertRaises(expr_commands.ExprCommandError):
             r(sym)
+
+
+class TestDirectCommands(unittest.TestCase):
+    """The zero-token tier (gen 16): a `direct: <primitive>` command IS one
+    verified primitive - no agent run, ledger step + oracle check for free."""
+
+    def setUp(self):
+        import engine
+        self.displays = []
+        engine.setHandler(lambda *objs, **kw: self.displays.extend(objs))
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def test_direct_expand_costs_no_tokens(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{expand! (1+x)(1-x)} + 2x^2', 1,
+                            add_to_history=True)
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['expand', 'expand'])  # direct step + glue
+        final = self.shell.ledger.steps[-1]
+        self.assertEqual(final['result'].replace(' ', ''), 'x^{2}+1')
+        for s in self.shell.ledger.steps:
+            self.assertEqual(s['check']['status'], 'agree')
+
+    def test_direct_diff_whole_cell(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('diff! x^2', 1, add_to_history=True)  # no braces
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['differentiate', 'expand'])
+        self.assertEqual(
+            self.shell.ledger.steps[0]['result'].replace(' ', ''), '2x')
+
+    def test_direct_inside_direct(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{expand! {diff! x^3} x}', 1, add_to_history=True)
+        final = self.shell.ledger.steps[-1]
+        self.assertEqual(final['result'].replace(' ', ''), '3x^{3}')
+
+    def test_minted_constant_excluded_from_var_inference(self):
+        # {diff! {int! x^3}}: the inner splice contains the minted C; the
+        # direct differentiate must infer x, not refuse as ambiguous
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            return _ok('\\frac{x^4}{4} + C')
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
+        step = self.shell.ledger.steps[0]
+        self.assertEqual(step['op'], 'differentiate')
+        self.assertEqual(step['args'].get('var'), 'x')
+
+    def test_user_constant_still_ambiguous(self):
+        # a plain user-written second symbol is NOT minted: refuse, don't guess
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{diff! x^2 + C}', 1, add_to_history=True)
+        self.assertIn('ambiguous variable', self._html())
+
+    def test_no_variable_refused(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{diff! 2 + 3}', 1, add_to_history=True)
+        self.assertIn('no variable', self._html())
+
+    def test_primitive_failure_surfaces(self):
+        # unit-level: a direct command whose primitive refuses reports the
+        # primitive's error through the composite error path
+        import primitives
+        import expr_commands
+        import prompt_commands as pc
+        from notation import Notation
+        cmds = {'fq': pc.PromptCommand('fq', 'd', '', True, (),
+                                       'factor_quadratic')}
+        sym, notation = primitives.parse_latex('{fq! x^3 + 1}')
+        r = expr_commands.ExprResolver(
+            notation, Notation(), cmds, None, None, _never)
+        with self.assertRaises(expr_commands.ExprCommandError) as ctx:
+            r(sym)
+        self.assertIn('factor_quadratic', str(ctx.exception))
+
+    def test_direct_evaluate_adapter(self):
+        # unit-level: evaluate as a direct command splices a numeric value
+        import primitives
+        import expr_commands
+        import prompt_commands as pc
+        from notation import Notation
+        cmds = {'ev': pc.PromptCommand('ev', 'd', '', True, (), 'evaluate')}
+        sym, notation = primitives.parse_latex('{ev! 2^{10}} + 1')
+        out = Notation()
+        r = expr_commands.ExprResolver(notation, out, cmds, None, None,
+                                       _never)
+        root = r(sym)
+        from LatexWriter import LaTexWriter
+        rec = primitives.expand(LaTexWriter(out)(root))
+        self.assertEqual(rec['result'].replace(' ', ''), '1025')
+
+    def test_unknown_direct_primitive_rejected_at_parse(self):
+        import prompt_commands as pc
+        with self.assertRaises(ValueError):
+            pc.parse_command(
+                '---\nname: z\ndescription: d\ndirect: solve\n---\n', 'z')
+
+    def test_direct_body_needs_no_placeholder(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command(
+            '---\nname: z\ndescription: d\ndirect: expand\n---\njust docs',
+            'z')
+        self.assertEqual(cmd.direct, 'expand')
+        self.assertTrue(cmd.expr)
+
+    def test_direct_assumptions_reach_the_cell(self):
+        # a direct primitive's recorded assumptions must surface like an
+        # agent sub-run's (factor_quadratic records none; use collect on a
+        # rational form? expand of 1/x keeps x != 0 out of scope - assert
+        # the plumbing instead: direct_records land on the resolver)
+        import primitives
+        import expr_commands
+        import prompt_commands as pc
+        from notation import Notation
+        cmds = {'ex': pc.PromptCommand('ex', 'd', '', True, (), 'expand')}
+        sym, notation = primitives.parse_latex('{ex! (1+x)^2}')
+        r = expr_commands.ExprResolver(notation, Notation(), cmds, None,
+                                       None, _never)
+        r(sym)
+        self.assertEqual(len(r.direct_records), 1)
+        self.assertIn('assumptions', r.direct_records[0])
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',

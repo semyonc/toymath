@@ -138,8 +138,10 @@ class MathShell(object):
         self.commands = prompt_commands.load_commands()
         rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
                 f'<code>{_html.escape(c.name)}!</code></td>'
-                f'<td style="color:#444">{_html.escape(c.description)}</td>'
-                '</tr>'
+                f'<td style="color:#444">{_html.escape(c.description)}'
+                + (f' <code>[direct: {_html.escape(c.direct)}]</code>'
+                   if c.direct else '')
+                + '</td></tr>'
                 for c in sorted(self.commands.values())]
         table = ('<table>' + ''.join(rows) + '</table>') if rows else (
             '<div style="color:#888">no commands defined yet '
@@ -310,6 +312,10 @@ class MathShell(object):
         assumptions = []
         for run in resolver.subruns:
             for a in run.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+        for drec in resolver.direct_records:
+            for a in drec.get('assumptions', []):
                 if a not in assumptions:
                     assumptions.append(a)
         if rec.get('ok'):

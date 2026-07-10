@@ -286,6 +286,34 @@ rarely need a procedural `mul!` at all. Verification is never bypassed; the
 bridge only lets the strategic (LLM) and mechanical (oracle-checked
 algebra) layers interleave at the level of a single expression.
 
+### The zero-token tier: `direct:` commands
+
+A command whose frontmatter carries `direct: <primitive>` **is** one
+verified primitive — no agent run, no tokens. The argument goes straight to
+the primitive and the oracle-checked record becomes a normal, replayable
+ledger step. `diff!` and `expand!` ship this way, so
+
+```
+{expand! (1+x)(1-x)} + 2x^2   →  x² + 1     (zero agent calls)
+{diff! {int! x^3}}            →  x³         (one agent call: int! only)
+```
+
+Three tiers fall out naturally: **direct procedural primitive** (`expand!`,
+`diff!` — instant, free) < **LLM tactic** (`int!` — the agent picks an
+integration tactic, every move oracle-checked) < **whole-cell derivation**
+(`solve!` — the visible chain of steps is the answer). Reserve the agent
+for commands that genuinely need strategy.
+
+Whitelisted primitives: `expand`, `collect`, `differentiate`, `factor_gcd`,
+`factor_quadratic`, `evaluate`. For primitives that take a variable, the
+resolver infers the argument's **single** plain free variable — constants
+minted by `fresh:` commands in the same cell are excluded (that is why
+`{diff! {int! x^3}}` infers `x`, not `C`) — and refuses ambiguity rather
+than guessing (`{diff! x y}` → error suggesting a `do!` cell). `direct`
+implies `expr`, and the command body is documentation, not a prompt.
+`{expand! …}` is also the verified replacement for procedural `mul!`/`add!`
+inside an expression.
+
 ## Output format
 
 Results print through a PrettyWriter that drops the `{2}`-style value
