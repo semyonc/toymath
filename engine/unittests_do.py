@@ -108,14 +108,48 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertFalse(rec['ok'])
         self.assertEqual(session.new_steps(), [])
 
-    def test_set_result_validates_and_overrides(self):
+    def test_set_result_validates_query_only_as_unverified(self):
         session = DoSession()
         api = make_api(session)
-        self.assertTrue(json.loads(api['set_result']('x = 2'))['ok'])
+        rec = json.loads(api['set_result']('x = 2'))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['provenance']['status'], 'unverified')
         self.assertEqual(session.result_override, 'x = 2')
         self.assertFalse(json.loads(api['set_result']('\\frac{'))['ok'])
         self.assertEqual(session.result_override, 'x = 2')  # kept
         self.assertEqual(session.new_steps(), [])  # never a ledger step
+
+    def test_set_result_rejects_detached_conclusion(self):
+        session = DoSession()
+        api = make_api(session)
+        api['factor_quadratic']('x^2 - 5x + 6', 'x')
+        api['substitute']('x^2 - 5x + 6 = 0', 'x', '3')
+        rec = json.loads(api['set_result']('(x-3)(x-2)=0'))
+        self.assertFalse(rec['ok'])
+        self.assertIn('shared ledger', rec['error'])
+        self.assertIsNone(session.result_override)
+
+    def test_set_result_can_select_earlier_semantic_result(self):
+        session = DoSession()
+        api = make_api(session)
+        api['expand']('(x+1)^2')
+        api['substitute']('x^2+2x+1=4', 'x', '1')
+        rec = json.loads(api['set_result']('(x+1)^2'))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['provenance']['status'], 'verified')
+        self.assertEqual(rec['provenance']['step'], 's1')
+        self.assertNotEqual(rec['provenance']['method'], 'exact-result')
+
+    def test_set_result_can_select_shared_ledger_result(self):
+        ledger = Ledger()
+        first = DoSession(ledger=ledger)
+        first_api = make_api(first)
+        established = json.loads(first_api['expand']('(x+1)^2'))['result']
+        session = DoSession(ledger=ledger)
+        rec = json.loads(make_api(session)['set_result'](established))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['provenance']['step'], 's1')
+        self.assertEqual(session.new_steps(), [])
 
     def test_concurrent_recording_is_thread_safe(self):
         # the Agents SDK runs sync tools on a thread pool; parallel tool
@@ -158,6 +192,7 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual([s['op'] for s in res['steps']],
                          ['apply_both_sides', 'expand'])
         self.assertEqual(res['final_result'], '2x = 4')
+        self.assertEqual(res['final_provenance']['step'], 's2')
         self.assertEqual(res['summary'], 'Subtracted 3 from both sides.')
         self.assertEqual(seen, ['s1', 's2'])
 
@@ -176,7 +211,19 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertTrue(res['ok'])
         # the designated value wins over the last step's result
         self.assertEqual(res['final_result'], '(x - 3)(x - 2)')
+        self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
+
+    def test_set_result_cannot_override_with_detached_value(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'x=999'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('try to invent a result',
+                              model=ScriptedModel(script))
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['step'], 's1')
 
     def test_max_turns_returns_partial(self):
         endless = [[tool_call('expand', {'expr': 'x + x'}, f'c{i}')]
@@ -367,6 +414,18 @@ class TestMathShellDo(unittest.TestCase):
             self.shell.exec('do! solve 2x = 4', 4, add_to_history=True)
         self.assertIn(agent_do.API_KEY_VAR, self._html())
 
+    def test_query_only_final_is_rendered_unverified(self):
+        result = {'ok': True, 'steps': [], 'assumptions': [],
+                  'final_result': 'x=999', 'summary': None,
+                  'final_provenance': {
+                      'status': 'unverified', 'source': 'query-only',
+                      'reason': 'no transforming step was recorded'}}
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: result):
+            self.shell.exec('do! query only', 5, add_to_history=True)
+        self.assertIn('unverified final value', self._html())
+        self.assertIn('999', self.shell.resolve_backrefs('[[5]]'))
+
 
 class TestPromptCommandModel(unittest.TestCase):
     """The discovery/parse model in prompt_commands.py (no shell, no agent)."""
@@ -528,7 +587,10 @@ class TestPromptCommandDispatch(unittest.TestCase):
 
 def _ok(result):
     return {'ok': True, 'final_result': result, 'assumptions': [],
-            'steps': [], 'summary': None}
+            'steps': [], 'summary': None,
+            'final_provenance': {
+                'status': 'verified', 'source': 'ledger', 'step': 's1',
+                'method': 'test-fixture'}}
 
 
 def _fail(error='no scripted answer'):
@@ -694,6 +756,17 @@ class TestExprComposite(unittest.TestCase):
                                lambda *a, **k: _fail('boom')):
             self.shell.exec('{int! x^3}', 1, add_to_history=True)
         self.assertIn('boom', self._html())
+
+    def test_unverified_agent_result_cannot_enter_composite(self):
+        result = _ok('x=999')
+        result['final_provenance'] = {
+            'status': 'unverified', 'source': 'query-only',
+            'reason': 'no transforming step was recorded'}
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: result):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        self.assertIn('unverified final value', self._html())
+        self.assertEqual(self.shell.ledger.steps, [])
 
     def test_resolver_call_cap(self):
         # unit-level: a low cap trips on distinct sub-expressions

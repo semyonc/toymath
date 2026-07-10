@@ -262,6 +262,13 @@ class MathShell(object):
             display(HTML(f'<div style="color:#888">assumptions: '
                          f'{asm}</div>'))
         if res['final_result']:
+            provenance = res.get('final_provenance') or {}
+            if provenance.get('status') == 'unverified':
+                reason = provenance.get(
+                    'reason', 'not established by a ledger step')
+                display(HTML(
+                    '<div style="color:#b65c00"><strong>unverified final '
+                    'value:</strong> ' + _html.escape(reason) + '</div>'))
             try:
                 sym = self.parser.parse(res['final_result'])
                 output = self.output(sym, self.parsedNotation,

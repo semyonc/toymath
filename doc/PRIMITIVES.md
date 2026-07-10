@@ -185,10 +185,13 @@ do! solve [[3]] for x, recording every assumption
   `sN#hash [ok] op: input ⟹ result` with per-step assumptions;
   `disagree`/refused steps show in red; the run ends with the agent's
   one-line summary, the accumulated assumptions, and the final value.
-- The agent designates the cell's final value with a validated
-  `set_result` tool (falling back to the last step's result); that value
-  is stored in the execution history, so later cells — plain math or
-  another `do!` — can chain on it with `[[n]]`.
+- The agent designates the cell's final value with `set_result` (falling
+  back to the last step's result). The value must be mechanically equivalent
+  to a result anywhere in the shared ledger, so the agent may select an
+  earlier answer after later verification but cannot synthesize a detached
+  conclusion. A run with no transforming steps may still return a query-only
+  value, which is rendered explicitly as **unverified**. Final values are
+  stored in execution history so later cells can chain on them with `[[n]]`.
 - All `do!` cells in a notebook share one session ledger; each cell
   renders only the steps it added, and a replay verifies the whole
   notebook's derivation chain.
@@ -256,7 +259,9 @@ each `expr` command with the verified `final_result` of its `do!` run,
 **inner-to-outer** (a command's argument is resolved before the command
 runs, so `{diff! {int! x^3}}` integrates first, then differentiates).
 Identical sub-expressions are memoised, so they cost one call, and a
-per-cell cap bounds the number of agent runs.
+per-cell cap bounds the number of agent runs. Query-only/unverified final
+values are refused at this boundary and cannot be laundered through the
+final glue check.
 
 The arithmetic **glue** between results is then handed to the `expand`
 primitive, so the composition is checked by the **numeric oracle** — not by

@@ -130,6 +130,11 @@ class ExprResolver(Replicator):
         result = res.get('final_result')
         if not result:
             raise ExprCommandError(f'{cmd.name}! produced no result')
+        provenance = res.get('final_provenance') or {}
+        if provenance.get('status') != 'verified':
+            raise ExprCommandError(
+                f'{cmd.name}! produced an unverified final value; inline '
+                'commands must return a result established by a ledger step')
         self.cache[key] = result
         return result
 

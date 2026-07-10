@@ -71,8 +71,12 @@ _DO_RULES = """
   established expression or equation (that becomes the cell's value,
   which later cells reference), then stop calling tools and reply with
   ONE short sentence (the final result and any assumptions it is
-  conditional on). Do not restate the steps; the ledger rendering does
-  that.
+  conditional on). `set_result` accepts any value mechanically equivalent
+  to a result already in the shared ledger, including an earlier result
+  selected after later verification. It rejects a newly synthesized value
+  after transforming steps. In a query-only run with no new transforming
+  step it accepts the value but marks it explicitly unverified. Do not
+  restate the steps; the ledger rendering does that.
 - If a tool refuses or a check disagrees, change strategy; never present
   an unverified result as the answer.
 - For equations, confirm candidate solutions with substitute + evaluate
@@ -142,6 +146,7 @@ class DoSession(object):
         self.plot_backend = plot_backend
         self.start = len(self.ledger.steps)
         self.result_override = None
+        self.result_provenance = None
         # the SDK executes sync tools on a thread pool, so parallel tool
         # calls hit the ledger concurrently - serialize the appends
         self._lock = threading.Lock()
@@ -160,6 +165,46 @@ class DoSession(object):
 
     def new_steps(self):
         return self.ledger.steps[self.start:]
+
+    def designate_result(self, expr):
+        """Select a chainable value without letting the agent invent a
+        detached conclusion.
+
+        A ledger result is provenance even when it came from an earlier
+        step or an earlier run sharing this ledger.  Harmless formatting
+        and algebraic presentation changes are admitted only through the
+        independent equality checker.  Query-only runs have no transforming
+        result to select, so their value remains usable but is explicitly
+        labelled unverified.
+        """
+        with self._lock:
+            steps = list(self.ledger.steps)
+            has_new_steps = len(steps) > self.start
+        for step in reversed(steps):
+            established = step.get('result')
+            if not established:
+                continue
+            if expr == established:
+                return {
+                    'status': 'verified', 'source': 'ledger',
+                    'step': step['id'], 'method': 'exact-result',
+                }
+            try:
+                eq = primitives.equal_exprs(expr, established)
+            except Exception:
+                continue
+            if eq.get('ok') and eq.get('verdict') == 'yes':
+                return {
+                    'status': 'verified', 'source': 'ledger',
+                    'step': step['id'],
+                    'method': eq.get('method', 'equal?'),
+                }
+        if not has_new_steps:
+            return {
+                'status': 'unverified', 'source': 'query-only',
+                'reason': 'no transforming step was recorded in this run',
+            }
+        return None
 
 
 def make_api(session):
@@ -326,8 +371,12 @@ def make_api(session):
     def set_result(expr: str) -> str:
         """Designate the cell's final value (what later cells reference as
         [[n]]). Call once, right before your closing sentence, with the
-        expression or equation the derivation established. Not a ledger
-        step - the steps above are what justify it.
+        expression or equation the derivation established. The value must
+        be mechanically equivalent to any result in the shared ledger; an
+        earlier result may be selected after later verification. A run with
+        no transforming steps may designate a query-only value, but it is
+        explicitly marked unverified. Not a ledger step - the steps above
+        are what justify it.
 
         Args:
             expr: LaTeX expression or relation, e.g. "x = 2".
@@ -337,9 +386,18 @@ def make_api(session):
         except primitives.PrimitiveError as e:
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': str(e)}, ensure_ascii=False)
+        provenance = session.designate_result(expr)
+        if provenance is None:
+            return json.dumps({
+                'ok': False, 'op': 'set_result',
+                'error': ('value is not mechanically equivalent to any '
+                          'result in the shared ledger; use a primitive to '
+                          'establish it or select an earlier ledger result'),
+            }, ensure_ascii=False)
         session.result_override = expr
-        return json.dumps({'ok': True, 'op': 'set_result', 'result': expr},
-                          ensure_ascii=False)
+        session.result_provenance = provenance
+        return json.dumps({'ok': True, 'op': 'set_result', 'result': expr,
+                           'provenance': provenance}, ensure_ascii=False)
 
     def plot(code: str, caption: str) -> str:
         """Render matplotlib/seaborn figures in an isolated sandbox; they
@@ -402,7 +460,8 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     plot_backend=None):
     """Run one do! instruction through the agent.
 
-    Returns {ok, steps, assumptions, final_result, summary[, error]}.
+    Returns {ok, steps, assumptions, final_result, final_provenance,
+    summary[, error]}.
     `steps` are the ledger steps this run added; `final_result` is the
     cell's chainable value. Figures reach `on_plot(caption, images)`;
     when `plot_backend` is None the configured one is auto-detected
@@ -437,11 +496,22 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     t.join()
 
     steps = session.new_steps()
-    final = session.result_override or (steps[-1]['result'] if steps
-                                        else None)
+    if session.result_override is not None:
+        final = session.result_override
+        provenance = session.result_provenance
+    elif steps:
+        final = steps[-1]['result']
+        provenance = {
+            'status': 'verified', 'source': 'ledger',
+            'step': steps[-1]['id'], 'method': 'exact-result',
+        }
+    else:
+        final = None
+        provenance = None
     out = {'ok': 'err' not in holder, 'steps': steps,
            'assumptions': list(session.ledger.assumptions),
-           'final_result': final, 'summary': None}
+           'final_result': final, 'final_provenance': provenance,
+           'summary': None}
     if 'err' in holder:
         e = holder['err']
         if isinstance(e, MaxTurnsExceeded):
