@@ -104,7 +104,7 @@ the CLI, and the Claude Code skill.
 | `evaluate(expr)` | exact arithmetic; on an equation reports `holds: true/false` |
 | `differentiate(expr, var)` | exact on the rational fragment, ~20 mechanical rules beyond it; verified by central differences |
 | `rewrite(expr, lemma, direction)` | apply a registered identity (`diff_squares`, …) — the lemma library is the extensibility point |
-| `factor_gcd` / `factor_quadratic` | named factorings in place of a general `factor` |
+| `factor_gcd` / `factor_quadratic` | named factorings in place of a general `factor`; applicable relation sides are transformed and checked independently |
 | `integrate_power_rule` / `integrate_table` / `integrate_by_parts(u, dv)` / `integrate_substitute(u, u_var, new_integrand)` | integration as agent-chosen tactics; antiderivatives verified by differentiating back |
 | `equal?(e1, e2)` | the checker: verdict **yes / no / unknown** — canonical on the rational fragment, numeric oracle beyond it, honest about undecidability |
 

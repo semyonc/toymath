@@ -600,6 +600,34 @@ class TestFactor(unittest.TestCase):
         r = P.factor_gcd('x + 1')
         self.assertFalse(r['ok'])
 
+    def test_quadratic_factors_equation_side(self):
+        r = P.factor_quadratic('x^2 + 6x + 9 = 4', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['factored_sides'], ['lhs'])
+        self.assertEqual(r['roots_by_side'], {'lhs': ['-3', '-3']})
+        self.assertEqual(P.equal_exprs(r['result'], '(x+3)^2=4')['verdict'],
+                         'yes')
+
+    def test_quadratic_factors_both_relation_sides(self):
+        r = P.factor_quadratic('x^2 - 1 = x^2 - 4x + 4', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['factored_sides'], ['lhs', 'rhs'])
+
+    def test_gcd_factors_inequality_side(self):
+        r = P.factor_gcd('6x^2 + 9x \\lt 3')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['factored_sides'], ['lhs'])
+        self.assertEqual(P.equal_exprs(r['result'],
+                                      '3x(2x+3) \\lt 3')['verdict'], 'yes')
+
+    def test_relation_refuses_when_neither_side_factors(self):
+        r = P.factor_quadratic('x^2 + 1 = 4', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('neither side', r['error'])
+
 
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):

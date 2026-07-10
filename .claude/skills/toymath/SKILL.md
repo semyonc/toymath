@@ -35,8 +35,8 @@ it appends each verified step to a replayable ledger.
 | `integrate_table EXPR VAR` | `integrate_table "2\cos x" x` | sin, cos, e^x, sinh, cosh, `1/x`→`ln x` (records `x > 0`); closed under sums and constant factors |
 | `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |
 | `integrate_substitute EXPR VAR U_EXPR U_VAR NEW_INTEGRAND` | `integrate_substitute "2x \cos(x^2)" x "x^2" u "\cos(u)"` | u-substitution: you supply u and the integrand rewritten in u; toymath verifies `f(u(x))·u'(x)` equals the integrand and returns `\int f(u) du`; back-substitute with `substitute` after integrating |
-| `factor_gcd EXPR` | `factor_gcd "6x^2+9x"` | pull out the common factor → `3x(2x+3)` |
-| `factor_quadratic EXPR VAR` | `factor_quadratic "x^2-5x+6" x` | rational roots → `(x-2)(x-3)`; reports roots; refuses irrational cases |
+| `factor_gcd EXPR` | `factor_gcd "6x^2+9x=3"` | pull out common factors on applicable expression/relation sides → `3x(2x+3)=3` |
+| `factor_quadratic EXPR VAR` | `factor_quadratic "x^2+6x+9=4" x` | rational-root factorization on applicable expression/relation sides → `(x+3)^2=4`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown. A `no` with method `domain mismatch` means the sides agree in value but one is defined where the other is not (`\ln(x^2)` vs `2\ln x`) — equality may hold on a restricted domain; a `yes` may carry a `note` that it was checked only on the common domain |
 | `lemmas` | | list rewrite lemmas |
 | `show --session f [--format md]` | | render the ledger (Markdown with `--format md`) |

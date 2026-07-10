@@ -76,7 +76,10 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
 8. **factor_gcd(expr)** / **factor_quadratic(expr, var)** — named
    factorings in place of a general `factor`. `factor_quadratic` factors
    over Q via the discriminant, reports the roots, and honestly refuses
-   irrational/complex cases.
+   irrational/complex cases. Both tactics accept relations and factor each
+   applicable side independently, leaving non-applicable sides unchanged;
+   the result records which sides changed and is mechanically checked per
+   side.
 9. **integrate_power_rule / integrate_table / integrate_by_parts(u, dv) /
    integrate_substitute(u_expr, u_var, new_integrand)** —
    tactic-shaped integration in place of an autonomous `integrate`. All

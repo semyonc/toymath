@@ -290,19 +290,21 @@ def make_api(session):
                     u_var, new_integrand)
 
     def factor_gcd(expr: str) -> str:
-        """Pull the common factor out of a sum, e.g. 6x^2+9x -> 3x(2x+3).
+        """Pull common factors from a sum or applicable relation sides,
+        e.g. 6x^2+9x=3 -> 3x(2x+3)=3.
 
         Args:
-            expr: LaTeX expression.
+            expr: LaTeX expression, equation, or inequality.
         """
         return _run(primitives.factor_gcd, expr)
 
     def factor_quadratic(expr: str, var: str) -> str:
-        """Factor a quadratic with rational roots; reports the roots;
-        refuses irrational/complex cases.
+        """Factor quadratics with rational roots in an expression or on
+        applicable relation sides; reports roots and refuses
+        irrational/complex cases.
 
         Args:
-            expr: LaTeX quadratic expression.
+            expr: LaTeX quadratic expression, equation, or inequality.
             var: the variable, e.g. "x".
         """
         return _run(primitives.factor_quadratic, expr, var)
