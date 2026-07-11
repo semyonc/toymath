@@ -32,7 +32,7 @@ OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
 MODEL_VAR = 'OPENROUTER_MODEL'
 DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
-DEFAULT_MAX_TURNS = 48
+DEFAULT_MAX_TURNS = 64
 
 _SKILL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
