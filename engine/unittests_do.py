@@ -930,6 +930,17 @@ class TestDirectCommands(unittest.TestCase):
             self.shell.exec('{diff! [x^2] x^3}', 4, add_to_history=True)
         self.assertIn('single plain variable name', self._html())
 
+    def test_domain_differs_renders_amber_not_red(self):
+        # collapsing d/dx of a ln-carrying antiderivative to its rational
+        # form is a domain extension: conditional, not a failure
+        step = {'id': 's1', 'hash': 'h', 'op': 'expand', 'args': {},
+                'input': 'i', 'result': 'r', 'assumptions': [],
+                'continues': None, 'check': {'status': 'domain-differs'}}
+        out = self.shell.render_do_step(step)
+        self.assertIn('[D!]', out)
+        self.assertIn('#b65c00', out)
+        self.assertNotIn('#c00"', out)
+
     def test_no_variable_refused(self):
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('{diff! 2 + 3}', 1, add_to_history=True)

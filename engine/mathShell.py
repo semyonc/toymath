@@ -191,7 +191,7 @@ class MathShell(object):
         return BACKREF_RE.sub(repl, text)
 
     _DO_MARKS = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
-                 'disagree': 'XX'}
+                 'disagree': 'XX', 'domain-differs': 'D!'}
 
     def render_do_step(self, step):
         if step['op'] == 'comment':
@@ -202,7 +202,13 @@ class MathShell(object):
                     f"<em>{_html.escape(step['args']['text'])}</em></div>")
         check = step['check'].get('status', '?')
         mark = self._DO_MARKS.get(check, '?')
-        style = ' style="color:#c00"' if mark in ('XX', '?') else ''
+        if mark in ('XX', '?'):
+            style = ' style="color:#c00"'
+        elif mark == 'D!':
+            # conditional, not wrong: the result holds on the common domain
+            style = ' style="color:#b65c00"'
+        else:
+            style = ''
         branch = '' if step.get('continues') in (True, None) else ' (branch)'
         note = ''
         if step['op'] == 'apply_both_sides':
