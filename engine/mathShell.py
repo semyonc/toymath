@@ -195,7 +195,10 @@ class MathShell(object):
 
     def render_do_step(self, step):
         if step['op'] == 'comment':
-            return (f"<div style=\"color:#666\"><code>{step['id']}</code> "
+            # tex2jax_ignore keeps MathJax from typesetting note prose
+            # (stray $...$ or \commands in agent notes stay literal)
+            return (f"<div class=\"tex2jax_ignore\" style=\"color:#666\">"
+                    f"<code>{step['id']}</code> "
                     f"<em>{_html.escape(step['args']['text'])}</em></div>")
         check = step['check'].get('status', '?')
         mark = self._DO_MARKS.get(check, '?')

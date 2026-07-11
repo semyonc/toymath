@@ -83,7 +83,11 @@ _DO_RULES = """
   when that is cheap.
 - In long derivations, use `comment` to annotate the ledger: the strategy
   you are starting, which piece of a split you are on, why you branch.
-  Notes are unverified prose - never a step, never a result.
+  Notes are unverified prose - never a step, never a result. Keep them to
+  one or two short sentences in PLAIN TEXT: no LaTeX/MathML markup, no
+  $ delimiters (comments are not rendered as math - write x^2/(1-x^2)^3
+  style notation). Never write derivations or scratch work into
+  comments; reason silently and record only the decision.
 - For integrals beyond the direct tactics: propose an equivalent integrand
   (e.g. partial fractions) with `integrate_rewrite` (it is verified
   mechanically), split sums with `integrate_linearity`, solve each piece,
@@ -382,15 +386,22 @@ def make_api(session):
         never a transforming step, never a final result.
 
         Args:
-            text: one or two plain-text sentences.
+            text: one or two SHORT plain-text sentences. No LaTeX/MathML
+                markup, no $ delimiters - notes are not rendered as math
+                (write x^2/(1-x^2)^3 style notation). Never scratch work:
+                reason silently, record only the decision.
         """
         try:
             step = session.comment(text)
         except ValueError as e:
             return json.dumps({'ok': False, 'op': 'comment',
                                'error': str(e)}, ensure_ascii=False)
-        return json.dumps({'ok': True, 'op': 'comment', 'id': step['id']},
-                          ensure_ascii=False)
+        reply = {'ok': True, 'op': 'comment', 'id': step['id']}
+        if len(text) > 400:
+            reply['hint'] = ('note recorded, but comments should be one '
+                             'or two short sentences - reason silently '
+                             'instead of writing derivations here')
+        return json.dumps(reply, ensure_ascii=False)
 
     def factor_gcd(expr: str) -> str:
         """Pull common factors from a sum or applicable relation sides,

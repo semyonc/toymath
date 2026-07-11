@@ -196,8 +196,11 @@ class Ledger(object):
             lines.append('')
         for step in self.steps:
             if step['op'] == 'comment':
-                lines.append(f"**{step['id']}** *note* — "
-                             f"{step['args']['text']}")
+                # notes are prose, never math: keep \ and $ literal so a
+                # Markdown/MathJax renderer cannot typeset them
+                text = (step['args']['text']
+                        .replace('\\', '\\\\').replace('$', '\\$'))
+                lines.append(f"**{step['id']}** *note* — {text}")
                 lines.append('')
                 continue
             check = step['check'].get('status', '?')
