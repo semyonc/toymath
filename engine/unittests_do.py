@@ -891,6 +891,44 @@ class TestDirectCommands(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('{diff! x^2 + C}', 1, add_to_history=True)
         self.assertIn('ambiguous variable', self._html())
+        # the refusal teaches the explicit-parameter syntax
+        self.assertIn('[x]', self._html())
+
+    def test_explicit_var_parameter_whole_cell(self):
+        # diff! [x] <expr> chooses the variable; no inference needed
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('diff! [x] Cx^{2} + C', 1, add_to_history=True)
+        step = self.shell.ledger.steps[0]
+        self.assertEqual(step['op'], 'differentiate')
+        self.assertEqual(step['args'].get('var'), 'x')
+
+    def test_explicit_var_parameter_inline(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{diff! [C] x C} + 1', 1, add_to_history=True)
+        self.assertEqual(self.shell.ledger.steps[0]['args'].get('var'), 'C')
+
+    def test_ledger_constant_breaks_inference_tie(self):
+        # an antiderivative chained via [[n]] carries its minted C into a
+        # later cell; the ledger's constant provenance disambiguates
+        import primitives
+        self.shell.ledger.record(primitives.integrate_power_rule('x^2', 'x'))
+        self.assertEqual(self.shell.ledger.steps[0].get('constant'), 'C')
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('diff! \\frac{x^{3}}{3} + C', 2,
+                            add_to_history=True)
+        diff_step = self.shell.ledger.steps[1]
+        self.assertEqual(diff_step['op'], 'differentiate')
+        self.assertEqual(diff_step['args'].get('var'), 'x')
+
+    def test_var_parameter_on_non_var_command_refused(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{expand! [x] (x+1)^2}', 3, add_to_history=True)
+        self.assertIn('does not take a [var]', self._html())
+
+    def test_var_parameter_must_be_plain_symbol(self):
+        with mock.patch.object(agent_do, 'run_instruction', _never):
+            self.shell.exec('{diff! [x^2] x^3}', 4, add_to_history=True)
+        self.assertIn('single plain variable name', self._html())
 
     def test_no_variable_refused(self):
         with mock.patch.object(agent_do, 'run_instruction', _never):

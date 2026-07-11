@@ -79,6 +79,10 @@ class Ledger(object):
             'assumptions': result.get('assumptions', []),
             'check': result.get('check', {'status': 'skipped'}),
         }
+        # integration steps mint their constant; keep that provenance so
+        # later cells can tell a session constant from a user variable
+        if result.get('constant'):
+            step['constant'] = result['constant']
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:

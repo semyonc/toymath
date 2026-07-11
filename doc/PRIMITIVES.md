@@ -328,10 +328,21 @@ Whitelisted primitives: `expand`, `collect`, `differentiate`, `factor_gcd`,
 resolver infers the argument's **single** plain free variable — constants
 minted by `fresh:` commands in the same cell are excluded (that is why
 `{diff! {int! x^3}}` infers `x`, not `C`) — and refuses ambiguity rather
-than guessing (`{diff! x y}` → error suggesting a `do!` cell). `direct`
-implies `expr`, and the command body is documentation, not a prompt.
-`{expand! …}` is also the verified replacement for procedural `mul!`/`add!`
-inside an expression.
+than guessing. Two escape hatches:
+
+- **Explicit variable**: `diff! [x] <expr>` (also inline,
+  `{diff! [x] …}`) names the variable in brackets and skips inference
+  entirely — the natural way to differentiate a chained antiderivative:
+  `diff! [x] [[3]]`.
+- **Session-constant provenance**: integration steps record the constant
+  they mint (`constant: C` on the ledger step), and a two-way ambiguity
+  resolves against recorded constants — so a bare `diff! [[3]]` on an
+  antiderivative derived earlier in the session infers `x` over its `C`.
+  A user-written `C` with no such provenance still refuses.
+
+`direct` implies `expr`, and the command body is documentation, not a
+prompt. `{expand! …}` is also the verified replacement for procedural
+`mul!`/`add!` inside an expression.
 
 ## Output format
 

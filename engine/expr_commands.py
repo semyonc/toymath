@@ -99,6 +99,7 @@ class ExprResolver(Replicator):
             raise ExprCommandError(
                 f'{name}! is not an inline expr command '
                 '(only expr:true commands compose inside an expression)')
+        var = self._param_var(cmd, f.args[0])
         args = f.args[1]
         if len(args) != 1:
             raise ExprCommandError(f'{name}! takes a single argument')
@@ -106,14 +107,33 @@ class ExprResolver(Replicator):
         # so evaluation is naturally inner-to-outer
         arg_sym = self.enter_or_expr_list(args[0])
         arg_latex = LaTexWriter(self.output_notation)(arg_sym).strip()
-        return self._splice(cmd, arg_sym, self._run(cmd, arg_latex))
+        return self._splice(cmd, arg_sym, self._run(cmd, arg_latex, var))
 
-    def _run(self, cmd, arg_latex):
-        key = (cmd.name, arg_latex)
+    def _param_var(self, cmd, params):
+        """`name! [x] <expr>` chooses the variable explicitly. Only
+        var-taking direct commands accept it; the parameter must be one
+        plain symbol."""
+        if params is None:
+            return None
+        direct = getattr(cmd, 'direct', None)
+        adapter = DIRECT_PRIMITIVES.get(direct) if direct else None
+        if adapter is None or not adapter.needs_var:
+            raise ExprCommandError(
+                f'{cmd.name}! does not take a [var] parameter')
+        if isinstance(params, Symbol) and self.notation.get(params) is None \
+                and '_{' not in params.name:
+            return params.name
+        shown = LaTexWriter(self.notation)(params).strip()
+        raise ExprCommandError(
+            f'{cmd.name}!: the [var] parameter must be a single plain '
+            f'variable name, got [{shown}]')
+
+    def _run(self, cmd, arg_latex, var=None):
+        key = (cmd.name, var, arg_latex)
         if key in self.cache:
             return self.cache[key]        # identical sub-expression: no re-call
         if getattr(cmd, 'direct', None):
-            result = self._run_direct(cmd, arg_latex)
+            result = self._run_direct(cmd, arg_latex, var)
             self.cache[key] = result
             return result
         if self.calls >= self.max_calls:
@@ -138,13 +158,14 @@ class ExprResolver(Replicator):
         self.cache[key] = result
         return result
 
-    def _run_direct(self, cmd, arg_latex):
+    def _run_direct(self, cmd, arg_latex, var=None):
         """The zero-token tier: the command IS one verified primitive. No
         agent run and no call-cap charge - the primitive's oracle-checked
         record becomes a normal, replayable ledger step, exactly like an
         agent sub-derivation's."""
         adapter = DIRECT_PRIMITIVES[cmd.direct]
-        var = self._infer_var(cmd, arg_latex) if adapter.needs_var else None
+        if var is None and adapter.needs_var:
+            var = self._infer_var(cmd, arg_latex)
         rec = adapter(arg_latex, var)
         if not rec.get('ok'):
             raise ExprCommandError(
@@ -161,8 +182,11 @@ class ExprResolver(Replicator):
         single plain free variable. Subscripted names are atomic constants
         the primitives take no var-string for, and names MINTED by fresh:
         commands in this cell are constants by construction (so
-        {diff! {int! x^3}} infers x, not C). Anything ambiguous is refused,
-        never guessed - use a do! cell to pick the variable explicitly."""
+        {diff! {int! x^3}} infers x, not C). A remaining tie breaks only
+        against constants RECORDED as minted by integration steps in the
+        shared session ledger ([[n]]-chained antiderivatives carry their
+        C across cells); otherwise ambiguity is refused, never guessed -
+        `name! [x] <expr>` chooses explicitly."""
         import primitives
         sym, notation = primitives.parse_latex(arg_latex)
         names = sorted(n for n in primitives.free_symbols(sym, notation)
@@ -173,10 +197,18 @@ class ExprResolver(Replicator):
             raise ExprCommandError(
                 f'{cmd.name}! ({cmd.direct}): no variable to operate on '
                 f'in {arg_latex}')
+        session_constants = set()
+        if self.ledger is not None:
+            session_constants = {s.get('constant') for s in self.ledger.steps
+                                 if s.get('constant')}
+        remaining = [n for n in names if n not in session_constants]
+        if len(remaining) == 1:
+            return remaining[0]
         raise ExprCommandError(
             f'{cmd.name}! ({cmd.direct}): ambiguous variable in {arg_latex} '
             f"(candidates: {', '.join(names)}) - a direct command infers "
-            'only a single free variable; use a do! cell to choose one')
+            f'only a single free variable; write {cmd.name}! [x] ... to '
+            'choose one explicitly')
 
     def _splice(self, cmd, arg_sym, result_latex):
         import primitives
