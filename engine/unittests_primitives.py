@@ -1334,6 +1334,63 @@ class TestDerivativeCheckNearPoles(unittest.TestCase):
         self.assertEqual(c['status'], 'disagree')
 
 
+class TestTextbookDifferential(unittest.TestCase):
+    def test_dx_in_numerator(self):
+        r = P.integrate_power_rule('\\int \\frac{dx}{x^2}', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], '-\\frac{1}{x} + C')
+
+    def test_factor_before_differential(self):
+        r = P.integrate_power_rule('\\int \\frac{x^2 dx}{x^4}', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], '-\\frac{1}{x} + C')
+
+    def test_wrong_variable_refused(self):
+        r = P.integrate_power_rule('\\int \\frac{dy}{y^2}', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('not with respect to', r['error'])
+
+    def test_substitution_on_textbook_form(self):
+        # the stress cell: \int dx/(x^{1/2}+x^{1/3}), u = x^{1/6}
+        r = P.integrate_substitute(
+            '\\int \\frac {dx} {(x^{\\frac 1 2} + x^{\\frac 1 3})}', 'x',
+            'x^{\\frac{1}{6}}', 'u', '\\frac{6u^5}{u^3+u^2}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_trailing_differential_form_unaffected(self):
+        r = P.integrate_power_rule('\\int \\frac{1}{x^2} \\, d x', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], '-\\frac{1}{x} + C')
+
+
+class TestIndexItemRoundTrip(unittest.TestCase):
+    def test_raw_frac_power_is_braced(self):
+        # the kernel Preprocessor puts raw FracValue in INDEX power slots;
+        # the writer used to emit x^\frac{1}{2}, which its own grammar
+        # cannot re-parse (regression: int! [[n]] on \int dx/(x^{1/2}+...))
+        from value import FracValue
+        from LatexWriter import LaTexWriter
+        from notation import Symbol as Sym
+        n = Notation()
+        idx = n.setf(Notation.INDEX,
+                     (Sym('x'), (None, None, FracValue(1, 2), None)))
+        out = LaTexWriter(n)(idx)
+        self.assertEqual(out, 'x^{\\frac{1}{2}}')
+        P.parse_latex(out)
+
+    def test_plain_and_grouped_dims_unchanged(self):
+        from LatexWriter import LaTexWriter
+        from notation import Symbol as Sym
+        from value import IntegerValue
+        n = Notation()
+        idx = n.setf(Notation.INDEX,
+                     (Sym('x'), (None, None, IntegerValue(2), None)))
+        self.assertEqual(LaTexWriter(n)(idx), 'x^{2}')
+        s, n2 = P.parse_latex('x^{\\frac{1}{2}} + x^y')
+        P.parse_latex(P.write_latex(s, n2))
+
+
 class TestLedgerComment(unittest.TestCase):
     def test_note_is_transparent_to_the_chain(self):
         ledger = Ledger()

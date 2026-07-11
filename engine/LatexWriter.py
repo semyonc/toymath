@@ -281,14 +281,23 @@ class LaTexWriter(object):
                 self.write_raw_term(sym)
 
     def write_index_item(self, sym):
-        f = self.notation.getf(sym, Notation.GROUP)
-        escape = f is not None and f.props['br'] == '()'
-        if escape:
+        # the grammar takes a single scalar after ^/_ : anything that does
+        # not print as one token or a {...} group (a raw proper FracValue
+        # prints \frac{1}{2}, a ()-group prints parens, \left...\right
+        # v-groups, built expression subtrees) must be brace-wrapped or
+        # the writer's own output cannot be re-parsed
+        if isinstance(sym, Symbol):
+            f = self.notation.get(sym)
+            selfdelimited = f is None or (
+                f.sym == Notation.GROUP and f.props.get('br') == '{}')
+        else:
+            selfdelimited = sym.__repr__().startswith('{')
+        if selfdelimited:
+            self.write_scalar(sym)
+        else:
             self.writeString('{')
             self.write_scalar(sym)
             self.writeString('}')
-        else:
-            self.write_scalar(sym)
 
     def write_index(self, f):
         dims = f.args[1]

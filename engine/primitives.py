@@ -2538,8 +2538,41 @@ _ANTIDERIV_TABLE = {
 }
 
 
+def _split_trailing_differential(num, notation, var):
+    """If a fraction numerator ends with the differential `d<name>`
+    (textbook form `\\int \\frac{f(x) dx}{g(x)}`), return
+    (True, rest_sym_or_None, name); rest is None when the numerator is
+    exactly the differential. (False, None, None) when there is no
+    trailing differential. A genuine variable named `d` in last-but-one
+    position is indistinguishable from the differential - the human
+    reading wins."""
+    g = notation.vgetf(num, [Notation.GROUP, Notation.V_GROUP])
+    if g is not None and g.props.get('br') != '||':
+        num = g.args[0]
+    f = notation.getf(num, Notation.P_LIST)
+    if f is None:
+        return False, None, None
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and a.name in Notation.styles)]
+    if len(items) < 2:
+        return False, None, None
+    dsym, dvar = items[-2], items[-1]
+    if not (isinstance(dsym, Symbol) and dsym.name == 'd'
+            and notation.get(dsym) is None):
+        return False, None, None
+    if not (isinstance(dvar, Symbol) and notation.get(dvar) is None):
+        return False, None, None
+    rest = items[:-2]
+    if not rest:
+        return True, None, dvar.name
+    if len(rest) == 1:
+        return True, rest[0], dvar.name
+    return True, notation.setf(Notation.P_LIST, tuple(rest)), dvar.name
+
+
 def _strip_integral(sym, notation, var):
-    """If sym is `\\int <integrand> [\\,] d<var>`, return the integrand sym;
+    """If sym is `\\int <integrand> [\\,] d<var>` (or the textbook form
+    `\\int \\frac{f(x) d<var>}{g(x)}`), return the integrand sym;
     None if it is not an integral; raises on malformed/mismatched ones."""
     f = notation.getf(sym, Notation.P_LIST)
     if f is None:
@@ -2555,6 +2588,25 @@ def _strip_integral(sym, notation, var):
     if not (isinstance(head, Symbol) and head.name == '\\int'):
         return None
     tail = args[1:]
+    core = [t for t in tail if not (isinstance(t, Symbol)
+                                    and t.name in Notation.styles)]
+    if len(core) == 1:
+        # textbook form: the differential lives in the fraction numerator
+        inner = core[0]
+        g = notation.vgetf(inner, [Notation.GROUP, Notation.V_GROUP])
+        if g is not None and g.props.get('br') != '||':
+            inner = g.args[0]
+        fr = notation.get(inner)
+        if fr is not None and (fr.sym == Notation.SLASH
+                               or fr.sym.name in FRAC_NAMES):
+            matched, rest, dname = _split_trailing_differential(
+                fr.args[0], notation, var)
+            if matched:
+                if dname != var:
+                    raise PrimitiveError(
+                        f'integral is not with respect to {var!r}')
+                new_num = IntegerValue(1) if rest is None else rest
+                return notation.setf(fr.sym, (new_num, fr.args[1]))
     if len(tail) < 3:
         raise PrimitiveError('malformed integral')
     if not (isinstance(tail[-1], Symbol) and tail[-1].name == var):

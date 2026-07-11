@@ -425,6 +425,16 @@ class TestMathShellDo(unittest.TestCase):
         self.assertNotIn('textit', text)
         self.assertIn('x^', text)
 
+    def test_backref_of_fractional_power_reparses(self):
+        # \int dx/(x^{1/2}+x^{1/3}) stored, then referenced from a
+        # composite cell: the re-rendered LaTeX must parse (regression:
+        # the writer emitted x^\frac{1}{2}, syntax error on int! [[n]])
+        import primitives
+        self.shell.exec('\\int \\frac {dx} {(x^{\\frac 1 2} '
+                        '+ x^{\\frac 1 3})}', 3, add_to_history=True)
+        resolved = self.shell.resolve_backrefs('[[3]]')
+        primitives.parse_latex(resolved)
+
     def test_do_cell_streams_and_chains(self):
         with mock.patch.object(agent_do, 'build_model',
                                lambda: ScriptedModel(SOLVE_SCRIPT)):
