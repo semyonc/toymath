@@ -157,15 +157,18 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 
 ## Known limitations
 
-- **Fractional powers are opaque to the canonical layer.** polyrat
-  monomials have integer exponents, so `x^{1/6}` atomizes whole and the
-  relation `(x^{1/6})^6 = x` is invisible: `expand` cannot fold
-  `(x^{1/6})^4` to `x^{2/3}` or cancel
-  `\frac{(x^{1/6})^4}{x\,x^{1/6}+x}` down to
-  `\frac{1}{x^{1/2}+x^{1/3}}` — it honestly returns the input
-  unchanged. `equal?` still decides such identities via the numeric
-  oracle (domain-aware), and the polynomial route is the substitution
-  `u = x^{1/n}` (then everything is integer-power in `u`).
+- **Fractional powers fold in `expand` only for plain-variable bases.**
+  `expand` substitutes `t = x^{1/q}` (q = lcm of the exponent
+  denominators), canonicalizes with ordinary integer-power machinery,
+  and maps back: `(x^{1/6})^4 → x^{2/3}`,
+  `\frac{(x^{1/6})^4}{x\,x^{1/6}+x} → \frac{1}{x^{1/2}+x^{1/3}}`.
+  Every fold records `x > 0`; a fold that extends the domain (e.g.
+  `(x^{1/6})^6 → x`) is flagged `domain-differs` by the oracle.
+  Remaining boundary: composite bases (`(x+1)^{1/2}`, and deliberately
+  `(x^2)^{1/2}`, which is `|x|`) stay opaque atoms; negative fractional
+  exponents and relation sides skip the fold; `collect` and the
+  canonical leg of `equal?` do not fold (the numeric oracle still
+  decides such identities).
 - Multivariate cancellation covers monomial factors and the
   one-side-divides-the-other case via exact trial division
   (`(x²-y²)/(x+y)` → `x-y`, `(\sin x+\cos x)x / (\sin x+\cos x)` → `x`);

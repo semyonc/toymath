@@ -1364,6 +1364,67 @@ class TestTextbookDifferential(unittest.TestCase):
         self.assertEqual(r['result'], '-\\frac{1}{x} + C')
 
 
+class TestPuiseuxFold(unittest.TestCase):
+    """expand folds rational-exponent powers of plain variables via
+    t = x^{1/q} into integer polyrat and maps back (records x > 0)."""
+
+    def ok(self, rec, status='agree'):
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], status,
+                         f"{rec.get('result')} check={rec['check']}")
+        return rec
+
+    def test_reported_expression_canonicalizes(self):
+        E = ('\\frac{(x^{\\frac{1}{6}})^{4}}'
+             '{x x^{\\frac{1}{6}} + x}')
+        r = self.ok(P.expand(E))
+        self.assertEqual(r['result'].replace(' ', ''),
+                         '\\frac{1}{x^{{\\frac{1}{2}}}+x^{{\\frac{1}{3}}}}')
+        self.assertIn({'text': 'x > 0', 'nonzero': 'x'}, r['assumptions'])
+        eq = P.equal_exprs(r['result'],
+                           '\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}')
+        self.assertEqual(eq['verdict'], 'yes')
+
+    def test_power_of_root_folds(self):
+        r = self.ok(P.expand('(x^{\\frac{1}{6}})^{4}'))
+        self.assertEqual(r['result'].replace(' ', ''),
+                         'x^{{\\frac{2}{3}}}')
+
+    def test_bare_variable_merges(self):
+        r = self.ok(P.expand('x \\cdot x^{\\frac{1}{6}}'))
+        self.assertEqual(r['result'].replace(' ', ''),
+                         'x^{{\\frac{7}{6}}}')
+
+    def test_domain_extension_is_flagged(self):
+        # (x^{1/6})^6 = x only for x >= 0: the fold is right, the oracle
+        # honestly reports the domain extension
+        r = P.expand('(x^{\\frac{1}{6}})^{6}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x')
+        self.assertEqual(r['check']['status'], 'domain-differs')
+
+    def test_composite_base_never_folds(self):
+        # (x^2)^{1/2} is |x|; the fold applies only to plain-variable bases
+        r = P.expand('(x^{2})^{\\frac{1}{2}}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('\\frac', r['result'])  # exponent stays fractional
+
+    def test_negative_fractional_power_skips(self):
+        r = P.expand('x^{-\\frac{1}{2}} x')
+        self.assertTrue(r['ok'], r.get('error'))  # unchanged, no fold
+
+    def test_atoms_coexist_with_fold(self):
+        r = self.ok(P.expand('2 x^{\\frac{1}{2}} \\sin y '
+                             '+ 3 x^{\\frac{1}{2}} \\sin y'))
+        self.assertEqual(r['result'].replace(' ', ''),
+                         '5x^{{\\frac{1}{2}}}\\siny')
+
+    def test_integer_only_expressions_untouched(self):
+        r = self.ok(P.expand('(x+1)(x-2)'))
+        self.assertEqual(r['result'], 'x^{2}-x-2')
+        self.assertEqual(r['assumptions'], [])
+
+
 class TestIndexItemRoundTrip(unittest.TestCase):
     def test_raw_frac_power_is_braced(self):
         # the kernel Preprocessor puts raw FracValue in INDEX power slots;

@@ -700,6 +700,235 @@ class Substitutor(Replicator):
         return super(Substitutor, self).enter_index(sym, f)
 
 
+# ---------------------------------------------------------------------------
+# fractional powers: Puiseux-style folding (t = x^{1/q})
+# ---------------------------------------------------------------------------
+
+# polyrat monomials have integer exponents, so x^{1/6} would atomize whole
+# and (x^{1/6})^6 = x stays invisible. Folding substitutes t = x^{1/q}
+# (q = lcm of the exponent denominators, per variable), canonicalizes with
+# ordinary integer-power machinery, and maps t^k back to x^{k/q}. Sound
+# only where the roots are defined, so every fold records `x > 0`; the
+# (x^2)^{1/2} = |x| direction never folds (the base must be the plain
+# variable itself).
+
+_PUISEUX_MAX_ROOT = 24
+# lexer-safe stand-ins (a raw internal name would break the validated
+# writer round trip); collision-checked against the expression's symbols
+_PUISEUX_POOL = ('\\vartheta', '\\varsigma', '\\varrho', '\\varpi')
+
+
+def _rational_const(sym, notation):
+    """Fraction value of a constant subtree, or None."""
+    try:
+        rf = to_ratfunc(sym, notation)
+    except (NotInFragment, ZeroDivisionError):
+        return None
+    if not rf.is_const():
+        return None
+    return rf.const_value()
+
+
+def _frac_power_var(sym, f, notation):
+    """(var_name, Fraction) when sym is INDEX(plain variable, rational
+    non-integer constant power) with empty sub/sup slots; None otherwise."""
+    base = f.args[0]
+    while True:
+        g = notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
+        if g is None or g.props.get('br') == '||':
+            break
+        base = g.args[0]
+    sub_l, sup_l, power, sub_r = f.args[1]
+    if sub_l is not None or sup_l is not None or sub_r is not None \
+            or power is None:
+        return None
+    if not (isinstance(base, Symbol) and notation.get(base) is None
+            and '_{' not in base.name and base.name not in FUNC_NAMES
+            and base.name not in Notation.p_oper):
+        return None
+    val = _rational_const(power, notation)
+    if val is None or val.denominator == 1:
+        return None
+    return base.name, val
+
+
+def _scan_frac_powers(root, notation):
+    """{var_name: set of exponent denominators} over the whole graph."""
+    dens = {}
+    seen = set()
+    stack = [root]
+    while stack:
+        s = stack.pop()
+        if not isinstance(s, Symbol) or s in seen:
+            continue
+        seen.add(s)
+        f = notation.get(s)
+        if f is None:
+            continue
+        if f.sym == Notation.INDEX:
+            hit = _frac_power_var(s, f, notation)
+            if hit is not None:
+                dens.setdefault(hit[0], set()).add(hit[1].denominator)
+        for a in f.args:
+            if isinstance(a, tuple):
+                stack.extend(x for x in a if isinstance(x, Symbol)
+                             or isinstance(x, Value))
+            elif a is not None:
+                stack.append(a)
+    return dens
+
+
+class _PuiseuxIn(Replicator):
+    """x^{p/q'} -> t^k, bare x -> (t^q); subscripted names untouched."""
+
+    def __init__(self, notation, output_notation, roots):
+        super(_PuiseuxIn, self).__init__(notation, output_notation)
+        self.roots = roots        # var_name -> (t_name, q)
+        self.failed = False       # an exponent that is not a positive int
+
+    def _tpow(self, tname, k, wrap):
+        t = Symbol(tname)
+        if k == 1:
+            return t
+        ix = self.output_notation.setf(
+            Notation.INDEX, (t, (None, None, IntegerValue(k), None)))
+        if not wrap:
+            return ix
+        return self.output_notation.setf(Notation.GROUP, (ix,), br='()')
+
+    def _sub(self, sym):
+        if isinstance(sym, Symbol) and self.notation.get(sym) is None \
+                and sym.name in self.roots:
+            tname, q = self.roots[sym.name]
+            return self._tpow(tname, q, wrap=True)
+        return None
+
+    def enter_symbol(self, sym):
+        res = self._sub(sym)
+        return res if res is not None else sym
+
+    def enter_raw_term(self, t):
+        if isinstance(t, Symbol):
+            res = self._sub(t)
+            if res is not None:
+                return res
+        return t
+
+    def enter_index(self, sym, f):
+        if _subscript_var(sym, self.notation) is not None:
+            # same verbatim discipline as Substitutor: x_{1} is atomic
+            plain = Replicator(self.notation, self.output_notation)
+            sub_l, sup_l, power, sub = f.args[1]
+            dims = (None, None,
+                    None if power is None else self.enter_scalar(power),
+                    plain.enter_scalar(sub))
+            return self.output_notation.repf(
+                self.mapsym(sym),
+                Func(f.sym, (plain.enter_scalar(f.args[0]), dims)))
+        hit = _frac_power_var(sym, f, self.notation)
+        if hit is not None and hit[0] in self.roots:
+            tname, q = self.roots[hit[0]]
+            k = hit[1] * q
+            if k.denominator != 1 or k <= 0:
+                self.failed = True
+            else:
+                return self._tpow(tname, int(k), wrap=False)
+        return super(_PuiseuxIn, self).enter_index(sym, f)
+
+
+class _PuiseuxOut(Replicator):
+    """t^k -> x^{k/q} (reduced; bare x when k = q), bare t -> x^{1/q}."""
+
+    def __init__(self, notation, output_notation, back):
+        super(_PuiseuxOut, self).__init__(notation, output_notation)
+        self.back = back          # t_name -> (var_name, q)
+
+    def _xpow(self, var, frac):
+        x = Symbol(var)
+        if frac.denominator == 1:
+            if frac.numerator == 1:
+                return x
+            power = IntegerValue(frac.numerator)
+        else:
+            power = self.output_notation.setf(
+                Symbol('\\frac'), (IntegerValue(frac.numerator),
+                                   IntegerValue(frac.denominator)))
+        return self.output_notation.setf(
+            Notation.INDEX, (x, (None, None, power, None)))
+
+    def _sub(self, sym):
+        if isinstance(sym, Symbol) and self.notation.get(sym) is None \
+                and sym.name in self.back:
+            var, q = self.back[sym.name]
+            return self._xpow(var, Fraction(1, q))
+        return None
+
+    def enter_symbol(self, sym):
+        res = self._sub(sym)
+        return res if res is not None else sym
+
+    def enter_raw_term(self, t):
+        if isinstance(t, Symbol):
+            res = self._sub(t)
+            if res is not None:
+                return res
+        return t
+
+    def enter_index(self, sym, f):
+        base = f.args[0]
+        while True:
+            g = self.notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
+            if g is None or g.props.get('br') == '||':
+                break
+            base = g.args[0]
+        sub_l, sup_l, power, sub_r = f.args[1]
+        if isinstance(base, Symbol) and self.notation.get(base) is None \
+                and base.name in self.back and sub_l is None \
+                and sup_l is None and sub_r is None and power is not None:
+            k = _rational_const(power, self.notation)
+            if k is not None and k.denominator == 1 and k > 0:
+                var, q = self.back[base.name]
+                return self._xpow(var, Fraction(int(k), q))
+        return super(_PuiseuxOut, self).enter_index(sym, f)
+
+
+def _puiseux_fold(sym, notation):
+    """(t_sym, t_notation, back_fn, assumptions) when the expression has
+    rational-exponent powers of plain variables and the fold is exactly
+    representable; None otherwise (callers keep today's behavior)."""
+    try:
+        dens = _scan_frac_powers(sym, notation)
+    except Exception:
+        return None
+    if not dens:
+        return None
+    taken = free_symbols(sym, notation)
+    pool = [n for n in _PUISEUX_POOL if n not in taken]
+    roots = {}
+    for var in sorted(dens):
+        q = 1
+        for d in dens[var]:
+            q = q * d // math.gcd(q, d)
+        if q > _PUISEUX_MAX_ROOT or not pool:
+            return None
+        roots[var] = (pool.pop(0), q)
+    out_n = Notation()
+    rep = _PuiseuxIn(notation, out_n, roots)
+    new_sym = rep(sym)
+    if rep.failed:
+        return None
+    back = {t: (v, q) for v, (t, q) in roots.items()}
+
+    def back_fn(latex):
+        s2, n2 = parse_latex(latex)
+        o2 = Notation()
+        r2 = _PuiseuxOut(n2, o2, back)(s2)
+        return write_latex(r2, o2)
+
+    assumptions = [{'text': f'{v} > 0', 'nonzero': v} for v in sorted(roots)]
+    return new_sym, out_n, back_fn, assumptions
+
+
 def _result(op, args, input_latex, result_latex, assumptions=None,
             check=None, extra=None):
     rec = {'ok': True, 'op': op, 'args': args, 'input': input_latex,
@@ -1476,8 +1705,10 @@ def _canonical_side(side, notation):
 
 def expand(expr):
     """Distribute products and integer powers of sums; canonical order.
-    On an equation, expands each side."""
+    On an equation, expands each side. Rational-exponent powers of plain
+    variables fold via t = x^{1/q} (recording x > 0)."""
     args = {'expr': expr}
+    fold = None
     try:
         sym, notation = parse_latex(expr)
         split = _comp_split(sym, notation)
@@ -1490,6 +1721,9 @@ def expand(expr):
                 numeric_spot_check(write_latex(lhs, notation), new_l),
                 numeric_spot_check(write_latex(rhs, notation), new_r))
             return rec
+        fold = _puiseux_fold(sym, notation)
+        if fold is not None:
+            sym, notation = fold[0], fold[1]
         rf = to_ratfunc(sym, notation)
     except PrimitiveError as e:
         return _error('expand', args, str(e))
@@ -1499,17 +1733,28 @@ def expand(expr):
         # canonicalize over opaque atoms (\cos x, e^x, unevaluated \int)
         try:
             result, n_atoms = _atomized_canonical(sym, notation)
+            if fold is not None:
+                result = fold[2](result)
         except NotInFragment as e:
             return _error('expand', args,
                           f'outside the rational fragment: {e}')
         except ZeroDivisionError:
             return _error('expand', args,
                           'expression contains division by zero')
-        return _checked(_result('expand', args, expr, result,
-                                extra={'opaque_atoms': n_atoms}))
-    out_n = Notation()
-    result = write_latex(ratfunc_to_notation(rf, out_n), out_n)
-    return _checked(_result('expand', args, expr, result))
+        return _checked(_result(
+            'expand', args, expr, result,
+            assumptions=fold[3] if fold is not None else None,
+            extra={'opaque_atoms': n_atoms}))
+    try:
+        out_n = Notation()
+        result = write_latex(ratfunc_to_notation(rf, out_n), out_n)
+        if fold is not None:
+            result = fold[2](result)
+    except PrimitiveError as e:
+        return _error('expand', args, str(e))
+    return _checked(_result(
+        'expand', args, expr, result,
+        assumptions=fold[3] if fold is not None else None))
 
 
 def collect(expr, var):
