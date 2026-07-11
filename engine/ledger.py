@@ -22,7 +22,8 @@ TRANSFORMING_OPS = frozenset({
     'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
     'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
     'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
-    'integrate_substitute', 'integrate_rewrite', 'integrate_linearity'})
+    'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
+    'integrate_assemble'})
 
 
 def _step_hash(op, input_latex, result_latex):
@@ -83,6 +84,10 @@ class Ledger(object):
         # later cells can tell a session constant from a user variable
         if result.get('constant'):
             step['constant'] = result['constant']
+        if result.get('terms'):
+            step['terms'] = result['terms']
+        if result.get('sources'):
+            step['sources'] = result['sources']
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:
@@ -158,10 +163,39 @@ class Ledger(object):
                 a['expr'], a['var'], a['new_integrand']),
             'integrate_linearity': lambda a: primitives.integrate_linearity(
                 a['expr'], a['var']),
+            'integrate_assemble': lambda a: primitives.integrate_assemble(
+                a['expr'], a['var'], a['antiderivatives']),
         }
+        seen = {}
         for step in self.steps:
             if step['op'] == 'comment':
+                seen[step['id']] = step
                 continue
+            if step['op'] == 'integrate_assemble':
+                sources = step.get('sources') or {}
+                linearity = seen.get(sources.get('linearity'))
+                if linearity is None or linearity.get('op') != \
+                        'integrate_linearity':
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'missing linearity-step provenance'}
+                args = step.get('args', {})
+                if (linearity.get('input') != args.get('expr')
+                        or linearity.get('args', {}).get('var')
+                        != args.get('var')):
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'linearity-step provenance mismatch'}
+                source_ids = sources.get('antiderivatives') or []
+                values = args.get('antiderivatives') or []
+                if len(source_ids) != len(values):
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'antiderivative provenance mismatch'}
+                for source_id, value in zip(source_ids, values):
+                    source = seen.get(source_id)
+                    if source is None or source.get('result') != value:
+                        return {
+                            'status': 'failed', 'step': step['id'],
+                            'reason': ('antiderivative provenance mismatch '
+                                       f'at {source_id}')}
             fn = dispatch.get(step['op'])
             if fn is None:
                 return {'status': 'failed', 'step': step['id'],
@@ -183,6 +217,7 @@ class Ledger(object):
             if res.get('check', {}).get('status') == 'disagree':
                 return {'status': 'failed', 'step': step['id'],
                         'reason': 'numeric oracle disagrees on replay'}
+            seen[step['id']] = step
         return {'status': 'verified', 'steps': len(self.steps),
                 'assumptions': self.assumptions}
 
@@ -221,6 +256,11 @@ class Ledger(object):
             elif step['op'] == 'integrate_by_parts':
                 a = step['args']
                 arg_note = f" — $u = {a['u']}$, $dv = {a['dv']}$"
+            elif step['op'] == 'integrate_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('antiderivatives', []))
+                arg_note = (f" — sources `{src.get('linearity', '?')}` "
+                            f"→ `{ids}`")
             lines.append(f"**{step['id']}** `{step['op']}`{arg_note} "
                          f"— *{mark}*{branch}")
             lines.append('')
@@ -248,6 +288,12 @@ class Ledger(object):
             lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch} "
                          f"{step['op']}: {step['input']}  ==>  "
                          f"{step['result']}")
+            if step['op'] == 'integrate_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: linearity '
+                    + src.get('linearity', '?') + '; pieces '
+                    + ', '.join(src.get('antiderivatives', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
         if self.assumptions:

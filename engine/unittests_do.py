@@ -164,6 +164,66 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertEqual(session.new_steps(), [])
 
+    def test_integrate_assemble_uses_ordered_ledger_results(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['integrate_linearity'](
+            '\\int (x+x^2) \\, d x', 'x'))
+        first = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][0], 'x'))
+        second = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][1], 'x'))
+        rec = json.loads(api['integrate_assemble'](
+            linearity['step']['id'],
+            [first['step']['id'], second['step']['id']]))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {
+            'linearity': 's1', 'antiderivatives': ['s2', 's3']})
+        self.assertEqual(rec['step']['id'], 's4')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'])
+        self.assertEqual(selected['provenance']['step'], 's4')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_integrate_assemble_rejects_wrong_source_order(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['integrate_linearity'](
+            '\\int (x+x^2) \\, d x', 'x'))
+        first = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][0], 'x'))
+        second = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][1], 'x'))
+        rec = json.loads(api['integrate_assemble'](
+            's1', [second['step']['id'], first['step']['id']]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('piece 1', rec['error'])
+        self.assertEqual(len(session.ledger.steps), 3)
+
+    def test_integrate_assemble_requires_linearity_step(self):
+        session = DoSession()
+        api = make_api(session)
+        step = json.loads(api['expand']('(x+1)^2'))['step']['id']
+        rec = json.loads(api['integrate_assemble'](step, [step]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('not integrate_linearity', rec['error'])
+
+    def test_replay_rejects_tampered_assembly_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['integrate_linearity'](
+            '\\int (x+x^2) \\, d x', 'x'))
+        first = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][0], 'x'))
+        second = json.loads(api['integrate_power_rule'](
+            linearity['integrals'][1], 'x'))
+        json.loads(api['integrate_assemble']('s1', [
+            first['step']['id'], second['step']['id']]))
+        session.ledger.steps[-1]['sources']['antiderivatives'][0] = 's3'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
     def test_concurrent_recording_is_thread_safe(self):
         # the Agents SDK runs sync tools on a thread pool; parallel tool
         # calls must not produce duplicate step ids

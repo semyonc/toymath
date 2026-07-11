@@ -91,7 +91,9 @@ _DO_RULES = """
 - For integrals beyond the direct tactics: propose an equivalent integrand
   (e.g. partial fractions) with `integrate_rewrite` (it is verified
   mechanically), split sums with `integrate_linearity`, solve each piece,
-  then assemble the pieces with `expand`.
+  then call `integrate_assemble` with the linearity step id and the ordered
+  ledger step ids of the piece antiderivatives. Never type the final sum into
+  `expand`: that checks only the typed expression, not piece provenance.
 """
 
 _PLOT_RULES = """
@@ -371,7 +373,7 @@ def make_api(session):
     def integrate_linearity(expr: str, var: str) -> str:
         """Split the integral of a top-level sum into a signed sum of
         integrals, one per term (exact sum rule); attack each resulting
-        integral separately, then assemble the pieces with expand.
+        integral separately, then use integrate_assemble.
 
         Args:
             expr: LaTeX integrand or \\int ... dx expression whose
@@ -379,6 +381,60 @@ def make_api(session):
             var: integration variable.
         """
         return _run(primitives.integrate_linearity, expr, var)
+
+    def integrate_assemble(linearity_step: str,
+                           antiderivative_steps: list[str]) -> str:
+        """Assemble a linearity split from RECORDED piece results. Supply
+        one ledger step id per term, in the exact order returned by
+        integrate_linearity. ToyMath retrieves those results, verifies each
+        derivative against its corresponding integrand, applies the signs,
+        and adds one fresh constant.
+
+        Args:
+            linearity_step: ledger id of the integrate_linearity step,
+                e.g. "s4".
+            antiderivative_steps: ordered ledger ids whose results are the
+                completed antiderivatives, e.g. ["s8", "s12", "s16"].
+        """
+        with session._lock:
+            steps = list(session.ledger.steps)
+        by_id = {step['id']: step for step in steps}
+        linearity = by_id.get(linearity_step)
+        if linearity is None:
+            return json.dumps({
+                'ok': False, 'op': 'integrate_assemble',
+                'error': f'unknown linearity step {linearity_step!r}',
+            }, ensure_ascii=False)
+        if linearity.get('op') != 'integrate_linearity':
+            return json.dumps({
+                'ok': False, 'op': 'integrate_assemble',
+                'error': (f'{linearity_step!r} is '
+                          f'{linearity.get("op")!r}, not '
+                          'integrate_linearity'),
+            }, ensure_ascii=False)
+        if not isinstance(antiderivative_steps, list):
+            return json.dumps({
+                'ok': False, 'op': 'integrate_assemble',
+                'error': 'antiderivative_steps must be an ordered list',
+            }, ensure_ascii=False)
+        values = []
+        for source_id in antiderivative_steps:
+            source = by_id.get(source_id)
+            if source is None or source.get('result') is None:
+                return json.dumps({
+                    'ok': False, 'op': 'integrate_assemble',
+                    'error': f'unknown transforming step {source_id!r}',
+                }, ensure_ascii=False)
+            values.append(source['result'])
+        result = primitives.integrate_assemble(
+            linearity['input'], linearity['args']['var'], values)
+        if result.get('ok'):
+            result['sources'] = {
+                'linearity': linearity_step,
+                'antiderivatives': list(antiderivative_steps),
+            }
+        return json.dumps(session.record(result), ensure_ascii=False,
+                          default=str)
 
     def comment(text: str) -> str:
         """Add a short narrative note to the ledger (strategy, which piece
@@ -494,6 +550,7 @@ def make_api(session):
     fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, integrate_rewrite, integrate_linearity,
+           integrate_assemble,
            factor_gcd, factor_quadratic, equal, lemmas, comment,
            set_result]
     if session.plot_backend is not None:

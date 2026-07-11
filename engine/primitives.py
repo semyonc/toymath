@@ -3336,6 +3336,8 @@ def integrate_linearity(expr, var):
             body = _paren(body)
         parts.append(('-' if neg else '+', f'\\int {body} \\, d {var}'))
     pieces = [p for _, p in parts]
+    terms = [{'sign': -1 if sign == '-' else 1, 'integral': piece}
+             for sign, piece in parts]
     result = ('-' if parts[0][0] == '-' else '') + parts[0][1]
     for sgn, piece in parts[1:]:
         result += f' {sgn} {piece}'
@@ -3347,7 +3349,103 @@ def integrate_linearity(expr, var):
     return _result('integrate_linearity', args, expr, result,
                    check={'status': 'exact',
                           'method': 'linearity of the integral'},
-                   extra={'integrals': pieces})
+                   extra={'integrals': pieces, 'terms': terms})
+
+
+def integrate_assemble(expr, var, antiderivatives):
+    """Assemble the signed results of an ``integrate_linearity`` split.
+
+    ``antiderivatives`` is ordered exactly like the split's ``terms``.  The
+    do! tool supplies these values from ledger step ids, rather than letting
+    the agent retype them.  This primitive independently differentiates each
+    value against its corresponding integrand, constructs the signed sum,
+    and adds one fresh constant.
+    """
+    args = {'expr': expr, 'var': var,
+            'antiderivatives': list(antiderivatives)
+            if isinstance(antiderivatives, (list, tuple))
+            else antiderivatives}
+    if not isinstance(antiderivatives, (list, tuple)):
+        return _error('integrate_assemble', args,
+                      'antiderivatives must be an ordered list')
+    split = integrate_linearity(expr, var)
+    if not split.get('ok'):
+        return _error('integrate_assemble', args,
+                      'cannot assemble without a linearity split: '
+                      + split.get('error', 'unknown error'))
+    terms = split['terms']
+    if len(antiderivatives) != len(terms):
+        return _error(
+            'integrate_assemble', args,
+            f'expected {len(terms)} antiderivatives in linearity order, '
+            f'got {len(antiderivatives)}')
+
+    checked = []
+    rendered = []
+    for i, (term, candidate) in enumerate(zip(terms, antiderivatives), 1):
+        if not isinstance(candidate, str) or not candidate.strip():
+            return _error('integrate_assemble', args,
+                          f'piece {i} has no antiderivative')
+        try:
+            parse_latex(candidate)
+            _, _, integrand = _integrand(term['integral'], var)
+        except PrimitiveError as e:
+            return _error('integrate_assemble', args,
+                          f'piece {i} is malformed: {e}')
+        derivative = differentiate(candidate, var)
+        if not derivative.get('ok'):
+            return _error('integrate_assemble', args,
+                          f'cannot differentiate piece {i}: '
+                          + derivative.get('error', 'unknown error'))
+        equality = equal_exprs(derivative['result'], integrand)
+        if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+            return _error(
+                'integrate_assemble', args,
+                f'ledger result for piece {i} is not an antiderivative of '
+                f'{integrand!r} (verdict: '
+                f'{equality.get("verdict", "error")})')
+        checked.append({'piece': i,
+                        'derivative': derivative['result'],
+                        'method': equality.get('method', 'equal?')})
+        rendered.append(('-' if term['sign'] < 0 else '+',
+                         _paren(candidate)))
+
+    first_sign, first = rendered[0]
+    assembled = ('-' if first_sign == '-' else '') + first
+    for sign, candidate in rendered[1:]:
+        assembled += f' {sign} {candidate}'
+    try:
+        asym, anotation = parse_latex(assembled)
+        const = _fresh_constant(free_symbols(asym, anotation) | {var})
+        result = f'{assembled} + {const}'
+        parse_latex(result)
+        _, _, original_integrand = _integrand(expr, var)
+    except PrimitiveError as e:
+        return _error('integrate_assemble', args,
+                      f'internal: unparseable assembly: {e}')
+
+    # Defense in depth: the per-piece equalities check the provenance
+    # mapping; this final symbolic check checks our signed construction.
+    derivative = differentiate(result, var)
+    if not derivative.get('ok'):
+        return _error('integrate_assemble', args,
+                      'cannot differentiate the assembled result: '
+                      + derivative.get('error', 'unknown error'))
+    equality = equal_exprs(derivative['result'], original_integrand)
+    if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+        return _error('integrate_assemble', args,
+                      'internal: assembled derivative does not equal the '
+                      f'original integrand (verdict: '
+                      f'{equality.get("verdict", "error")})')
+
+    rec = _result('integrate_assemble', args, expr, result,
+                  extra={'constant': const, 'pieces': checked,
+                         'linearity_terms': terms})
+    rec['check'] = _derivative_check(result, original_integrand, var)
+    if rec['check'].get('status') == 'agree':
+        rec['check']['method'] = (
+            'per-piece derivatives + signed linearity')
+    return rec
 
 
 # ---------------------------------------------------------------------------

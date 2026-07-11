@@ -36,7 +36,8 @@ it appends each verified step to a replayable ledger.
 | `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |
 | `integrate_substitute EXPR VAR U_EXPR U_VAR NEW_INTEGRAND` | `integrate_substitute "2x \cos(x^2)" x "x^2" u "\cos(u)"` | u-substitution: you supply u and the integrand rewritten in u; toymath verifies `f(u(x))·u'(x)` equals the integrand and returns `\int f(u) du`; back-substitute with `substitute` after integrating |
 | `integrate_rewrite EXPR VAR NEW_INTEGRAND` | `integrate_rewrite "\frac{x^2}{(1-x^2)^3}" x "<partial fractions>"` | congruence under the integral sign: you propose an equivalent integrand (partial fractions, algebraic massage); toymath verifies the two integrands are mechanically equal, then rewrites the integral |
-| `integrate_linearity EXPR VAR` | `integrate_linearity "\int (x + \sin x) \, dx" x` | exact sum rule: split the integral of a top-level sum into a signed sum of integrals; attack each piece separately, assemble with `expand` |
+| `integrate_linearity EXPR VAR` | `integrate_linearity "\int (x + \sin x) \, dx" x` | exact sum rule: split the integral of a top-level sum into a signed sum of integrals; attack each piece separately |
+| `integrate_assemble LINEARITY_STEP PIECE_STEPS` | `integrate_assemble s4 [s8,s12]` | do!-only provenance move: retrieve recorded piece results in linearity order, verify every derivative, apply the signs, and add one fresh constant |
 | `factor_gcd EXPR` | `factor_gcd "6x^2+9x=3"` | pull out common factors on applicable expression/relation sides → `3x(2x+3)=3` |
 | `factor_quadratic EXPR VAR` | `factor_quadratic "x^2+6x+9=4" x` | rational-root factorization on applicable expression/relation sides → `(x+3)^2=4`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown. A `no` with method `domain mismatch` means the sides agree in value but one is defined where the other is not (`\ln(x^2)` vs `2\ln x`) — equality may hold on a restricted domain; a `yes` may carry a `note` that it was checked only on the common domain |
@@ -61,8 +62,8 @@ discontinuities). Check candidate solutions with `substitute` + `evaluate`.
 
 ## How to integrate (there is deliberately no autonomous `integrate`)
 
-Pick the tactic; chain until no integral remains; verify the assembled
-answer by differentiating it:
+Pick the tactic and chain until no integral remains. For a by-parts result,
+verify the assembled answer by differentiating it:
 
 ```bash
 python toymath_cli.py integrate_by_parts "\int x \sin x \, dx" x "x" "\sin x"
@@ -82,7 +83,12 @@ decomposition yourself and let `integrate_rewrite` verify it, split with
 `integrate_linearity`, then per piece use `integrate_substitute`
 (u = the linear factor) + `integrate_power_rule`/`integrate_table` +
 `substitute` back. Pin each piece's constant to 0 with `substitute`
-(`C := 0`) so the pieces assemble cleanly, and add one `+ C` at the end.
+(`C := 0`) so the pieces assemble cleanly. In do! mode, finish with
+`integrate_assemble(linearity_step, antiderivative_steps)`, passing the
+recorded step ids in the exact order returned by `integrate_linearity`.
+It applies the recorded signs and adds the single `+ C`; do not type the
+sum into `expand`, because that checks only the expression you typed, not
+whether it contains the right piece results.
 
 ## Matrices and vectors (literal, phase 1)
 

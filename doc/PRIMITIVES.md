@@ -102,10 +102,16 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    before the integral is rewritten. The equality is the checked content;
    the tactic itself adds nothing. **integrate_linearity** — the exact sum
    rule: `\int (f_1 ± f_2 ± …) dx → \int f_1 dx ± \int f_2 dx ± …`, one
-   unevaluated integral per top-level term (`|…|` never splits). Together
-   these make rational integrands with factored denominators derivable:
-   propose partial fractions, split, solve each piece by substitution +
-   power rule, assemble with `expand`.
+   unevaluated integral per top-level term (`|…|` never splits).
+   **integrate_assemble** is the provenance-closing companion in `do!`:
+   given the linearity ledger step and one completed ledger step per piece,
+   it retrieves those results rather than accepting a retyped sum, checks
+   each derivative against its corresponding integrand, applies the stored
+   signs, and adds one fresh constant. Replay revalidates the source step
+   references. Together these make rational integrands with factored
+   denominators derivable without trusting the agent's final arithmetic:
+   propose partial fractions, split, solve each piece, then assemble the
+   recorded results.
 
 **equal?** additionally compares canonically over *shared opaque atoms*
 when both sides leave the fragment: syntactic atom equality is conclusive

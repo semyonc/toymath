@@ -1250,6 +1250,34 @@ class TestIntegrateLinearity(unittest.TestCase):
         self.assertFalse(r['ok'])
 
 
+class TestIntegrateAssemble(unittest.TestCase):
+    def test_assembles_signed_pieces_and_checks_derivatives(self):
+        r = P.integrate_assemble(
+            '\\int (x - \\sin x) \\, d x', 'x',
+            ['\\frac{1}{2}x^2', '-\\cos x'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['constant'], 'C')
+        self.assertEqual([t['sign'] for t in r['linearity_terms']],
+                         [1, -1])
+        d = P.differentiate(r['result'], 'x')
+        self.assertTrue(d['ok'], d.get('error'))
+        self.assertEqual(P.equal_exprs(d['result'], 'x-\\sin x')['verdict'],
+                         'yes')
+
+    def test_rejects_wrong_piece(self):
+        r = P.integrate_assemble(
+            '\\int (x - \\sin x) \\, d x', 'x',
+            ['\\frac{1}{2}x^2', '\\cos x'])
+        self.assertFalse(r['ok'])
+        self.assertIn('piece 2', r['error'])
+
+    def test_rejects_missing_piece(self):
+        r = P.integrate_assemble('\\int (x+x^2) \\, d x', 'x', ['x^2/2'])
+        self.assertFalse(r['ok'])
+        self.assertIn('expected 2', r['error'])
+
+
 class TestPartialFractionsIntegral(unittest.TestCase):
     def test_reported_integral_full_derivation(self):
         """\\int x^2/(1-x^2)^3 dx - the stress case that motivated
@@ -1264,7 +1292,6 @@ class TestPartialFractionsIntegral(unittest.TestCase):
         r2 = P.integrate_linearity(r1['result'], 'x')
         self.assertTrue(r2['ok'], r2.get('error'))
         self.assertEqual(len(r2['integrals']), 6)
-        signs = [-1, -1, +1, -1, -1, +1]
         pieces = []
         for i, piece in enumerate(r2['integrals']):
             u_expr = '1-x' if i < 3 else '1+x'
@@ -1286,14 +1313,9 @@ class TestPartialFractionsIntegral(unittest.TestCase):
             b = P.substitute(P.expand(z['result'])['result'], 'u', u_expr)
             self.assertTrue(b['ok'], f'piece {i}: {b.get("error")}')
             pieces.append(b['result'])
-        assembled = ' '.join(
-            ('-' if sg < 0 else '+') + f' \\left({pr}\\right) '
-            for sg, pr in zip(signs, pieces)).lstrip('+ ')
-        total = P.expand(assembled)
-        self.assertTrue(total['ok'], total.get('error'))
-        self.assertEqual(total['check']['status'], 'agree')
-        final = P.expand(total['result'] + ' + C')
+        final = P.integrate_assemble(r1['result'], 'x', pieces)
         self.assertTrue(final['ok'], final.get('error'))
+        self.assertEqual(final['check']['status'], 'agree')
         # independent confirmation: d/dx(answer) == integrand, exactly
         d = P.differentiate(final['result'], 'x')
         self.assertTrue(d['ok'], d.get('error'))
