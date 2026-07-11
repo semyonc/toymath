@@ -12,7 +12,7 @@ ledger.
 do! differentiate x^3 - 3x, find where the derivative is zero, plot with those points marked
 ```
 
-<img src="doc/Pic1.png" alt="A do! cell with six checked ledger steps, a sandboxed plot of the critical points, and a chainable result" width="850">
+<img src="docs/Pic1.png" alt="A do! cell with six checked ledger steps, a sandboxed plot of the critical points, and a chainable result" width="850">
 
 ## What is different?
 
@@ -121,10 +121,10 @@ Pick the **Toy Math** kernel. Console mode is also available with
 
 - [Project overview](docs/OVERVIEW.md) — architecture, interfaces, commands,
   setup, testing, and repository map
-- [Verified primitives](doc/PRIMITIVES.md) — trust model, oracle, tactics, and
+- [Verified primitives](docs/PRIMITIVES.md) — trust model, oracle, tactics, and
   ledger format
-- [Notation graph](doc/NOTATION.md) — DAG representation and traversal
-- [Developer guide](CLAUDE.md) — classic engine and extension details
+- [Notation graph](docs/NOTATION.md) — DAG representation and traversal
+- [Developer guide](AGENTS.md) — classic engine and extension details
 
 Run the offline test suite with `pytest`. Live OpenRouter and sandbox probes
 are opt-in; the commands are documented in the project overview.

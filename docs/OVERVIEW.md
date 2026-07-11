@@ -2,7 +2,7 @@
 
 This document is the detailed system tour. For the short statement of what
 makes ToyMath unusual, start with the [README](../README.md). For the exact
-verified-primitive contract, see [PRIMITIVES.md](../doc/PRIMITIVES.md).
+verified-primitive contract, see [PRIMITIVES.md](PRIMITIVES.md).
 
 ## System at a glance
 
@@ -127,7 +127,7 @@ silently converted into equality.
 
 Full details—including opaque atoms, noncommutative matrix words, domain-aware
 checks, and integration verification—are in
-[doc/PRIMITIVES.md](../doc/PRIMITIVES.md).
+[docs/PRIMITIVES.md](PRIMITIVES.md).
 
 ## Named notebook commands
 
@@ -315,8 +315,7 @@ toymath/
 |  |- mathShell.py        notebook cell routing
 |  `- cmd_*.py            classic procedural commands
 |- commands/              solve/int/diff prompt templates
-|- doc/                   primitive and notation internals, images
-|- docs/OVERVIEW.md       this system tour
+|- docs/                  this tour, primitive and notation internals, images
 |- toymath_cli.py         JSON command-line interface
 |- toymathkernel.py       Jupyter kernel entry point
 `- .claude/skills/        agent-facing ToyMath protocol
@@ -324,9 +323,8 @@ toymath/
 
 ## Further documentation
 
-- [Verified primitives](../doc/PRIMITIVES.md)
-- [Notation graph internals](../doc/NOTATION.md)
-- [Developer guide](../CLAUDE.md)
-- [Repository agent guidance](../AGENTS.md)
+- [Verified primitives](PRIMITIVES.md)
+- [Notation graph internals](NOTATION.md)
+- [Developer and agent guide](../AGENTS.md)
 
 ToyMath is released under the MIT License.
