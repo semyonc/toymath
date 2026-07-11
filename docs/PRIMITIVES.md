@@ -46,7 +46,10 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    substituted back — so like terms merge (`2\sin x + 3\sin x → 5 \sin x`),
    cancellations happen, and tactic-chain assemblies finish inside
    the ledger. No new rewrite rules; atom identity ignores transparent
-   grouping (`\sin(x)` ≡ `\sin x`), and function powers enter the
+   grouping (`\sin(x)` ≡ `\sin x`). Exact rational subexpressions
+   inside an opaque atom are canonicalized recursively, so
+   `\ln(4+(x^2)^2)` prints as `\ln(x^4+4)` and shares an atom with that
+   spelling. Function powers enter the
    polynomial layer (`\sin^2 x` is `atom(\sin x)^2`, so
    `(\sin x)^2 - \sin^2 x → 0` and `\sin^2 x \cdot \sin x → \sin^3 x`;
    `\sin^{-1}` keeps its arcsin reading and stays opaque).

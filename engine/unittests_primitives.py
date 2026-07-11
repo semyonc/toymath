@@ -191,6 +191,32 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         r = P.expand('x \\sin x - x \\sin x + 1')
         self.assertEqual(r['result'], '1')
 
+    def test_expand_canonicalizes_rational_function_arguments(self):
+        r = P.expand(
+            r'\frac {{1}} {{2}}x^{{2}}\ln({{4}}+'
+            r'(x^{{{{2}}}})^{{{{2}}}})-x^{{2}}+C+{2}'
+            r'\arctan\left(\frac{(x^{{{{2}}}})}{{{2}}}\right)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(
+            r['result'],
+            r'\frac {1} {2}x^{2} \ln (x^{4}+4)-x^{2}+C'
+            r'+2 \arctan\left ( \frac {1} {2}x^{2} \right )')
+
+    def test_expand_merges_atoms_after_argument_canonicalization(self):
+        r = P.expand(r'\ln(4+(x^2)^2)-\ln(x^4+4)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '0')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_expand_argument_canonicalization_is_idempotent(self):
+        r1 = P.expand(r'\sin(2(x+x))+\sin(4x)')
+        self.assertTrue(r1['ok'])
+        self.assertEqual(r1['check']['status'], 'agree')
+        r2 = P.expand(r1['result'])
+        self.assertTrue(r2['ok'])
+        self.assertEqual(r2['result'], r1['result'])
+
     def test_expand_finishes_by_parts_assembly(self):
         r = P.expand('x \\left(-\\cos\\left(x\\right)\\right) '
                      '- \\left(-\\sin\\left(x\\right) + C\\right)')

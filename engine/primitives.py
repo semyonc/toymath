@@ -1241,13 +1241,68 @@ def _merge_checks(c1, c2):
 # subtrees back. No new rewrite rules - just the trusted canonical core.
 # ---------------------------------------------------------------------------
 
+def _canonicalize_atom_payload(sym, notation, output_notation):
+    """Copy an opaque atom, canonicalizing its rational subexpressions.
+
+    The atom itself remains opaque to the outer polynomial calculation, but
+    exact rational expressions below that boundary should not retain their
+    input spelling.  For example, the argument of
+    ``\ln(4 + (x^2)^2)`` becomes ``x^4 + 4``.  Bracket nodes are retained:
+    they carry either function-argument binding or semantics such as ``|x|``.
+
+    This deliberately uses only the ordinary integer-power rational
+    fragment.  It does not invoke opaque-atom canonicalization recursively or
+    the assumption-bearing Puiseux fold.
+    """
+    if isinstance(sym, Symbol):
+        f = notation.get(sym)
+        if f is not None and f.sym in (Notation.GROUP, Notation.V_GROUP,
+                                       Notation.S_GROUP):
+            args = list(f.args)
+            args[0] = _canonicalize_atom_payload(
+                args[0], notation, output_notation)
+            if len(args) > 1 and isinstance(args[1], (Symbol, Value)):
+                args[1] = _canonicalize_atom_payload(
+                    args[1], notation, output_notation)
+            return output_notation.setf(f.sym, tuple(args), **f.props)
+
+    try:
+        rf = to_ratfunc(sym, notation)
+    except NotInFragment:
+        rf = None
+    if rf is not None:
+        return ratfunc_to_notation(rf, output_notation)
+
+    if not isinstance(sym, Symbol):
+        return sym
+    f = notation.get(sym)
+    if f is None:
+        return sym
+
+    def copy_arg(arg):
+        if isinstance(arg, (Symbol, Value)):
+            return _canonicalize_atom_payload(arg, notation,
+                                               output_notation)
+        if isinstance(arg, tuple):
+            return tuple(copy_arg(a) for a in arg)
+        if isinstance(arg, list):
+            return [copy_arg(a) for a in arg]
+        return arg
+
+    return output_notation.setf(
+        f.sym, tuple(copy_arg(a) for a in f.args), **f.props)
+
+
 class _AtomStore(object):
     def __init__(self):
         self.by_key = {}   # normal-form key -> atom name
         self.exprs = {}    # atom name -> (sym, notation)
 
     def atom(self, sym, notation):
-        latex = _write_std(sym, notation)
+        canonical_n = Notation()
+        canonical_s = _canonicalize_atom_payload(
+            sym, notation, canonical_n)
+        latex = _write_std(canonical_s, canonical_n)
         try:
             # atom identity ignores all transparent grouping, so \sin(x)
             # and \sin x share one atom
@@ -1263,7 +1318,7 @@ class _AtomStore(object):
             # canonical monomials print as x (\sin x), not (\sin x) x
             name = f'zz#a{len(self.exprs)}'
             self.by_key[key] = name
-            self.exprs[name] = (sym, notation)
+            self.exprs[name] = (canonical_s, canonical_n)
         return Symbol(name)
 
     def mapping(self):
