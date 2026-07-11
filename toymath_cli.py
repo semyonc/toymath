@@ -113,6 +113,19 @@ def main(argv=None):
     p.add_argument('u_var')
     p.add_argument('new_integrand')
 
+    p = add_parser('integrate_rewrite',
+                   help='replace the integrand by a verified-equal '
+                        'expression (e.g. partial fractions)')
+    p.add_argument('expr')
+    p.add_argument('var')
+    p.add_argument('new_integrand')
+
+    p = add_parser('integrate_linearity',
+                   help='split the integral of a sum into a sum of '
+                        'integrals (exact)')
+    p.add_argument('expr')
+    p.add_argument('var')
+
     p = add_parser('factor_gcd', help='pull out the common factor')
     p.add_argument('expr')
 
@@ -157,6 +170,11 @@ def main(argv=None):
         res = primitives.integrate_substitute(args.expr, args.var,
                                               args.u_expr, args.u_var,
                                               args.new_integrand)
+    elif args.cmd == 'integrate_rewrite':
+        res = primitives.integrate_rewrite(args.expr, args.var,
+                                           args.new_integrand)
+    elif args.cmd == 'integrate_linearity':
+        res = primitives.integrate_linearity(args.expr, args.var)
     elif args.cmd == 'factor_gcd':
         res = primitives.factor_gcd(args.expr)
     elif args.cmd == 'factor_quadratic':

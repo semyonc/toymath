@@ -96,6 +96,16 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    `f(u(x))·u'(x)` equals the original integrand via `equal?`, and returns
    `\int f(u) du` with a `back_substitute` handle. The `1/x → ln x` rule
    records the assumption `x > 0`.
+10. **integrate_rewrite(new_integrand)** — congruence under the integral
+   sign: the agent proposes an equivalent integrand (typically a
+   partial-fraction decomposition); `equal?` must answer a plain `yes`
+   before the integral is rewritten. The equality is the checked content;
+   the tactic itself adds nothing. **integrate_linearity** — the exact sum
+   rule: `\int (f_1 ± f_2 ± …) dx → \int f_1 dx ± \int f_2 dx ± …`, one
+   unevaluated integral per top-level term (`|…|` never splits). Together
+   these make rational integrands with factored denominators derivable:
+   propose partial fractions, split, solve each piece by substitution +
+   power rule, assemble with `expand`.
 
 **equal?** additionally compares canonically over *shared opaque atoms*
 when both sides leave the fragment: syntactic atom equality is conclusive
@@ -139,7 +149,11 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 - `continues` flags whether a step's input matches the previous result
   (semantic comparison), so branches are visible;
 - `replay` re-runs every step and confirms recorded results — cheap
-  verification of the whole derivation.
+  verification of the whole derivation;
+- `comment` entries are narrative notes the agent leaves between steps
+  ("splitting by partial fractions; now piece 3/6"). They are unverified
+  prose: no input/result, skipped by `replay`, never provenance for a
+  final value, and transparent to `continues` chaining.
 
 ## Known limitations
 

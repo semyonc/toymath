@@ -1803,7 +1803,7 @@ def _diff(sym, notation, var):
             return s, '1'
         return s, '0'
     op = f.sym
-    if op == Notation.GROUP:
+    if op in (Notation.GROUP, Notation.V_GROUP):
         if f.props.get('br') == '||':
             raise PrimitiveError(
                 'cannot differentiate absolute value (not in the rule set)')
@@ -2029,19 +2029,30 @@ def _derivative_check(expr, deriv, var, samples=8, seed=20260705):
         env = _sample_point(variables, rng)
         try:
             d_sym = numeric_eval(s2, n2, env)
-            env_p = dict(env)
-            env_m = dict(env)
-            env_p[var] = env[var] + h
-            env_m[var] = env[var] - h
-            f_p = numeric_eval(s1, n1, env_p)
-            f_m = numeric_eval(s1, n1, env_m)
+            f_vals = []
+            for step in (h, -h, h / 2, -h / 2):
+                env_s = dict(env)
+                env_s[var] = env[var] + step
+                f_vals.append(numeric_eval(s1, n1, env_s))
         except (EvalError, ZeroDivisionError, ValueError, OverflowError):
             continue
-        if any(isinstance(v, list) for v in (d_sym, f_p, f_m)):
+        if isinstance(d_sym, list) or any(isinstance(v, list)
+                                          for v in f_vals):
             continue   # matrix-valued: central differences not supported
-        d_num = (f_p - f_m) / (2 * h)
+        f_p, f_m, f_p2, f_m2 = f_vals
+        d_h = (f_p - f_m) / (2 * h)
+        d_h2 = (f_p2 - f_m2) / h
+        # Richardson extrapolation kills the O(h^2) truncation term;
+        # |d_h - d_h2| estimates the truncation error, which explodes near
+        # a singularity of f - there the central difference itself is
+        # wrong, and a non-converged estimate is oracle ignorance, never
+        # a counterexample
+        d_num = (4 * d_h2 - d_h) / 3
+        err_est = abs(d_h - d_h2) / 3
         scale = max(1.0, abs(d_sym), abs(d_num))
         if abs(d_sym - d_num) / scale > 1e-4:
+            if abs(d_sym - d_num) <= 16 * err_est:
+                continue   # numeric estimate has not converged: skip point
             return {'status': 'disagree', 'point': env,
                     'symbolic': d_sym, 'numeric': d_num}
         agreed += 1
@@ -2928,8 +2939,11 @@ def integrate_substitute(expr, var, u_expr, u_var, new_integrand):
             'integrate_substitute', args,
             f'new_integrand[{u_var} := {u_expr}] * du/d{var} does not '
             f'equal the integrand (verdict: {eq.get("verdict", "error")})')
-    body = _paren(new_integrand) if _is_sum_str(new_integrand) \
-        else new_integrand
+    # a leading minus would parse as `\int` minus the rest, not as a
+    # negative integrand - parenthesize sums and negatives alike
+    body = new_integrand.strip()
+    if _is_sum_str(body) or body.startswith('-'):
+        body = _paren(body)
     result = f'\\int {body} \\, d {u_var}'
     try:
         parse_latex(result)
@@ -2950,6 +2964,93 @@ def integrate_substitute(expr, var, u_expr, u_var, new_integrand):
     if rec['check'].get('status') == 'agree':
         rec['check']['method'] = check['method']
     return rec
+
+
+def integrate_rewrite(expr, var, new_integrand):
+    """Congruence under the integral sign: replace the integrand with an
+    agent-proposed expression that equal? confirms is the same function
+    (e.g. a partial-fraction decomposition). The equality is the checked
+    content; the integral wrapper is carried along unchanged."""
+    args = {'expr': expr, 'var': var, 'new_integrand': new_integrand}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+        parse_latex(new_integrand)
+    except PrimitiveError as e:
+        return _error('integrate_rewrite', args, str(e))
+    eq = equal_exprs(new_integrand, integrand_latex)
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('integrate_rewrite', args,
+                      f'new integrand is not mechanically equal to the '
+                      f'current one (verdict: '
+                      f'{eq.get("verdict", "error")})')
+    # a leading minus would parse as `\int` minus the rest, not as a
+    # negative integrand - parenthesize sums and negatives alike
+    body = new_integrand.strip()
+    if _is_sum_str(body) or body.startswith('-'):
+        body = _paren(body)
+    result = f'\\int {body} \\, d {var}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_rewrite', args,
+                      f'internal: unparseable result: {e}')
+    rec = _result('integrate_rewrite', args, expr, result,
+                  extra={'integrand': integrand_latex})
+    check = {'status': 'agree',
+             'method': f'integrand equality via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    rec['check'] = check
+    return rec
+
+
+def integrate_linearity(expr, var):
+    """Sum rule: split the integral of a top-level sum into a signed sum
+    of integrals, one per term. Purely structural, hence exact; constant
+    factors stay inside their sub-integrals."""
+    args = {'expr': expr, 'var': var}
+    try:
+        sym, notation, integrand_latex = _integrand(expr, var)
+    except PrimitiveError as e:
+        return _error('integrate_linearity', args, str(e))
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
+                                 Notation.S_GROUP])
+        # |...| groups are absolute values, not transparent brackets
+        if g is None or g.props.get('br') == '||':
+            break
+        sym = g.args[0]
+    f = notation.getf(sym, Notation.S_LIST)
+    if f is None:
+        return _error('integrate_linearity', args,
+                      'integrand is not a top-level sum; nothing to '
+                      'split')
+    parts = []
+    for t in f.args:
+        sign = notation.vgetf(t, [Notation.PLUS, Notation.MINUS])
+        if sign is not None:
+            inner = sign.args[0]
+            neg = sign.sym == Notation.MINUS
+        else:
+            inner = t
+            neg = False
+        body = write_latex(inner, notation)
+        if _is_sum_str(body) or body.lstrip().startswith('-'):
+            body = _paren(body)
+        parts.append(('-' if neg else '+', f'\\int {body} \\, d {var}'))
+    pieces = [p for _, p in parts]
+    result = ('-' if parts[0][0] == '-' else '') + parts[0][1]
+    for sgn, piece in parts[1:]:
+        result += f' {sgn} {piece}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_linearity', args,
+                      f'internal: unparseable result: {e}')
+    return _result('integrate_linearity', args, expr, result,
+                   check={'status': 'exact',
+                          'method': 'linearity of the integral'},
+                   extra={'integrals': pieces})
 
 
 # ---------------------------------------------------------------------------

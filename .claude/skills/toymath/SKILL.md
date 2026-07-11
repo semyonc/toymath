@@ -35,6 +35,8 @@ it appends each verified step to a replayable ledger.
 | `integrate_table EXPR VAR` | `integrate_table "2\cos x" x` | sin, cos, e^x, sinh, cosh, `1/x`→`ln x` (records `x > 0`); closed under sums and constant factors |
 | `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |
 | `integrate_substitute EXPR VAR U_EXPR U_VAR NEW_INTEGRAND` | `integrate_substitute "2x \cos(x^2)" x "x^2" u "\cos(u)"` | u-substitution: you supply u and the integrand rewritten in u; toymath verifies `f(u(x))·u'(x)` equals the integrand and returns `\int f(u) du`; back-substitute with `substitute` after integrating |
+| `integrate_rewrite EXPR VAR NEW_INTEGRAND` | `integrate_rewrite "\frac{x^2}{(1-x^2)^3}" x "<partial fractions>"` | congruence under the integral sign: you propose an equivalent integrand (partial fractions, algebraic massage); toymath verifies the two integrands are mechanically equal, then rewrites the integral |
+| `integrate_linearity EXPR VAR` | `integrate_linearity "\int (x + \sin x) \, dx" x` | exact sum rule: split the integral of a top-level sum into a signed sum of integrals; attack each piece separately, assemble with `expand` |
 | `factor_gcd EXPR` | `factor_gcd "6x^2+9x=3"` | pull out common factors on applicable expression/relation sides → `3x(2x+3)=3` |
 | `factor_quadratic EXPR VAR` | `factor_quadratic "x^2+6x+9=4" x` | rational-root factorization on applicable expression/relation sides → `(x+3)^2=4`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown. A `no` with method `domain mismatch` means the sides agree in value but one is defined where the other is not (`\ln(x^2)` vs `2\ln x`) — equality may hold on a restricted domain; a `yes` may carry a `note` that it was checked only on the common domain |
@@ -73,6 +75,14 @@ python toymath_cli.py equal "<that derivative>" "x \sin x"    # -> yes
 Antiderivatives carry `+ C` (a fresh symbol, reported as `constant`); the
 oracle checks them by central-difference differentiation against the
 integrand.
+
+For rational integrands beyond a single power in the denominator
+(e.g. `\int \frac{x^2}{(1-x^2)^3} dx`): propose the partial-fraction
+decomposition yourself and let `integrate_rewrite` verify it, split with
+`integrate_linearity`, then per piece use `integrate_substitute`
+(u = the linear factor) + `integrate_power_rule`/`integrate_table` +
+`substitute` back. Pin each piece's constant to 0 with `substitute`
+(`C := 0`) so the pieces assemble cleanly, and add one `+ C` at the end.
 
 ## Matrices and vectors (literal, phase 1)
 

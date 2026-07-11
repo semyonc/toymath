@@ -7,6 +7,7 @@ from notation import Notation, Symbol
 from LatexParser import MathParser
 from processor import MathProcessor
 from LatexWriter import LaTexWriter
+from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
 import prompt_commands
@@ -193,6 +194,9 @@ class MathShell(object):
                  'disagree': 'XX'}
 
     def render_do_step(self, step):
+        if step['op'] == 'comment':
+            return (f"<div style=\"color:#666\"><code>{step['id']}</code> "
+                    f"<em>{_html.escape(step['args']['text'])}</em></div>")
         check = step['check'].get('status', '?')
         mark = self._DO_MARKS.get(check, '?')
         style = ' style="color:#c00"' if mark in ('XX', '?') else ''
@@ -356,8 +360,14 @@ class MathShell(object):
 
     def output(self, outsym, notation, execution_count, add_to_history):
         if add_to_history:
+            # snapshot into a private graph: parser.parse() clears
+            # parsedNotation in place, which would strand the stored symbol
+            # and make later [[n]] references print its raw name (_nNN)
+            snapshot = Notation()
+            outsym = Replicator(notation, snapshot)(outsym)
+            notation = snapshot
             self.execution_history[str(execution_count)] = outsym
-            self.history[outsym] = notation
+            self.history[outsym] = snapshot
         writer = LaTexWriter(notation, show_quotes=self.show_quotes)
         result = writer(outsym)
         return result

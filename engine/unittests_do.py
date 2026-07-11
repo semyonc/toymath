@@ -119,6 +119,19 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(session.result_override, 'x = 2')  # kept
         self.assertEqual(session.new_steps(), [])  # never a ledger step
 
+    def test_comment_streamed_but_not_transforming(self):
+        seen = []
+        session = DoSession(on_step=seen.append)
+        api = make_api(session)
+        rec = json.loads(api['comment']('strategy: partial fractions'))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['id'], 's1')
+        self.assertEqual(seen[0]['op'], 'comment')
+        # a note is not provenance: the run is still query-only
+        res = json.loads(api['set_result']('x = 2'))
+        self.assertEqual(res['provenance']['status'], 'unverified')
+        self.assertFalse(json.loads(api['comment']('  '))['ok'])
+
     def test_set_result_rejects_detached_conclusion(self):
         session = DoSession()
         api = make_api(session)
@@ -222,6 +235,22 @@ class TestScriptedAgent(unittest.TestCase):
         ]
         res = run_instruction('try to invent a result',
                               model=ScriptedModel(script))
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['step'], 's1')
+
+    def test_trailing_comment_does_not_eat_the_final(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('comment', {'text': 'done expanding'}, 'c2')],
+            [message('Expanded the square.')],
+        ]
+        res = run_instruction('expand and annotate',
+                              model=ScriptedModel(script))
+        self.assertTrue(res['ok'])
+        # the note is streamed as a step but the chainable value is the
+        # last transforming result
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['expand', 'comment'])
         self.assertEqual(res['final_result'], 'x^{2}+2x+1')
         self.assertEqual(res['final_provenance']['step'], 's1')
 
@@ -385,6 +414,16 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('5', text)
         with self.assertRaises(ValueError):
             self.shell.resolve_backrefs('[[99]]')
+
+    def test_backref_survives_later_parses(self):
+        # parser.parse() clears parsedNotation in place; the stored history
+        # snapshot must not be affected (regression: [[n]] printed _nNN)
+        sym = self.shell.parser.parse('x^{2}+1')
+        self.shell.output(sym, self.shell.parsedNotation, 7, True)
+        self.shell.parser.parse('y')
+        text = self.shell.resolve_backrefs('[[7]]')
+        self.assertNotIn('textit', text)
+        self.assertIn('x^', text)
 
     def test_do_cell_streams_and_chains(self):
         with mock.patch.object(agent_do, 'build_model',

@@ -22,7 +22,7 @@ TRANSFORMING_OPS = frozenset({
     'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
     'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
     'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
-    'integrate_substitute'})
+    'integrate_substitute', 'integrate_rewrite', 'integrate_linearity'})
 
 
 def _step_hash(op, input_latex, result_latex):
@@ -57,17 +57,16 @@ class Ledger(object):
             raise ValueError('only successful results are recorded')
         n = len(self.steps) + 1
         continues = None
-        if self.steps:
-            prev = self.steps[-1]['result']
-            cur = result.get('input')
-            if prev is not None and cur is not None:
-                if prev == cur:
-                    continues = True
-                else:
-                    import primitives
-                    eq = primitives.equal_exprs(prev, cur)
-                    continues = (eq.get('verdict') == 'yes'
-                                 if eq.get('ok') else None)
+        prev = self.last_result()
+        cur = result.get('input')
+        if prev is not None and cur is not None:
+            if prev == cur:
+                continues = True
+            else:
+                import primitives
+                eq = primitives.equal_exprs(prev, cur)
+                continues = (eq.get('verdict') == 'yes'
+                             if eq.get('ok') else None)
         step = {
             'id': f's{n}',
             'continues': continues,
@@ -86,6 +85,28 @@ class Ledger(object):
                 self.assumptions.append(a)
         return step
 
+    def record_comment(self, text):
+        """Append a narrative note. Notes are unverified prose: they carry
+        no input/result, are skipped by replay, and never count as
+        provenance for a final result."""
+        text = (text or '').strip()
+        if not text:
+            raise ValueError('empty comment')
+        n = len(self.steps) + 1
+        step = {
+            'id': f's{n}',
+            'continues': None,
+            'hash': _step_hash('comment', '', text),
+            'op': 'comment',
+            'args': {'text': text},
+            'input': None,
+            'result': None,
+            'assumptions': [],
+            'check': {'status': 'note'},
+        }
+        self.steps.append(step)
+        return step
+
     def save(self, path=None):
         path = path or self.path
         if not path:
@@ -95,9 +116,10 @@ class Ledger(object):
         self.path = path
 
     def last_result(self):
-        if not self.steps:
-            return None
-        return self.steps[-1]['result']
+        for step in reversed(self.steps):
+            if step.get('result') is not None:
+                return step['result']
+        return None
 
     def replay(self):
         """Re-run every step through its primitive and confirm the recorded
@@ -128,8 +150,14 @@ class Ledger(object):
                 lambda a: primitives.integrate_substitute(
                     a['expr'], a['var'], a['u_expr'], a['u_var'],
                     a['new_integrand']),
+            'integrate_rewrite': lambda a: primitives.integrate_rewrite(
+                a['expr'], a['var'], a['new_integrand']),
+            'integrate_linearity': lambda a: primitives.integrate_linearity(
+                a['expr'], a['var']),
         }
         for step in self.steps:
+            if step['op'] == 'comment':
+                continue
             fn = dispatch.get(step['op'])
             if fn is None:
                 return {'status': 'failed', 'step': step['id'],
@@ -167,6 +195,11 @@ class Ledger(object):
                                      for a in self.assumptions))
             lines.append('')
         for step in self.steps:
+            if step['op'] == 'comment':
+                lines.append(f"**{step['id']}** *note* — "
+                             f"{step['args']['text']}")
+                lines.append('')
+                continue
             check = step['check'].get('status', '?')
             mark = self._MARKS.get(check, check)
             branch = ('' if step.get('continues') in (True, None)
@@ -197,6 +230,10 @@ class Ledger(object):
         """Terse human/agent-readable summary of the derivation."""
         lines = []
         for step in self.steps:
+            if step['op'] == 'comment':
+                lines.append(f"{step['id']}#{step['hash']} [--] note: "
+                             f"{step['args']['text']}")
+                continue
             check = step['check'].get('status', '?')
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
                     'disagree': 'XX', 'domain-differs': 'D!'}.get(check, '?')

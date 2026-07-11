@@ -32,7 +32,7 @@ OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
 MODEL_VAR = 'OPENROUTER_MODEL'
 DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
-DEFAULT_MAX_TURNS = 24
+DEFAULT_MAX_TURNS = 48
 
 _SKILL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -81,6 +81,13 @@ _DO_RULES = """
   an unverified result as the answer.
 - For equations, confirm candidate solutions with substitute + evaluate
   when that is cheap.
+- In long derivations, use `comment` to annotate the ledger: the strategy
+  you are starting, which piece of a split you are on, why you branch.
+  Notes are unverified prose - never a step, never a result.
+- For integrals beyond the direct tactics: propose an equivalent integrand
+  (e.g. partial fractions) with `integrate_rewrite` (it is verified
+  mechanically), split sums with `integrate_linearity`, solve each piece,
+  then assemble the pieces with `expand`.
 """
 
 _PLOT_RULES = """
@@ -166,6 +173,14 @@ class DoSession(object):
     def new_steps(self):
         return self.ledger.steps[self.start:]
 
+    def comment(self, text):
+        """Append a narrative note to the ledger and stream it."""
+        with self._lock:
+            step = self.ledger.record_comment(text)
+            if self.on_step is not None:
+                self.on_step(step)
+        return step
+
     def designate_result(self, expr):
         """Select a chainable value without letting the agent invent a
         detached conclusion.
@@ -179,7 +194,10 @@ class DoSession(object):
         """
         with self._lock:
             steps = list(self.ledger.steps)
-            has_new_steps = len(steps) > self.start
+            # notes are not transforming steps: a comment-only run still
+            # counts as query-only
+            has_new_steps = any(s.get('result') is not None
+                                for s in steps[self.start:])
         for step in reversed(steps):
             established = step.get('result')
             if not established:
@@ -334,6 +352,46 @@ def make_api(session):
         return _run(primitives.integrate_substitute, expr, var, u_expr,
                     u_var, new_integrand)
 
+    def integrate_rewrite(expr: str, var: str, new_integrand: str) -> str:
+        """Replace the integrand with an expression YOU propose (e.g. a
+        partial-fraction decomposition); toymath verifies the two
+        integrands are mechanically equal before rewriting the integral.
+
+        Args:
+            expr: LaTeX integrand or \\int ... dx expression.
+            var: integration variable.
+            new_integrand: equivalent integrand, LaTeX.
+        """
+        return _run(primitives.integrate_rewrite, expr, var, new_integrand)
+
+    def integrate_linearity(expr: str, var: str) -> str:
+        """Split the integral of a top-level sum into a signed sum of
+        integrals, one per term (exact sum rule); attack each resulting
+        integral separately, then assemble the pieces with expand.
+
+        Args:
+            expr: LaTeX integrand or \\int ... dx expression whose
+                integrand is a sum.
+            var: integration variable.
+        """
+        return _run(primitives.integrate_linearity, expr, var)
+
+    def comment(text: str) -> str:
+        """Add a short narrative note to the ledger (strategy, which piece
+        you are working on, why you branch). Notes are unverified prose:
+        never a transforming step, never a final result.
+
+        Args:
+            text: one or two plain-text sentences.
+        """
+        try:
+            step = session.comment(text)
+        except ValueError as e:
+            return json.dumps({'ok': False, 'op': 'comment',
+                               'error': str(e)}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'comment', 'id': step['id']},
+                          ensure_ascii=False)
+
     def factor_gcd(expr: str) -> str:
         """Pull common factors from a sum or applicable relation sides,
         e.g. 6x^2+9x=3 -> 3x(2x+3)=3.
@@ -424,8 +482,9 @@ def make_api(session):
 
     fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
            integrate_power_rule, integrate_table, integrate_by_parts,
-           integrate_substitute, factor_gcd, factor_quadratic, equal,
-           lemmas, set_result]
+           integrate_substitute, integrate_rewrite, integrate_linearity,
+           factor_gcd, factor_quadratic, equal, lemmas, comment,
+           set_result]
     if session.plot_backend is not None:
         fns.append(plot)
     return {f.__name__: f for f in fns}
@@ -496,14 +555,16 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     t.join()
 
     steps = session.new_steps()
+    last_transform = next((s for s in reversed(steps)
+                           if s.get('result') is not None), None)
     if session.result_override is not None:
         final = session.result_override
         provenance = session.result_provenance
-    elif steps:
-        final = steps[-1]['result']
+    elif last_transform is not None:
+        final = last_transform['result']
         provenance = {
             'status': 'verified', 'source': 'ledger',
-            'step': steps[-1]['id'], 'method': 'exact-result',
+            'step': last_transform['id'], 'method': 'exact-result',
         }
     else:
         final = None

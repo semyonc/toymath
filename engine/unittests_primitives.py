@@ -1193,5 +1193,181 @@ class TestSubscriptedVariables(unittest.TestCase):
         self.assertEqual(r['verdict'], 'unknown')
 
 
+class TestIntegrateRewrite(unittest.TestCase):
+    def test_equal_integrand_accepted(self):
+        r = P.integrate_rewrite(
+            '\\int \\frac{1}{1-x^2} \\, d x', 'x',
+            '\\frac{1}{2(1-x)} + \\frac{1}{2(1+x)}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\int', r['result'])
+        self.assertIn('equal?', r['check']['method'])
+
+    def test_unequal_integrand_refused(self):
+        r = P.integrate_rewrite('\\frac{1}{1-x^2}', 'x',
+                                '\\frac{1}{1-x}')
+        self.assertFalse(r['ok'])
+        self.assertIn('not mechanically equal', r['error'])
+
+    def test_negative_integrand_stays_consumable(self):
+        # a leading minus must be parenthesized, or the result parses as
+        # `\int` minus the rest and downstream tactics cannot strip it
+        r = P.integrate_rewrite('-\\frac{2}{x^{2}}', 'x',
+                                '-\\frac{2}{x^{2}}')
+        self.assertTrue(r['ok'], r.get('error'))
+        nxt = P.integrate_power_rule(r['result'], 'x')
+        self.assertTrue(nxt['ok'], nxt.get('error'))
+
+    def test_substitute_negative_integrand_stays_consumable(self):
+        # same emit rule for integrate_substitute (regression: it used to
+        # produce `\int -\frac{1}{16u} \, d u`)
+        r = P.integrate_substitute('\\frac{1}{16(1-x)}', 'x', '1-x', 'u',
+                                   '-\\frac{1}{16u}')
+        self.assertTrue(r['ok'], r.get('error'))
+        nxt = P.integrate_table(r['result'], 'u')
+        self.assertTrue(nxt['ok'], nxt.get('error'))
+
+
+class TestIntegrateLinearity(unittest.TestCase):
+    def test_splits_signed_sum(self):
+        r = P.integrate_linearity('\\int (x^2 - \\sin x + 3) \\, d x', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'exact')
+        self.assertEqual(len(r['integrals']), 3)
+        self.assertEqual(r['result'].count('\\int'), 3)
+        # every piece is independently attackable
+        for piece in r['integrals']:
+            P.parse_latex(piece)
+
+    def test_refuses_non_sum(self):
+        r = P.integrate_linearity('\\int x^2 \\, d x', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('not a top-level sum', r['error'])
+
+    def test_abs_is_not_a_sum(self):
+        # |...| is an absolute value, never a transparent bracket
+        r = P.integrate_linearity('\\int \\left|x+1\\right| \\, d x', 'x')
+        self.assertFalse(r['ok'])
+
+
+class TestPartialFractionsIntegral(unittest.TestCase):
+    def test_reported_integral_full_derivation(self):
+        """\\int x^2/(1-x^2)^3 dx - the stress case that motivated
+        integrate_rewrite + integrate_linearity: every step verified,
+        final answer confirmed by exact differentiation."""
+        I = '\\int \\frac{x^2}{(1-x^2)^3} \\, d x'
+        pf = ('-\\frac{1}{16(1-x)} - \\frac{1}{16(1-x)^2} '
+              '+ \\frac{1}{8(1-x)^3} - \\frac{1}{16(1+x)} '
+              '- \\frac{1}{16(1+x)^2} + \\frac{1}{8(1+x)^3}')
+        r1 = P.integrate_rewrite(I, 'x', pf)
+        self.assertTrue(r1['ok'], r1.get('error'))
+        r2 = P.integrate_linearity(r1['result'], 'x')
+        self.assertTrue(r2['ok'], r2.get('error'))
+        self.assertEqual(len(r2['integrals']), 6)
+        signs = [-1, -1, +1, -1, -1, +1]
+        pieces = []
+        for i, piece in enumerate(r2['integrals']):
+            u_expr = '1-x' if i < 3 else '1+x'
+            du = -1 if i < 3 else 1
+            coeff = 16 if i in (0, 1, 3, 4) else 8
+            pw = [1, 2, 3][i % 3]
+            mono = 'u' if pw == 1 else f'u^{{{pw}}}'
+            new_i = (f'-\\frac{{1}}{{{coeff}{mono}}}' if du < 0
+                     else f'\\frac{{1}}{{{coeff}{mono}}}')
+            s = P.integrate_substitute(piece, 'x', u_expr, 'u', new_i)
+            self.assertTrue(s['ok'], f'piece {i}: {s.get("error")}')
+            if pw == 1:
+                t = P.integrate_table(s['result'], 'u')
+            else:
+                t = P.integrate_power_rule(s['result'], 'u')
+            self.assertTrue(t['ok'], f'piece {i}: {t.get("error")}')
+            z = P.substitute(t['result'], t['constant'], '0')
+            self.assertTrue(z['ok'], f'piece {i}: {z.get("error")}')
+            b = P.substitute(P.expand(z['result'])['result'], 'u', u_expr)
+            self.assertTrue(b['ok'], f'piece {i}: {b.get("error")}')
+            pieces.append(b['result'])
+        assembled = ' '.join(
+            ('-' if sg < 0 else '+') + f' \\left({pr}\\right) '
+            for sg, pr in zip(signs, pieces)).lstrip('+ ')
+        total = P.expand(assembled)
+        self.assertTrue(total['ok'], total.get('error'))
+        self.assertEqual(total['check']['status'], 'agree')
+        final = P.expand(total['result'] + ' + C')
+        self.assertTrue(final['ok'], final.get('error'))
+        # independent confirmation: d/dx(answer) == integrand, exactly
+        d = P.differentiate(final['result'], 'x')
+        self.assertTrue(d['ok'], d.get('error'))
+        eq = P.equal_exprs(d['result'], '\\frac{x^2}{(1-x^2)^3}')
+        self.assertEqual(eq['verdict'], 'yes')
+        self.assertIn('canonical', eq['method'])
+
+
+class TestVGroupDifferentiate(unittest.TestCase):
+    def test_left_right_parens_are_transparent(self):
+        r = P.differentiate('\\ln\\left(1-x\\right)', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_abs_vgroup_still_refused(self):
+        r = P.differentiate('\\left|x\\right|', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('absolute value', r['error'])
+
+
+class TestDerivativeCheckNearPoles(unittest.TestCase):
+    def test_truncation_error_is_not_a_counterexample(self):
+        # near x = -1 the central difference of 1/(1+x)^2-shaped terms is
+        # dominated by truncation error; a correct symbolic derivative
+        # must not be reported as disagree (a live agent redid 17 steps
+        # over this)
+        c = P._derivative_check('\\frac{1}{(1+x)^2}',
+                                '-\\frac{2}{(1+x)^3}', 'x')
+        self.assertEqual(c['status'], 'agree')
+
+    def test_wrong_derivative_still_caught_near_pole(self):
+        c = P._derivative_check('\\ln\\left(1-x\\right)',
+                                '\\frac{1}{1-x}', 'x')  # sign is wrong
+        self.assertEqual(c['status'], 'disagree')
+
+    def test_wrong_derivative_still_caught(self):
+        c = P._derivative_check('x^3', '2x^2', 'x')
+        self.assertEqual(c['status'], 'disagree')
+
+
+class TestLedgerComment(unittest.TestCase):
+    def test_note_is_transparent_to_the_chain(self):
+        ledger = Ledger()
+        r1 = P.apply_both_sides('2x + 3 = 7', '-', '3')
+        ledger.record(r1)
+        note = ledger.record_comment('now tidy both sides')
+        self.assertEqual(note['op'], 'comment')
+        self.assertIsNone(note['result'])
+        r2 = P.expand(r1['result'])
+        step = ledger.record(r2)
+        # continuity is judged against the last real result, not the note
+        self.assertTrue(step['continues'])
+        self.assertEqual(ledger.last_result(), r2['result'])
+
+    def test_replay_skips_notes(self):
+        ledger = Ledger()
+        ledger.record_comment('plan: expand the square')
+        ledger.record(P.expand('(x+1)^2'))
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified')
+
+    def test_renderings_show_notes(self):
+        ledger = Ledger()
+        ledger.record_comment('strategy: partial fractions')
+        self.assertIn('note: strategy: partial fractions',
+                      ledger.render())
+        self.assertIn('strategy: partial fractions',
+                      ledger.render_markdown())
+
+    def test_empty_note_refused(self):
+        ledger = Ledger()
+        with self.assertRaises(ValueError):
+            ledger.record_comment('   ')
+
+
 if __name__ == '__main__':
     unittest.main()
