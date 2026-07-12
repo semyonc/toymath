@@ -234,14 +234,28 @@ class MathParser(object):
            f.args.insert(0, p[1])
            p[0] = p[2]
 
+     def p_expr_list_list_sep(self, p):
+        '''expression-list : expression '*' expression-list
+                           | expression cdot expression-list'''
+        # '*' and \cdot are explicit product separators: they build the
+        # same P_LIST as juxtaposition, so chains work (a \cdot b \cdot c).
+        # An explicit \cdot additionally marks the product as notation
+        # (props['cdot']): the writer restores the dots and the legacy
+        # calculator must not fold its numeric factors (1 \cdot 2 in a
+        # series term stays 1 \cdot 2, never 2).
+        f = self.notation.getf(p[3], Notation.P_LIST)
+        if f is None:
+           p[0] = self.notation.setf(Notation.P_LIST, [p[1],p[3]])
+           f = self.notation.getf(p[0], Notation.P_LIST)
+        else:
+           f.args.insert(0, p[1])
+           p[0] = p[3]
+        if p.slice[2].type == 'cdot':
+           f.props['cdot'] = True
+
      def p_composite_expr_slash(self, p):
         '''composite-expr : expression '/' expression'''
         p[0] = self.notation.setf(Notation.SLASH,(p[1],p[3]))
-
-     def p_composite_expr_star(self, p):
-        '''composite-expr : expression '*' expression
-                          | expression cdot expression'''
-        p[0] = self.notation.setf(Notation.STAR,(p[1],p[3]))
 
 
      def p_expression(self, p):
@@ -271,6 +285,15 @@ class MathParser(object):
      def p_index_expr_superscript(self, p):
         '''index-expr : '^' scalar '''
         p[0] = (p[2], None)
+
+     def p_index_expr_approach_direction(self, p):
+        '''index-expr : '^' additive
+                      | '^' '{' additive '}' '''
+        # A bare +/- superscript is not an arithmetic expression: in
+        # ``\lim_{x \to a^+}`` it is an approach-direction marker.  Keep
+        # it as a raw symbol in the power slot so the ordinary index writer
+        # round-trips both braced and unbraced input.
+        p[0] = (p[2] if len(p) == 3 else p[3], None)
 
      def p_index_expr_superscript_subscript(self, p):
         '''index-expr : '^' scalar '_' scalar '''
@@ -442,7 +465,9 @@ class MathParser(object):
          p[0] = self.notation.setf(Notation.FUNC, (index_expr, p[5]), fmt='operatorname')
 
      def p_scalar_array(self, p):
-         '''scalar : array '{' row-list '}' '''
+         '''scalar : array '{' row-list '}'
+                   | pmatrix '{' row-list '}'
+                   | matrix '{' row-list '}' '''
          p[0] = self.notation.setf(Symbol(p[1]), p[3])
 
      def p_scalar_cases(self, p):

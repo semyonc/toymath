@@ -1,14 +1,28 @@
 # -*- coding: utf-8 -*-
 
+import html as _html
+import re
+
 from notation import Notation, Symbol
 from LatexParser import MathParser
 from processor import MathProcessor
 from LatexWriter import LaTexWriter
+from replicator import Replicator
 from prolog import PrologModel
+from ledger import Ledger
+import prompt_commands
 
 from IPython.display import HTML, Javascript
 from engine import display
 
+BACKREF_RE = re.compile(r'\[\[\s*(\d+)\s*\]\]')
+# a cell that starts with `name!` (letter/underscore start) may be a
+# prompt-command; only a *registered* name diverts, so math like `n! + 1`
+# (factorial) still parses normally
+CMD_PREFIX_RE = re.compile(r'^([A-Za-z_]\w*)!')
+# any `name!` token anywhere in a cell — used to spot an inline expr command
+# ({diff! {int! x^3}}); the registry check filters out factorials
+EXPR_TOKEN_RE = re.compile(r'([A-Za-z_][\w-]*)!')
 
 def split_lines(self, code):
     bracket = 0
@@ -45,6 +59,11 @@ class MathShell(object):
         self.trace_mode = False
         self.trace_output = None
         self.show_quotes = False
+        # notebook-wide derivation ledger fed by do! cells
+        self.ledger = Ledger()
+        # discoverable do!-style commands from the repo commands/ directory;
+        # commands! reloads this registry so newly-added files go live
+        self.commands = prompt_commands.load_commands()
 
     def trace_step(self, sym, notation, index):
         if self.trace:
@@ -69,10 +88,71 @@ class MathShell(object):
         self.show_quotes = show_quotes
 
     def exec(self, code, execution_count, add_to_history=False, cell_id=None):
+        stripped = code.strip()
+        m = CMD_PREFIX_RE.match(stripped)
+        if m and self.dispatch_command(m.group(1), stripped[m.end():].strip(),
+                                       execution_count, add_to_history):
+            return
+        if self.has_expr_command(stripped):
+            self.exec_composite(stripped, execution_count, add_to_history)
+            return
         lines = [line for line in split_lines(self, code)]
         for index, line in enumerate(lines):
             last = index == len(lines) - 1
             self.exec_stmt(line, execution_count, add_to_history and last, last)
+
+    def dispatch_command(self, name, rest, execution_count, add_to_history):
+        """Handle a `name!` cell prefix. Returns True when it was a command
+        (do!, a registered prompt-command, or the commands!/help! listing),
+        False when `name` is not a command so the cell is ordinary math
+        (e.g. `n!` factorial)."""
+        if name in ('commands', 'help'):
+            self.show_commands()
+            return True
+        if name == 'do':
+            # the free-form agent endpoint: rest is the instruction verbatim
+            self.exec_do(rest, execution_count, add_to_history)
+            return True
+        cmd = self.commands.get(name)
+        if cmd is None:
+            return False
+        if cmd.expr:
+            # an expr command composes inline; let exec_composite handle it
+            # (even whole-cell `int! x^3`) so behaviour is uniform
+            return False
+        if not rest:
+            self._do_error(f'{name}! needs an argument')
+            return True
+        instruction = prompt_commands.render(cmd, rest)
+        proof_goal = rest if cmd.mode == 'prove' else None
+        self.exec_do(instruction, execution_count, add_to_history,
+                     proof_goal=proof_goal)
+        return True
+
+    def has_expr_command(self, text):
+        """True when the cell contains a registered expr command anywhere,
+        so it must be evaluated as a composite expression."""
+        return any(name in self.commands and self.commands[name].expr
+                   for name in EXPR_TOKEN_RE.findall(text))
+
+    def show_commands(self):
+        """Render the discoverable command list. Reloads the registry first
+        so a newly-added commands/*.md file goes live without a restart."""
+        self.commands = prompt_commands.load_commands()
+        rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
+                f'<code>{_html.escape(c.name)}!</code></td>'
+                f'<td style="color:#444">{_html.escape(c.description)}'
+                + (f' <code>[direct: {_html.escape(c.direct)}]</code>'
+                   if c.direct else '')
+                + '</td></tr>'
+                for c in sorted(self.commands.values())]
+        table = ('<table>' + ''.join(rows) + '</table>') if rows else (
+            '<div style="color:#888">no commands defined yet '
+            '(add <code>commands/&lt;name&gt;.md</code> files)</div>')
+        display(HTML('<div><b>notebook commands</b>' + table
+                     + '<div style="color:#888;margin-top:4px">plus '
+                     '<code>do!</code> (free-form instruction) and '
+                     '<code>commands!</code> (this list)</div></div>'))
 
     def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False
@@ -95,13 +175,251 @@ class MathShell(object):
         if self.trace and self.trace_output != '':
             display(HTML('$\\begin{alignat}{3}' + self.trace_output + '\\end{alignat}$'))
 
+    # ------------------------------------------------------------------
+    # do! agent endpoint
+    # ------------------------------------------------------------------
+
+    def resolve_backrefs(self, text):
+        """Inline [[n]] references as the rendered LaTeX of prior cell
+        results; raises ValueError on an undefined reference."""
+        def repl(m):
+            key = m.group(1)
+            sym = self.execution_history.get(key)
+            if sym is None:
+                raise ValueError(
+                    f'[[{key}]] does not reference a previous result')
+            notation = self.history.get(sym, self.parsedNotation)
+            return LaTexWriter(notation)(sym)
+        return BACKREF_RE.sub(repl, text)
+
+    _DO_MARKS = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
+                 'disagree': 'XX', 'domain-differs': 'D!'}
+
+    def render_do_step(self, step):
+        if step['op'] == 'comment':
+            # tex2jax_ignore keeps MathJax from typesetting note prose
+            # (stray $...$ or \commands in agent notes stay literal)
+            return (f"<div class=\"tex2jax_ignore\" style=\"color:#666\">"
+                    f"<code>{step['id']}</code> "
+                    f"<em>{_html.escape(step['args']['text'])}</em></div>")
+        check = step['check'].get('status', '?')
+        mark = self._DO_MARKS.get(check, '?')
+        if mark in ('XX', '?'):
+            style = ' style="color:#c00"'
+        elif mark == 'D!':
+            # conditional, not wrong: the result holds on the common domain
+            style = ' style="color:#b65c00"'
+        else:
+            style = ''
+        branch = '' if step.get('continues') in (True, None) else ' (branch)'
+        note = ''
+        if step['op'] == 'apply_both_sides':
+            a = step['args']
+            note = f" {_html.escape(a['op'] + ' ' + a['arg'])}"
+        lines = [f"<div{style}><code>{step['id']}#{step['hash']} "
+                 f"[{mark}]{branch} {step['op']}{note}</code> "
+                 f"&nbsp;${step['input']} \\;\\Longrightarrow\\; "
+                 f"{step['result']}$</div>"]
+        for a in step['assumptions']:
+            lines.append(f'<div style="margin-left:2em;color:#888">'
+                         f'assumes {self._assumption_html(a)}</div>')
+        return ''.join(lines)
+
+    @staticmethod
+    def _assumption_html(assumption):
+        """One assumption as HTML: with a `display` field, prose stays
+        prose (escaped) and only the inline $...$ spans reach MathJax;
+        a bare `text` keeps the historical whole-line math wrapping."""
+        display = assumption.get('display')
+        if display is None:
+            return f'${assumption["text"]}$'
+        parts = display.split('$')
+        return ''.join(f'${seg}$' if i % 2 else _html.escape(seg)
+                       for i, seg in enumerate(parts))
+
+    @staticmethod
+    def render_do_claim(claim):
+        verdict = claim.get('verdict', 'open')
+        colors = {'established': '#176b2c', 'conditional': '#8a5a00',
+                  'supported': '#8a5a00', 'open': '#b00020'}
+        conclusion = claim.get('conclusion') or {}
+        detail = ''
+        if verdict != 'open':
+            detail = (f" &mdash; {len(conclusion.get('steps', []))} "
+                      f"checked step(s), "
+                      f"{len(conclusion.get('assumptions', []))} "
+                      f"assumption(s)")
+        else:
+            detail = (' &mdash; no mechanically checked closing chain '
+                      'was recorded')
+        return (f'<div style="color:{colors.get(verdict, "#444")}">'
+                f'<strong>CLAIM {claim["id"]}: '
+                f'{_html.escape(verdict.upper())}</strong>{detail}<br>'
+                f'${claim["statement"]}$</div>')
+
+    @staticmethod
+    def _do_error(message):
+        display(HTML(f'<div style="color:#c00">do! error: '
+                     f'{_html.escape(message)}</div>'))
+
+    def exec_do(self, instruction, execution_count, add_to_history,
+                proof_goal=None):
+        import agent_do
+        if not instruction:
+            self._do_error('empty instruction')
+            return
+        try:
+            instruction = self.resolve_backrefs(instruction)
+            if proof_goal is not None:
+                proof_goal = self.resolve_backrefs(proof_goal)
+        except ValueError as e:
+            self._do_error(str(e))
+            return
+
+        def on_step(step):
+            try:
+                display(HTML(self.render_do_step(step)))
+            except Exception:
+                pass  # rendering must never fail the derivation step
+
+        def on_plot(caption, images):
+            try:
+                parts = [f'<div><img src="data:image/png;base64,{b64}" '
+                         f'style="max-width:640px"/></div>'
+                         for b64 in images]
+                parts.append(f'<div style="color:#888"><em>'
+                             f'{_html.escape(caption)}</em> '
+                             f'&mdash; illustration, not machine-checked'
+                             f'</div>')
+                display(HTML(''.join(parts)))
+            except Exception:
+                pass  # rendering must never fail the plot call
+
+        try:
+            res = agent_do.run_instruction(instruction, ledger=self.ledger,
+                                           on_step=on_step,
+                                           on_plot=on_plot,
+                                           proof_goal=proof_goal)
+        except agent_do.DoAgentError as e:
+            self._do_error(str(e))
+            return
+        if not res['ok']:
+            self._do_error(res.get('error', 'agent failed'))
+        for claim in res.get('claims', []):
+            display(HTML(self.render_do_claim(claim)))
+        if res.get('summary'):
+            label = ('<strong>agent narrative — unverified:</strong> '
+                     if res.get('summary_unverified') else '')
+            display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
+                         f'{_html.escape(res["summary"])}</em></div>'))
+        if res['assumptions']:
+            asm = '; '.join(self._assumption_html(a)
+                            for a in res['assumptions'])
+            display(HTML(f'<div style="color:#888">assumptions: '
+                         f'{asm}</div>'))
+        if res['final_result']:
+            provenance = res.get('final_provenance') or {}
+            if provenance.get('status') == 'unverified':
+                reason = provenance.get(
+                    'reason', 'not established by a ledger step')
+                display(HTML(
+                    '<div style="color:#b65c00"><strong>unverified final '
+                    'value:</strong> ' + _html.escape(reason) + '</div>'))
+            try:
+                sym = self.parser.parse(res['final_result'])
+                output = self.output(sym, self.parsedNotation,
+                                     execution_count, add_to_history)
+                display(HTML('$' + output + '$'))
+            except Exception:
+                # unparseable result: still shown above, just not chainable
+                self._do_error('final result could not be parsed for '
+                               '[[n]] chaining')
+
+    def exec_composite(self, code, execution_count, add_to_history):
+        """Evaluate a cell with inline expr commands ({diff! {int! x^3}}):
+        resolve each command to its verified do! result inner-to-outer, then
+        combine the results with the expand primitive so the arithmetic glue
+        is oracle-checked (no extra LLM call proves the composition)."""
+        import agent_do
+        import expr_commands
+        import primitives
+        try:
+            text = self.resolve_backrefs(code)
+        except ValueError as e:
+            self._do_error(str(e))
+            return
+        try:
+            sym, notation = primitives.parse_latex(text)
+        except primitives.PrimitiveError as e:
+            self._do_error(str(e))
+            return
+
+        def on_step(step):
+            try:
+                display(HTML(self.render_do_step(step)))
+            except Exception:
+                pass  # rendering must never fail a derivation step
+
+        resolver = expr_commands.ExprResolver(
+            notation, Notation(), self.commands, self.ledger, on_step,
+            agent_do.run_instruction)
+        try:
+            root = resolver(sym)
+        except (expr_commands.ExprCommandError, agent_do.DoAgentError) as e:
+            self._do_error(str(e))
+            return
+
+        composite = LaTexWriter(resolver.output_notation)(root)
+        # verified glue: the numeric oracle proves the composition
+        rec = primitives.expand(composite)
+        assumptions = []
+        for run in resolver.subruns:
+            for a in run.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+        for drec in resolver.direct_records:
+            for a in drec.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+        if rec.get('ok'):
+            step = self.ledger.record(rec)
+            on_step(step)
+            for a in rec.get('assumptions', []):
+                if a not in assumptions:
+                    assumptions.append(a)
+            final = rec['result']
+        else:
+            # expand could not combine (rare) - show the resolved composite,
+            # but be honest that the glue was not oracle-checked
+            self._do_error('composition not verified: '
+                           + rec.get('error', 'expand failed'))
+            final = composite
+        if assumptions:
+            asm = '; '.join(f'${a["text"]}$' for a in assumptions)
+            display(HTML(f'<div style="color:#888">assumptions: {asm}</div>'))
+        if final:
+            try:
+                outsym = self.parser.parse(final)
+                output = self.output(outsym, self.parsedNotation,
+                                     execution_count, add_to_history)
+                display(HTML('$' + output + '$'))
+            except Exception:
+                self._do_error('final result could not be parsed for '
+                               '[[n]] chaining')
+
     def process(self, sym, notation):
         return self.processor(sym, notation, self.execution_history, self.history)
 
     def output(self, outsym, notation, execution_count, add_to_history):
         if add_to_history:
+            # snapshot into a private graph: parser.parse() clears
+            # parsedNotation in place, which would strand the stored symbol
+            # and make later [[n]] references print its raw name (_nNN)
+            snapshot = Notation()
+            outsym = Replicator(notation, snapshot)(outsym)
+            notation = snapshot
             self.execution_history[str(execution_count)] = outsym
-            self.history[outsym] = notation
+            self.history[outsym] = snapshot
         writer = LaTexWriter(notation, show_quotes=self.show_quotes)
         result = writer(outsym)
         return result

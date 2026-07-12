@@ -37,6 +37,8 @@ class Replicator(object):
         'vgroup': 'enter_vgroup',
         'sgroup': 'enter_sgroup',
         '\\array': 'enter_array',
+        '\\pmatrix': 'enter_array',
+        '\\matrix': 'enter_array',
         '\\cases': 'enter_array'
     }
 
@@ -236,6 +238,12 @@ class Replicator(object):
         res = self._probe(sym, "\\array")
         if res is not None:
             return res
+        res = self._probe(sym, "\\pmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\matrix")
+        if res is not None:
+            return res
         res = self._probe(sym, "\\cases")
         if res is not None:
             return res
@@ -330,7 +338,7 @@ class Replicator(object):
 
     def enter_plist(self, sym, f):
         args = self.build_list(f, self.enter_expr)
-        return self.output_notation.repf(self.mapsym(sym), Func(Notation.P_LIST, args))
+        return self.output_notation.repf(self.mapsym(sym), Func(Notation.P_LIST, args, **f.props))
 
     def enter_slashExpr(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),
@@ -409,7 +417,7 @@ class Replicator(object):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),), **f.props))
 
     def enter_vgroup(self, sym, f):
-        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),)), **f.props)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_formula(f.args[0]),), **f.props))
 
     def enter_sgroup(self, sym, f):
         args = [self.enter_expr(f.args[0])]

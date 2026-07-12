@@ -27,6 +27,8 @@ class LaTexWriter(object):
         'sgroup': 'write_sgroup',
         'func': 'write_func',
         '\\array': 'write_array',
+        '\\pmatrix': 'write_array',
+        '\\matrix': 'write_array',
         '\\cases': 'write_array',
         '\\text': 'write_text',
         '\\textbf': 'write_text',
@@ -223,6 +225,7 @@ class LaTexWriter(object):
                 elif f.sym.name in Notation.oper:
                     self.writeString(f.sym.name)
                     for expr in f.args:
+                        self.writeString(' ')
                         self.write_expr(expr)
                 else:
                     self.write_scalar(sym)
@@ -252,6 +255,8 @@ class LaTexWriter(object):
                 and not self._probe(sym, "\\textsf") \
                 and not self._probe(sym, "\\texttt") \
                 and not self._probe(sym, "\\array") \
+                and not self._probe(sym, "\\pmatrix") \
+                and not self._probe(sym, "\\matrix") \
                 and not self._probe(sym, "\\cases"):
             f = self.notation.getf(sym, Notation.REF)
             if f is not None:
@@ -276,14 +281,23 @@ class LaTexWriter(object):
                 self.write_raw_term(sym)
 
     def write_index_item(self, sym):
-        f = self.notation.getf(sym, Notation.GROUP)
-        escape = f is not None and f.props['br'] == '()'
-        if escape:
+        # the grammar takes a single scalar after ^/_ : anything that does
+        # not print as one token or a {...} group (a raw proper FracValue
+        # prints \frac{1}{2}, a ()-group prints parens, \left...\right
+        # v-groups, built expression subtrees) must be brace-wrapped or
+        # the writer's own output cannot be re-parsed
+        if isinstance(sym, Symbol):
+            f = self.notation.get(sym)
+            selfdelimited = f is None or (
+                f.sym == Notation.GROUP and f.props.get('br') == '{}')
+        else:
+            selfdelimited = sym.__repr__().startswith('{')
+        if selfdelimited:
+            self.write_scalar(sym)
+        else:
             self.writeString('{')
             self.write_scalar(sym)
             self.writeString('}')
-        else:
-            self.write_scalar(sym)
 
     def write_index(self, f):
         dims = f.args[1]
@@ -381,10 +395,12 @@ class LaTexWriter(object):
         self.writeString('}')
 
     def write_plist(self, f):
+        explicit = f.props.get('cdot', False)
         for i, expr in enumerate(f.args):
             if i > 0:
                 f1 = self.notation.getf(expr, Notation.GROUP)
-                if f1 is not None and f1.props.get('br', '') == '{}':
+                if explicit or (f1 is not None
+                                and f1.props.get('br', '') == '{}'):
                     self.writeString('\\cdot')
             self.write_expr(expr)
 
@@ -461,12 +477,12 @@ class LaTexWriter(object):
             if 'quoted' in f.props:
                 self.writeString('`')
             if br == '{}':
-                self.writeString('\\{')
+                self.writeString('{')
         self.writeString(br[0])
         self.write_formula(f.args[0])
         self.writeString(br[1])
         if self.show_quotes and br == '{}':
-            self.writeString('\\}')
+            self.writeString('}')
 
     def write_vgroup(self, f):
         br = f.props['br']

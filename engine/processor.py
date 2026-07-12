@@ -12,12 +12,14 @@ import importlib
 
 import comparer
 from comparer import NotationParam
-from notation import Func, issym
+from notation import Func, issym, Notation
 from replacer import Replacer
 from preprocessor import Preprocessor
 from value import *
 from replicator import Replicator
 from helpers import trace_notation
+from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
+from frac_utils import FRAC_SYMBOL_NAMES, normalize_frac
  
 
 def iterate(x):
@@ -65,6 +67,51 @@ def get_factor_value(acc):
 
 def is_spacer(sym):
     return issym(sym, ["\\!", "\\,", "\\:", "\\;", "\\;"])
+
+
+MATRIX_NODE_NAMES = ('\\array', '\\pmatrix', '\\matrix', '\\vec')
+
+
+def contains_matrix_node(sym, notation):
+    """True if the subtree under sym holds a matrix/vector-valued node.
+    Matrix factors must never merge with like factors across a product:
+    the merge reorders factors, and A B A != A^2 B."""
+    stack = [sym]
+    seen = set()
+    while stack:
+        s = stack.pop()
+        if isinstance(s, (tuple, list)):
+            stack.extend(a for a in s if a is not None)
+            continue
+        if not isinstance(s, Symbol) or id(s) in seen:
+            continue
+        seen.add(id(s))
+        f = notation.get(s)
+        if f is None:
+            continue
+        if f.sym.name in MATRIX_NODE_NAMES:
+            return True
+        stack.extend(a for a in f.args if a is not None)
+    return False
+
+
+def is_infty_factor(sym, notation):
+    """True if the factor is \\infty itself (possibly grouped, signed or
+    powered). \\infty is not a ring element: it must not take part in
+    like-term arithmetic (\\infty - \\infty is not 0), while \\infty in a
+    big-operator bound (INDEX dims of \\sum, \\lim) stays untouched."""
+    while isinstance(sym, Symbol):
+        f = notation.get(sym)
+        if f is None:
+            return sym.name == '\\infty'
+        if f.sym in (Notation.GROUP, Notation.V_GROUP,
+                     Notation.MINUS, Notation.PLUS):
+            sym = f.args[0]
+        elif f.sym == Notation.INDEX:
+            sym = f.args[0]
+        else:
+            return False
+    return False
 
 
 class Calculator(Replacer):
@@ -229,6 +276,41 @@ class Calculator(Replacer):
                 )
         return super(Calculator, self).enter_formula(sym)
 
+    def enter_oper(self, sym, f):
+        args = [self.enter_expr(expr) for expr in f.args]
+        if f.sym.name in FRAC_SYMBOL_NAMES:
+            if all(isinstance(arg, Value) for arg in args):
+                if all(isinstance(arg, IntegerValue) for arg in args):
+                    return division(args[0].get_frac(), args[1].get_frac())
+                return division(args[0], args[1])
+
+            from cmd_mul import chainexpr, Mul  # local import to avoid cycles
+            def unwrap_group(val):
+                g = self.output_notation.getf(val, Notation.GROUP)
+                if g is not None and g.props.get("br") == "{}":
+                    return unwrap_group(g.args[0])
+                return val
+
+            num = unwrap_group(args[0])
+            den = unwrap_group(args[1])
+
+            # Flatten nested fraction in numerator: (a/b)/c -> a/(bc)
+            num_frac = self.output_notation.getf(num, Notation.FUNC)
+            if (
+                num_frac is not None
+                and isinstance(num_frac.sym, Symbol)
+                and num_frac.sym.name in FRAC_SYMBOL_NAMES
+            ):
+                num_inner = num_frac.args[0]
+                den_plist = self.output_notation.setf(
+                    Notation.P_LIST, (num_frac.args[1], den)
+                )
+                den = chainexpr(Mul.MUL, self.output_notation, den_plist, None)
+                num = num_inner
+
+            return normalize_frac(self.output_notation, num, den, chainexpr, Mul.MUL)
+        return self.output_notation.repf(self.mapsym(sym), Func(f.sym, tuple(args)))
+
     def enter_index(self, sym, f):
         outdims = self.enter_dims(f)
         scalar = self.enter_scalar(f.args[0])
@@ -238,6 +320,40 @@ class Calculator(Replacer):
                 return IntegerValue(1)
             if equal_value(n, 1):
                 return scalar
+            # Handle powers of fractions explicitly: (a/b)^n -> a^n/b^n, including negative n
+            base = scalar
+            sign_negative = False
+            while True:
+                g = self.output_notation.getf(base, Notation.GROUP)
+                if g is not None and g.props.get("br") in ("{}", "()"):
+                    base = g.args[0]
+                    continue
+                m = self.output_notation.getf(base, Notation.MINUS)
+                if m is not None:
+                    sign_negative = not sign_negative
+                    base = m.args[0]
+                    continue
+                break
+            if is_frac(self.output_notation, base):
+                pos_n = abs(n.val)
+                pow_val = IntegerValue(pos_n)
+                def power_term(t):
+                    if pos_n == 1:
+                        return t
+                    return self.output_notation.setf(
+                        Notation.INDEX, (t, (None, None, pow_val, None))
+                    )
+                num = power_term(get_numerator(self.output_notation, base))
+                den = power_term(get_denominator(self.output_notation, base))
+                if n.val < 0:
+                    num, den = den, num
+                from cmd_mul import chainexpr, Mul  # local import to avoid cycles
+                res = normalize_frac(
+                    self.output_notation, num, den, chainexpr, Mul.MUL
+                )
+                if sign_negative:
+                    res = self.output_notation.setf(Notation.MINUS, (res,))
+                return res
             val = get_value(scalar, self.output_notation)
             if isinstance(val, IntegerValue) or isinstance(val, FracValue):
                 val = val.power(n)
@@ -278,7 +394,34 @@ class Calculator(Replacer):
             self.mapsym(sym), Func(f.sym, (outs,), **f.props)
         )
 
+    def enter_raw_term(self, t):
+        """
+        Normalize FracValue with denominator 1 to IntegerValue.
+
+        This handles cases like 3/1 → 3, ensuring fractions with
+        denominator 1 are simplified to integers.
+        """
+        if isinstance(t, FracValue) and t.denom == 1:
+            return IntegerValue(t.num)
+        return t
+
+    def merge_barrier(self, sym):
+        """Factors that must not merge with structurally equal factors:
+        matrix-valued subtrees (merging reorders a noncommutative product)
+        and the \\infty symbol (not a ring element)."""
+        return (is_infty_factor(sym, self.output_notation)
+                or contains_matrix_node(sym, self.output_notation))
+
     def enter_plist(self, sym, f):
+        if f.props.get('cdot'):
+            # an explicit \cdot product is notation (a series term like
+            # 1 \cdot 2): keep the factors unfolded and unmerged; the
+            # preserved mark keeps the fixed-point iteration idempotent
+            args = self.build_list(f, self.enter_expr)
+            if len(args) == 1:
+                return args[0]
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, args, **f.props))
         args = self.build_list(f, self.enter_expr)
         middle_args = []
         acc = {}
@@ -301,26 +444,29 @@ class Calculator(Replacer):
                 i = i + 1
                 continue
             deg = [self.get_degree(left)]
-            j = i + 1
-            while j < len(middle_args):
-                right = middle_args[j]
-                if comparer.s_equal(
-                    left,
-                    self.output_notation,
-                    right,
-                    self.output_notation,
-                    ctx=lambda x: x != 2,
-                ):
-                    deg.append(self.get_degree(right))
-                    del middle_args[j]
-                else:
-                    j = j + 1
+            if not self.merge_barrier(left):
+                j = i + 1
+                while j < len(middle_args):
+                    right = middle_args[j]
+                    if comparer.s_equal(
+                        left,
+                        self.output_notation,
+                        right,
+                        self.output_notation,
+                        ctx=lambda x: x != 2,
+                    ):
+                        deg.append(self.get_degree(right))
+                        del middle_args[j]
+                    else:
+                        j = j + 1
             if len(deg) > 1:
                 left = self.make_degree(left, self.make_sum(deg))
             output_args.append(left)
             i = i + 1
         factor = get_factor_value(acc)
-        if equal_value(factor, 0):
+        if equal_value(factor, 0) and not any(
+            is_infty_factor(a, self.output_notation) for a in middle_args
+        ):
             return IntegerValue(0)
         negative = less_value(factor, 0)
         if not_equal_value(factor, 1) and not_equal_value(factor, -1):
@@ -424,7 +570,11 @@ class Calculator(Replacer):
             expr1 = self.get_expr(left)
             j = i + 1
             k = factor1
-            while j < len(args):
+            infty_term = expr1 is not None and any(
+                is_infty_factor(t, self.output_notation)
+                for t in iterate(expr1)
+            )
+            while j < len(args) and not infty_term:
                 right = args[j]
                 factor2 = self.get_factor(right)
                 if equal_value(factor2, 0):

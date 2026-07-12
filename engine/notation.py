@@ -135,6 +135,7 @@ class Notation(object):
     RESULT = Symbol('#RESULT')
     SETQ = Symbol('setq')
     CMD = Symbol('[cmd]')
+    FRAC = Symbol('\\frac')
 
     comparer = (
         '=',

@@ -1,7 +1,16 @@
 __pycache__
 .DS_Store
 *.ipynb
+!examples/Into.ipynb
 .pytest_cache
 .idea
 parser.out
 obsolete
+bin
+.venv
+.env
+kernel_spec
+CORN.md
+CHECKPOINT.md
+ProjectMemory
+.claude/commands/
