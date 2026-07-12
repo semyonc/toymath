@@ -12,7 +12,10 @@ ledger.
 do! differentiate x^3 - 3x, find where the derivative is zero, plot with those points marked
 ```
 
-<img src="docs/Pic1.png" alt="A do! cell with six checked ledger steps, a sandboxed plot of the critical points, and a chainable result" width="850">
+See this cell run in the [intro notebook](examples/Into.ipynb) — six checked
+ledger steps, a sandboxed plot with the critical points marked, and a
+chainable result — alongside a stepwise integral and a machine-checked
+limit proof.
 
 ## What is different?
 
