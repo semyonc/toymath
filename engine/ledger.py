@@ -14,7 +14,7 @@ import json
 import os
 import hashlib
 
-LEDGER_VERSION = 1
+LEDGER_VERSION = 2
 
 # primitives whose successful results become ledger steps (everything that
 # transforms an expression; equal/lemmas are queries, not steps)
@@ -33,18 +33,77 @@ def _step_hash(op, input_latex, result_latex):
     return h.hexdigest()[:7]
 
 
+def _claim_hash(statement, parent):
+    h = hashlib.sha1(f'claim|{parent or ""}|{statement}'.encode('utf-8'))
+    return h.hexdigest()[:7]
+
+
+def _eq_yes(left, right):
+    """Semantic equality used only for ledger connectivity/closure."""
+    import primitives
+    try:
+        rec = primitives.equal_exprs(left, right)
+    except Exception:
+        return False
+    return rec.get('ok') and rec.get('verdict') == 'yes'
+
+
+def _relation_parts(statement):
+    """Return (lhs, rhs, relation) for a parsed relation, else None."""
+    import primitives
+    from notation import Notation
+    sym, notation = primitives.parse_latex(statement)
+    comp = notation.getf(sym, Notation.COMP)
+    if comp is None:
+        return None
+    return (primitives.write_latex(comp.args[0], notation),
+            primitives.write_latex(comp.args[1], notation),
+            comp.sym.props.get('op'))
+
+
+def _relation_holds(statement):
+    """Mechanically decide a relation endpoint when possible."""
+    import primitives
+    parts = _relation_parts(statement)
+    if parts is None:
+        return False
+    lhs, rhs, relation = parts
+    if relation == '=':
+        return _eq_yes(lhs, rhs)
+    rec = primitives.evaluate(statement)
+    return rec.get('ok') and rec.get('holds') is True
+
+
+def _source_ids(step):
+    """Flatten provenance ids from an assembly-style sources mapping."""
+    out = []
+    for value in (step.get('sources') or {}).values():
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, list):
+            out.extend(v for v in value if isinstance(v, str))
+    return out
+
+
 class Ledger(object):
     def __init__(self, path=None):
         self.path = path
         self.data = {'version': LEDGER_VERSION, 'steps': [],
-                     'assumptions': []}
+                     'assumptions': [], 'claims': []}
         if path and os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as fh:
                 self.data = json.load(fh)
-            if self.data.get('version') != LEDGER_VERSION:
+            version = self.data.get('version')
+            if version == 1:
+                # v1 steps are valid v2 steps. Upgrade in memory; the next
+                # save writes the v2 envelope without changing old records.
+                self.data['version'] = LEDGER_VERSION
+                self.data.setdefault('claims', [])
+            elif version != LEDGER_VERSION:
                 raise ValueError(
-                    f'session file version {self.data.get("version")} '
+                    f'session file version {version} '
                     f'not supported')
+            self.data.setdefault('claims', [])
 
     @property
     def steps(self):
@@ -54,10 +113,44 @@ class Ledger(object):
     def assumptions(self):
         return self.data['assumptions']
 
-    def record(self, result):
+    @property
+    def claims(self):
+        return self.data['claims']
+
+    def get_claim(self, claim_id):
+        return next((c for c in self.claims if c['id'] == claim_id), None)
+
+    def record_claim(self, statement, parent=None):
+        """Record a parseable root claim or subclaim, initially open."""
+        import primitives
+        statement = (statement or '').strip()
+        if not statement:
+            raise ValueError('empty claim')
+        try:
+            primitives.parse_latex(statement)
+        except primitives.PrimitiveError as e:
+            raise ValueError(str(e))
+        if _relation_parts(statement) is None:
+            raise ValueError('claim must be a top-level relation')
+        if parent is not None and self.get_claim(parent) is None:
+            raise ValueError(f'unknown parent claim {parent!r}')
+        claim = {
+            'id': f'c{len(self.claims) + 1}',
+            'hash': _claim_hash(statement, parent),
+            'statement': statement,
+            'parent': parent,
+            'verdict': 'open',
+            'conclusion': None,
+        }
+        self.claims.append(claim)
+        return claim
+
+    def record(self, result, goal=None):
         """Append a successful primitive result; returns the step record."""
         if not result.get('ok'):
             raise ValueError('only successful results are recorded')
+        if goal is not None and self.get_claim(goal) is None:
+            raise ValueError(f'unknown goal {goal!r}')
         n = len(self.steps) + 1
         continues = None
         prev = self.last_result()
@@ -91,19 +184,23 @@ class Ledger(object):
             step['terms'] = result['terms']
         if result.get('sources'):
             step['sources'] = result['sources']
+        if goal is not None:
+            step['goal'] = goal
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:
                 self.assumptions.append(a)
         return step
 
-    def record_comment(self, text):
+    def record_comment(self, text, goal=None):
         """Append a narrative note. Notes are unverified prose: they carry
         no input/result, are skipped by replay, and never count as
         provenance for a final result."""
         text = (text or '').strip()
         if not text:
             raise ValueError('empty comment')
+        if goal is not None and self.get_claim(goal) is None:
+            raise ValueError(f'unknown goal {goal!r}')
         n = len(self.steps) + 1
         step = {
             'id': f's{n}',
@@ -116,8 +213,90 @@ class Ledger(object):
             'assumptions': [],
             'check': {'status': 'note'},
         }
+        if goal is not None:
+            step['goal'] = goal
         self.steps.append(step)
         return step
+
+    def _validate_conclusion(self, claim_id, step_ids, steps=None):
+        claim = self.get_claim(claim_id)
+        if claim is None:
+            raise ValueError(f'unknown claim {claim_id!r}')
+        if not isinstance(step_ids, list) or not step_ids:
+            raise ValueError('conclusion needs at least one step id')
+        if len(set(step_ids)) != len(step_ids):
+            raise ValueError('conclusion step ids must be unique')
+
+        by_id = {s['id']: s for s in (steps if steps is not None
+                                      else self.steps)}
+        selected = []
+        for step_id in step_ids:
+            step = by_id.get(step_id)
+            if step is None:
+                raise ValueError(f'unknown conclusion step {step_id!r}')
+            if step.get('result') is None:
+                raise ValueError(f'{step_id} is not a transforming step')
+            if step.get('goal') != claim_id:
+                raise ValueError(
+                    f'{step_id} belongs to goal {step.get("goal")!r}, '
+                    f'not {claim_id}')
+            status = step.get('check', {}).get('status')
+            if status not in ('agree', 'exact'):
+                raise ValueError(
+                    f'{step_id} is not mechanically checked ({status})')
+            selected.append(step)
+
+        # The named records must form one chain. Assembly records may join
+        # branches explicitly through their persisted source ids.
+        for previous, current in zip(selected, selected[1:]):
+            connected = _eq_yes(previous['result'], current.get('input'))
+            if not connected and previous['id'] not in _source_ids(current):
+                raise ValueError(
+                    f'{current["id"]} does not continue from '
+                    f'{previous["id"]} or cite it as provenance')
+
+        first, last = selected[0], selected[-1]
+        endpoint = last['result']
+        closure = None
+        if (_eq_yes(endpoint, claim['statement'])
+                and _relation_holds(endpoint)):
+            closure = 'true-relation-endpoint'
+        else:
+            parts = _relation_parts(claim['statement'])
+            if parts[2] == '=':
+                lhs, rhs, _ = parts
+                if (_eq_yes(first.get('input'), lhs)
+                        and _eq_yes(endpoint, rhs)):
+                    closure = 'left-to-right'
+                elif (_eq_yes(first.get('input'), rhs)
+                        and _eq_yes(endpoint, lhs)):
+                    closure = 'right-to-left'
+        if closure is None:
+            raise ValueError(
+                f'chain endpoint {endpoint!r} does not close claim '
+                f'{claim["statement"]!r}')
+
+        assumptions = []
+        for step in selected:
+            for assumption in step.get('assumptions', []):
+                if assumption not in assumptions:
+                    assumptions.append(assumption)
+        verdict = 'conditional' if assumptions else 'established'
+        return {
+            'steps': list(step_ids),
+            'endpoint': endpoint,
+            'assumptions': assumptions,
+            'closure': closure,
+            'verdict': verdict,
+        }
+
+    def conclude(self, claim_id, step_ids):
+        """Mechanically close a claim from goal-owned, checked steps."""
+        conclusion = self._validate_conclusion(claim_id, step_ids)
+        claim = self.get_claim(claim_id)
+        claim['verdict'] = conclusion.pop('verdict')
+        claim['conclusion'] = conclusion
+        return claim
 
     def save(self, path=None):
         path = path or self.path
@@ -180,9 +359,11 @@ class Ledger(object):
                 a['expr'], a['var'], a['antiderivatives']),
         }
         seen = {}
+        replayed_steps = []
         for step in self.steps:
             if step['op'] == 'comment':
                 seen[step['id']] = step
+                replayed_steps.append(step)
                 continue
             if step['op'] == 'integrate_assemble':
                 sources = step.get('sources') or {}
@@ -254,7 +435,36 @@ class Ledger(object):
                 return {'status': 'failed', 'step': step['id'],
                         'reason': 'numeric oracle disagrees on replay'}
             seen[step['id']] = step
+            replayed = dict(step)
+            replayed['assumptions'] = res.get('assumptions', [])
+            replayed['check'] = res.get('check', {'status': 'skipped'})
+            replayed_steps.append(replayed)
+        for claim in self.claims:
+            try:
+                import primitives
+                primitives.parse_latex(claim.get('statement', ''))
+                if claim.get('hash') != _claim_hash(
+                        claim.get('statement', ''), claim.get('parent')):
+                    raise ValueError('claim hash mismatch')
+                if claim.get('verdict') == 'open':
+                    if claim.get('conclusion') is not None:
+                        raise ValueError('open claim carries a conclusion')
+                    continue
+                recorded = claim.get('conclusion') or {}
+                checked = self._validate_conclusion(
+                    claim['id'], recorded.get('steps'),
+                    steps=replayed_steps)
+                if (claim.get('verdict') != checked.pop('verdict')
+                        or recorded != checked):
+                    raise ValueError('claim conclusion mismatch')
+            except (KeyError, ValueError, primitives.PrimitiveError) as e:
+                return {'status': 'failed',
+                        'claim': claim.get('id', '?'),
+                        'reason': f'claim replay failed: {e}'}
         return {'status': 'verified', 'steps': len(self.steps),
+                'claims': len(self.claims),
+                'open_claims': sum(c.get('verdict') == 'open'
+                                   for c in self.claims),
                 'assumptions': self.assumptions}
 
     _MARKS = {'agree': 'verified', 'exact': 'exact',
@@ -263,7 +473,24 @@ class Ledger(object):
 
     def render_markdown(self):
         """Render the derivation as Markdown with LaTeX math blocks."""
-        lines = ['# Verified derivation', '']
+        title = '# Derivation ledger' if self.claims else '# Verified derivation'
+        lines = [title, '']
+        for claim in self.claims:
+            verdict = claim.get('verdict', 'open').upper()
+            conclusion = claim.get('conclusion') or {}
+            count = len(conclusion.get('steps') or [])
+            assumptions = len(conclusion.get('assumptions') or [])
+            detail = ''
+            if verdict != 'OPEN':
+                detail = f' ({count} steps, {assumptions} assumptions)'
+            lines.append(
+                f'**CLAIM {claim["id"]} — {verdict}{detail}:** '
+                f'${claim["statement"]}$')
+            if verdict == 'OPEN':
+                lines.append('')
+                lines.append('*No mechanically checked closing chain has '
+                             'been recorded.*')
+            lines.append('')
         if self.assumptions:
             lines.append('**Valid under the assumptions:** '
                          + ', '.join(f'${a["text"]}$'
@@ -302,7 +529,8 @@ class Ledger(object):
                 ids = ', '.join(src.get('values', []))
                 arg_note = (f" — sources `{src.get('linearity', '?')}` "
                             f"→ `{ids}`")
-            lines.append(f"**{step['id']}** `{step['op']}`{arg_note} "
+            goal = (f" → `{step['goal']}`" if step.get('goal') else '')
+            lines.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
                          f"— *{mark}*{branch}")
             lines.append('')
             lines.append(f"$${step['input']} \\;\\Longrightarrow\\; "
@@ -317,6 +545,15 @@ class Ledger(object):
     def render(self):
         """Terse human/agent-readable summary of the derivation."""
         lines = []
+        for claim in self.claims:
+            verdict = claim.get('verdict', 'open').upper()
+            conclusion = claim.get('conclusion') or {}
+            detail = ''
+            if verdict != 'OPEN':
+                detail = ('; steps ' + ','.join(conclusion.get('steps', []))
+                          + f'; endpoint {conclusion.get("endpoint")}')
+            lines.append(f"CLAIM {claim['id']}#{claim['hash']} [{verdict}] "
+                         f"{claim['statement']}{detail}")
         for step in self.steps:
             if step['op'] == 'comment':
                 lines.append(f"{step['id']}#{step['hash']} [--] note: "
@@ -326,7 +563,8 @@ class Ledger(object):
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
                     'disagree': 'XX', 'domain-differs': 'D!'}.get(check, '?')
             branch = '' if step.get('continues') in (True, None) else ' (branch)'
-            lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch} "
+            goal = f" -> {step['goal']}" if step.get('goal') else ''
+            lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch}{goal} "
                          f"{step['op']}: {step['input']}  ==>  "
                          f"{step['result']}")
             if step['op'] == 'integrate_assemble':

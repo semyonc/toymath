@@ -34,10 +34,10 @@ def emit(obj, pretty=False):
     return 0 if obj.get('ok', True) else 1
 
 
-def with_session(result, session_path):
+def with_session(result, session_path, goal=None):
     if session_path and result.get('ok') and result['op'] in TRANSFORMING_OPS:
         ledger = Ledger(session_path)
-        step = ledger.record(result)
+        step = ledger.record(result, goal=goal)
         ledger.save()
         result['step'] = {'id': step['id'], 'hash': step['hash']}
     return result
@@ -46,6 +46,7 @@ def with_session(result, session_path):
 def main(argv=None):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('--session', help='ledger JSON file to append to')
+    common.add_argument('--goal', help='claim id this step serves (e.g. c1)')
     common.add_argument('--pretty', action='store_true',
                         help='indented JSON output')
     parser = argparse.ArgumentParser(
@@ -165,6 +166,12 @@ def main(argv=None):
     p.add_argument('expr2')
 
     add_parser('lemmas', help='list registered rewrite lemmas')
+    p = add_parser('claim', help='record a root claim or subclaim')
+    p.add_argument('statement')
+    p.add_argument('--parent', help='parent claim id for a subclaim')
+    p = add_parser('conclude', help='close a claim from checked step ids')
+    p.add_argument('claim_id')
+    p.add_argument('step_ids', nargs='+')
     p = add_parser('show', help='render the session ledger')
     p.add_argument('--format', choices=['text', 'md'], default='text')
     add_parser('replay', help='re-verify every step in the session')
@@ -221,6 +228,30 @@ def main(argv=None):
         res = primitives.equal_exprs(args.expr1, args.expr2)
     elif args.cmd == 'lemmas':
         res = primitives.list_lemmas()
+    elif args.cmd == 'claim':
+        if not args.session:
+            return emit({'ok': False, 'error': '--session required'})
+        ledger = Ledger(args.session)
+        try:
+            claim = ledger.record_claim(args.statement, parent=args.parent)
+        except ValueError as e:
+            return emit({'ok': False, 'op': 'claim', 'error': str(e)},
+                        args.pretty)
+        ledger.save()
+        return emit({'ok': True, 'op': 'claim', **claim}, args.pretty)
+    elif args.cmd == 'conclude':
+        if not args.session:
+            return emit({'ok': False, 'error': '--session required'})
+        ledger = Ledger(args.session)
+        try:
+            claim = ledger.conclude(args.claim_id, args.step_ids)
+        except ValueError as e:
+            return emit({'ok': False, 'op': 'conclude',
+                         'claim': args.claim_id, 'error': str(e)},
+                        args.pretty)
+        ledger.save()
+        return emit({'ok': True, 'op': 'conclude', 'claim': claim},
+                    args.pretty)
     elif args.cmd == 'show':
         if not args.session:
             return emit({'ok': False, 'error': '--session required'})
@@ -240,7 +271,11 @@ def main(argv=None):
     else:  # unreachable
         return emit({'ok': False, 'error': f'unknown command {args.cmd}'})
 
-    res = with_session(res, args.session)
+    try:
+        res = with_session(res, args.session, goal=args.goal)
+    except ValueError as e:
+        return emit({'ok': False, 'op': res.get('op'), 'error': str(e)},
+                    args.pretty)
     return emit(res, args.pretty)
 
 

@@ -42,8 +42,8 @@ _COMMANDS_DIR = os.path.join(
 
 PromptCommand = namedtuple('PromptCommand',
                            ('name', 'description', 'template', 'expr',
-                            'fresh', 'direct'),
-                           defaults=((), None))
+                            'fresh', 'direct', 'mode'),
+                           defaults=((), None, None))
 
 
 def _split_frontmatter(text):
@@ -90,6 +90,14 @@ def parse_command(text, fallback_name):
                 f'unknown direct primitive {direct!r} (available: '
                 + ', '.join(sorted(expr_commands.DIRECT_PRIMITIVES)) + ')')
         expr = True
+    mode = meta.get('mode')
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode != 'prove':
+            raise ValueError("mode must be 'prove' when specified")
+        if expr:
+            raise ValueError('prove-mode commands cannot be expression '
+                             'commands')
     if _PLACEHOLDER not in body and direct is None:
         raise ValueError(f'template body does not contain {_PLACEHOLDER}')
     # fresh: symbols the command MINTS (an integration constant C). The
@@ -105,7 +113,7 @@ def parse_command(text, fallback_name):
         if not _NAME_RE.match(n):
             raise ValueError(f'invalid fresh symbol name {n!r}')
     return PromptCommand(name, description, body.strip(), expr, fresh,
-                         direct)
+                         direct, mode)
 
 
 def load_commands(directory=_COMMANDS_DIR):

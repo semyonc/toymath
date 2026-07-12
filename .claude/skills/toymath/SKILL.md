@@ -48,6 +48,8 @@ it appends each verified step to a replayable ledger.
 | `factor_quadratic EXPR VAR` | `factor_quadratic "x^2+6x+9=4" x` | rational-root factorization on applicable expression/relation sides → `(x+3)^2=4`; reports roots; refuses irrational cases |
 | `equal E1 E2` | `equal "(x+1)^2" "x^2+2x+1"` | verdict yes / no / unknown. A `no` with method `domain mismatch` means the sides agree in value but one is defined where the other is not (`\ln(x^2)` vs `2\ln x`) — equality may hold on a restricted domain; a `yes` may carry a `note` that it was checked only on the common domain |
 | `lemmas` | | list rewrite lemmas |
+| `claim STATEMENT --session f` | `claim "\lim_{n \to \infty} 1/n = 0" --session f` | record an OPEN root claim (use `--parent c1` for a subclaim) |
+| `conclude CLAIM STEPS... --session f` | `conclude c1 s1 s2 --session f` | mechanically close a claim from an ordered, goal-owned chain; verdict is established or conditional |
 | `show --session f [--format md]` | | render the ledger (Markdown with `--format md`) |
 | `replay --session f` | | re-verify every recorded step |
 
@@ -65,6 +67,26 @@ python toymath_cli.py replay --session d.json
 
 Feed each step's `result` verbatim as the next input (the ledger flags
 discontinuities). Check candidate solutions with `substitute` + `evaluate`.
+
+## How to establish a claim
+
+Record a top-level relation as the claim first, then tag every transforming
+CLI step with its goal:
+
+```bash
+python toymath_cli.py claim "\lim_{n \to \infty} \frac{1}{n} = 0" --session p.json
+python toymath_cli.py limit_table "\lim_{n \to \infty} \frac{1}{n}" --goal c1 --session p.json
+python toymath_cli.py conclude c1 s1 --session p.json
+python toymath_cli.py replay --session p.json
+```
+
+`conclude` accepts only `agree`/`exact` steps owned by that goal, verifies
+chain continuity (or explicit assembly provenance), and mechanically checks
+that the endpoint closes the claim. A relation endpoint must itself hold, so
+reformatting `x=2` cannot establish `x=2`. An OPEN claim is visibly unfinished
+even if an unrelated step reaches the same value. In the notebook, `prove!`
+records the root claim automatically and suppresses a chainable final value
+until the agent calls `conclude` successfully.
 
 ## How to integrate (there is deliberately no autonomous `integrate`)
 

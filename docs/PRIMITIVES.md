@@ -162,7 +162,7 @@ caught three real bugs (function symbols treated as polynomial variables,
 `\left(...\right)` vgroups unevaluated, wrong function-argument binding in
 products) — the design works.
 
-## The ledger
+## The goal-aware ledger
 
 ```
 s1#dff1198 [ok] apply_both_sides: 2x + 3 = 7  ==>  {2}x+{3} - {3} = {7} - {3}
@@ -170,7 +170,19 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
 ...
 ```
 
-- steps carry id, content hash, op, args, result, assumptions, check;
+- ledger v2 records parseable top-level relations as root claims and
+  subclaims, separately from the step stream; each starts `open`;
+- steps carry id, content hash, op, args, result, assumptions, check, and an
+  optional `goal` claim id;
+- `conclude(claim, steps)` accepts only goal-owned `agree`/`exact` steps,
+  checks chain continuity (or explicit assembly provenance), and checks that
+  the endpoint closes the claim. A relation-valued endpoint must itself be
+  mechanically true, so a no-op rewrite of `x=2` cannot establish `x=2`;
+  equality claims may instead close by a checked left-to-right or
+  right-to-left chain. The verdict is `established` without assumptions or
+  `conditional` with them;
+- replay re-runs both the primitive steps and conclusion provenance. A v1
+  session is upgraded in memory and remains replayable with no claims;
 - assumptions accumulate in the header — the derivation is honestly
   conditional;
 - `continues` flags whether a step's input matches the previous result
@@ -181,6 +193,9 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
   ("splitting by partial fractions; now piece 3/6"). They are unverified
   prose: no input/result, skipped by `replay`, never provenance for a
   final value, and transparent to `continues` chaining.
+- Markdown/text renderers lead with visible claim banners. An `OPEN` claim
+  stays visibly unfinished even if an unrelated checked step happens to end
+  at the same value.
 
 ## Known limitations
 
@@ -253,6 +268,13 @@ do! solve [[3]] for x, recording every assumption
   conclusion. A run with no transforming steps may still return a query-only
   value, which is rendered explicitly as **unverified**. Final values are
   stored in execution history so later cells can chain on them with `[[n]]`.
+- A `prove!` prompt-command is different at the harness boundary: its raw
+  argument is recorded as root claim `c1` before the model starts, every new
+  step is goal-tagged, and `set_result` is refused until `conclude(c1, ...)`
+  records a closing checked chain. If the claim remains open, no last-step
+  fallback becomes a chainable value. The final agent prose is capped and
+  explicitly labelled unverified so it cannot visually substitute for the
+  ledger artifact.
 - All `do!` cells in a notebook share one session ledger; each cell
   renders only the steps it added, and a replay verifies the whole
   notebook's derivation chain.

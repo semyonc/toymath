@@ -114,6 +114,19 @@ figure per call. You translate LaTeX to Python yourself. Plots are never
 ledger steps - if plotting fails, continue the derivation without it.
 """
 
+_PROVE_RULES = """
+## prove! mode
+
+The harness has already recorded the requested statement as root claim
+`ROOT_CLAIM`.
+Every transforming step and comment is tagged with that goal. A value is not
+a proof: when the checked chain reaches the claim, call `conclude` with
+`ROOT_CLAIM` and the ordered step ids that form the closing chain, then call
+`set_result`.
+If no available tactic closes the claim, leave it OPEN and give only a short
+description of the missing move. Never bridge the gap with prose.
+"""
+
 _FALLBACK_SKILL = """# ToyMath verified derivations
 
 You are the strategist; toymath is the mechanical checker. Never do
@@ -128,7 +141,8 @@ into the next call. Surface recorded assumptions; results are
 """
 
 
-def build_prompt(skill_path=_SKILL_PATH, plotting=False):
+def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
+                 proof_claim_id='c1'):
     """Agent instructions derived from SKILL.md: frontmatter stripped, the
     bash invocation section replaced by tool-calling guidance, do!-mode
     (and, when available, plotting) rules appended."""
@@ -146,6 +160,8 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False):
     text = text.rstrip() + '\n' + _DO_RULES
     if plotting:
         text += _PLOT_RULES
+    if prove_mode:
+        text += _PROVE_RULES.replace('ROOT_CLAIM', proof_claim_id)
     return text
 
 
@@ -166,6 +182,9 @@ class DoSession(object):
         self.start = len(self.ledger.steps)
         self.result_override = None
         self.result_provenance = None
+        self.current_goal = None
+        self.proof_claim_id = None
+        self.claim_start = len(self.ledger.claims)
         # the SDK executes sync tools on a thread pool, so parallel tool
         # calls hit the ledger concurrently - serialize the appends
         self._lock = threading.Lock()
@@ -175,7 +194,7 @@ class DoSession(object):
         (possibly step-annotated) record."""
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
             with self._lock:
-                step = self.ledger.record(result)
+                step = self.ledger.record(result, goal=self.current_goal)
                 result = dict(result)
                 result['step'] = {'id': step['id'], 'hash': step['hash']}
                 if self.on_step is not None:
@@ -185,10 +204,29 @@ class DoSession(object):
     def new_steps(self):
         return self.ledger.steps[self.start:]
 
+    def new_claims(self):
+        return self.ledger.claims[self.claim_start:]
+
+    def claim(self, statement, parent=None, root=False):
+        """Record and focus a claim. Root claims govern prove-mode output."""
+        with self._lock:
+            claim = self.ledger.record_claim(statement, parent=parent)
+            self.current_goal = claim['id']
+            if root or (parent is None and self.proof_claim_id is None):
+                self.proof_claim_id = claim['id']
+        return claim
+
+    def conclude(self, claim_id, step_ids):
+        """Close a claim and return focus to its parent, if any."""
+        with self._lock:
+            claim = self.ledger.conclude(claim_id, step_ids)
+            self.current_goal = claim.get('parent') or claim['id']
+        return claim
+
     def comment(self, text):
         """Append a narrative note to the ledger and stream it."""
         with self._lock:
-            step = self.ledger.record_comment(text)
+            step = self.ledger.record_comment(text, goal=self.current_goal)
             if self.on_step is not None:
                 self.on_step(step)
         return step
@@ -204,6 +242,19 @@ class DoSession(object):
         result to select, so their value remains usable but is explicitly
         labelled unverified.
         """
+        if self.proof_claim_id is not None:
+            claim = self.ledger.get_claim(self.proof_claim_id)
+            if claim is None or claim.get('verdict') == 'open':
+                return None
+            endpoint = (claim.get('conclusion') or {}).get('endpoint')
+            if endpoint and (expr == endpoint or _equivalent(expr, endpoint)):
+                return {
+                    'status': claim['verdict'], 'source': 'claim',
+                    'claim': claim['id'],
+                    'steps': claim['conclusion']['steps'],
+                    'method': claim['conclusion']['closure'],
+                }
+            return None
         with self._lock:
             steps = list(self.ledger.steps)
             # notes are not transforming steps: a comment-only run still
@@ -235,6 +286,14 @@ class DoSession(object):
                 'reason': 'no transforming step was recorded in this run',
             }
         return None
+
+
+def _equivalent(left, right):
+    try:
+        rec = primitives.equal_exprs(left, right)
+    except Exception:
+        return False
+    return rec.get('ok') and rec.get('verdict') == 'yes'
 
 
 def make_api(session):
@@ -554,6 +613,39 @@ def make_api(session):
                              'instead of writing derivations here')
         return json.dumps(reply, ensure_ascii=False)
 
+    def claim(statement: str, parent: str = '') -> str:
+        """Record and focus a parseable mathematical subclaim. In prove!
+        mode the root claim c1 already exists, so use this only when the
+        derivation genuinely needs a named subgoal.
+
+        Args:
+            statement: LaTeX statement of the subclaim.
+            parent: parent claim id such as c1; empty means no parent.
+        """
+        try:
+            rec = session.claim(statement, parent=parent or None)
+        except ValueError as e:
+            return json.dumps({'ok': False, 'op': 'claim',
+                               'error': str(e)}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'claim', **rec},
+                          ensure_ascii=False)
+
+    def conclude(claim_id: str, step_ids: list[str]) -> str:
+        """Mechanically close a claim from an ordered checked chain.
+
+        Args:
+            claim_id: claim id such as c1.
+            step_ids: ordered transforming step ids forming the closure.
+        """
+        try:
+            rec = session.conclude(claim_id, step_ids)
+        except ValueError as e:
+            return json.dumps({'ok': False, 'op': 'conclude',
+                               'claim': claim_id, 'error': str(e)},
+                              ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'conclude', 'claim': rec},
+                          ensure_ascii=False)
+
     def factor_gcd(expr: str) -> str:
         """Pull common factors from a sum or applicable relation sides,
         e.g. 6x^2+9x=3 -> 3x(2x+3)=3.
@@ -608,11 +700,21 @@ def make_api(session):
                                'error': str(e)}, ensure_ascii=False)
         provenance = session.designate_result(expr)
         if provenance is None:
+            if session.proof_claim_id is not None:
+                claim = session.ledger.get_claim(session.proof_claim_id)
+                if claim is None or claim.get('verdict') == 'open':
+                    error = ('root claim is still open; call conclude with '
+                             'a mechanically checked closing chain first')
+                else:
+                    error = ('value is not the endpoint of the concluded '
+                             f'root claim {session.proof_claim_id}')
+            else:
+                error = ('value is not mechanically equivalent to any '
+                         'result in the shared ledger; use a primitive to '
+                         'establish it or select an earlier ledger result')
             return json.dumps({
                 'ok': False, 'op': 'set_result',
-                'error': ('value is not mechanically equivalent to any '
-                          'result in the shared ledger; use a primitive to '
-                          'establish it or select an earlier ledger result'),
+                'error': error,
             }, ensure_ascii=False)
         session.result_override = expr
         session.result_provenance = provenance
@@ -648,7 +750,8 @@ def make_api(session):
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, integrate_rewrite, integrate_linearity,
            integrate_assemble,
-           factor_gcd, factor_quadratic, equal, lemmas, comment,
+           factor_gcd, factor_quadratic, equal, lemmas, comment, claim,
+           conclude,
            set_result]
     if session.plot_backend is not None:
         fns.append(plot)
@@ -681,7 +784,7 @@ def build_model():
 
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
-                    plot_backend=None):
+                    plot_backend=None, proof_goal=None):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
@@ -700,9 +803,18 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         plot_backend = plot_sandbox.get_backend()
     session = DoSession(ledger=ledger, on_step=on_step, on_plot=on_plot,
                         plot_backend=plot_backend)
+    root_claim = None
+    if proof_goal is not None:
+        try:
+            root_claim = session.claim(proof_goal, root=True)
+        except ValueError as e:
+            raise DoAgentError(f'invalid proof claim: {e}')
     agent = Agent(name='toymath',
                   instructions=build_prompt(
-                      plotting=session.plot_backend is not None),
+                      plotting=session.plot_backend is not None,
+                      prove_mode=proof_goal is not None,
+                      proof_claim_id=(root_claim['id']
+                                      if root_claim is not None else 'c1')),
                   tools=make_tools(session),
                   model=model if model is not None else build_model())
     holder = {}
@@ -722,9 +834,26 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     steps = session.new_steps()
     last_transform = next((s for s in reversed(steps)
                            if s.get('result') is not None), None)
+    root_claim = (session.ledger.get_claim(session.proof_claim_id)
+                  if session.proof_claim_id is not None else None)
     if session.result_override is not None:
         final = session.result_override
         provenance = session.result_provenance
+    elif root_claim is not None and root_claim.get('verdict') != 'open':
+        final = root_claim['conclusion']['endpoint']
+        provenance = {
+            'status': root_claim['verdict'], 'source': 'claim',
+            'claim': root_claim['id'],
+            'steps': root_claim['conclusion']['steps'],
+            'method': root_claim['conclusion']['closure'],
+        }
+    elif root_claim is not None:
+        final = None
+        provenance = {
+            'status': 'open', 'source': 'claim',
+            'claim': root_claim['id'],
+            'reason': 'no mechanically checked closing chain was recorded',
+        }
     elif last_transform is not None:
         final = last_transform['result']
         provenance = {
@@ -735,6 +864,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         final = None
         provenance = None
     out = {'ok': 'err' not in holder, 'steps': steps,
+           'claims': session.new_claims(),
            'assumptions': list(session.ledger.assumptions),
            'final_result': final, 'final_provenance': provenance,
            'summary': None}
@@ -746,5 +876,22 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         else:
             out['error'] = f'{type(e).__name__}: {e}'
     else:
-        out['summary'] = str(holder['res'].final_output or '').strip()
+        summary = str(holder['res'].final_output or '').strip()
+        if proof_goal is not None:
+            summary = _cap_prove_summary(summary)
+            out['summary_unverified'] = True
+        out['summary'] = summary
     return out
+
+
+def _cap_prove_summary(text, max_lines=2, max_chars=280):
+    """Keep prove-mode prose subordinate to the replayable artifact."""
+    lines = [line.strip() for line in (text or '').splitlines()
+             if line.strip()]
+    clipped = ' '.join(lines[:max_lines])
+    truncated = len(lines) > max_lines or len(clipped) > max_chars
+    if len(clipped) > max_chars:
+        clipped = clipped[:max_chars].rstrip()
+    if truncated:
+        clipped += ' … [narrative truncated; record claims and steps]'
+    return clipped

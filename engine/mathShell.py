@@ -124,7 +124,9 @@ class MathShell(object):
             self._do_error(f'{name}! needs an argument')
             return True
         instruction = prompt_commands.render(cmd, rest)
-        self.exec_do(instruction, execution_count, add_to_history)
+        proof_goal = rest if cmd.mode == 'prove' else None
+        self.exec_do(instruction, execution_count, add_to_history,
+                     proof_goal=proof_goal)
         return True
 
     def has_expr_command(self, text):
@@ -224,17 +226,40 @@ class MathShell(object):
         return ''.join(lines)
 
     @staticmethod
+    def render_do_claim(claim):
+        verdict = claim.get('verdict', 'open')
+        colors = {'established': '#176b2c', 'conditional': '#8a5a00',
+                  'supported': '#8a5a00', 'open': '#b00020'}
+        conclusion = claim.get('conclusion') or {}
+        detail = ''
+        if verdict != 'open':
+            detail = (f" &mdash; {len(conclusion.get('steps', []))} "
+                      f"checked step(s), "
+                      f"{len(conclusion.get('assumptions', []))} "
+                      f"assumption(s)")
+        else:
+            detail = (' &mdash; no mechanically checked closing chain '
+                      'was recorded')
+        return (f'<div style="color:{colors.get(verdict, "#444")}">'
+                f'<strong>CLAIM {claim["id"]}: '
+                f'{_html.escape(verdict.upper())}</strong>{detail}<br>'
+                f'${claim["statement"]}$</div>')
+
+    @staticmethod
     def _do_error(message):
         display(HTML(f'<div style="color:#c00">do! error: '
                      f'{_html.escape(message)}</div>'))
 
-    def exec_do(self, instruction, execution_count, add_to_history):
+    def exec_do(self, instruction, execution_count, add_to_history,
+                proof_goal=None):
         import agent_do
         if not instruction:
             self._do_error('empty instruction')
             return
         try:
             instruction = self.resolve_backrefs(instruction)
+            if proof_goal is not None:
+                proof_goal = self.resolve_backrefs(proof_goal)
         except ValueError as e:
             self._do_error(str(e))
             return
@@ -261,15 +286,20 @@ class MathShell(object):
         try:
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
-                                           on_plot=on_plot)
+                                           on_plot=on_plot,
+                                           proof_goal=proof_goal)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return
         if not res['ok']:
             self._do_error(res.get('error', 'agent failed'))
+        for claim in res.get('claims', []):
+            display(HTML(self.render_do_claim(claim)))
         if res.get('summary'):
-            display(HTML(f'<div><em>{_html.escape(res["summary"])}'
-                         f'</em></div>'))
+            label = ('<strong>agent narrative — unverified:</strong> '
+                     if res.get('summary_unverified') else '')
+            display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
+                         f'{_html.escape(res["summary"])}</em></div>'))
         if res['assumptions']:
             asm = '; '.join(f'${a["text"]}$' for a in res['assumptions'])
             display(HTML(f'<div style="color:#888">assumptions: '

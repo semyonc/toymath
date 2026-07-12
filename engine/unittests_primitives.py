@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tests for the agent-scoped verified-derivation primitives."""
 import os
+import json
 import tempfile
 import unittest
 
@@ -1106,6 +1107,89 @@ class TestLedger(unittest.TestCase):
         ledger.record(P.expand('(x+1)^2'))
         ledger.record(P.expand('(y+1)^2'))
         self.assertFalse(ledger.steps[1]['continues'])
+
+    def test_v1_session_upgrades_in_memory(self):
+        path = os.path.join(tempfile.mkdtemp(), 'session.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump({'version': 1, 'steps': [], 'assumptions': []}, fh)
+        ledger = Ledger(path)
+        self.assertEqual(ledger.data['version'], 2)
+        self.assertEqual(ledger.claims, [])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
+class TestGoalAwareLedger(unittest.TestCase):
+    CLAIM = r'\lim_{x \to 0} \frac{e^x-1}{x} = 1'
+
+    def test_checked_chain_closes_claim_conditionally(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(self.CLAIM)
+        first = ledger.record(P.limit_lhopital(
+            r'\lim_{x \to 0} \frac{e^x-1}{x}'), goal=claim['id'])
+        second = ledger.record(P.limit_substitute(first['result']),
+                               goal=claim['id'])
+        closed = ledger.conclude(claim['id'], [first['id'], second['id']])
+        self.assertEqual(closed['verdict'], 'conditional')
+        self.assertEqual(closed['conclusion']['endpoint'], '1')
+        self.assertGreater(len(closed['conclusion']['assumptions']), 0)
+        self.assertEqual(ledger.replay()['open_claims'], 0)
+        self.assertIn('CONDITIONAL', ledger.render())
+
+    def test_unrelated_zero_cannot_close_target(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(
+            r'\lim_{n \to \infty} \frac{n}{2^n} = 0')
+        unrelated = ledger.record(P.limit_table(
+            r'\lim_{n \to \infty} \frac{1}{n}'), goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'does not close claim'):
+            ledger.conclude(claim['id'], [unrelated['id']])
+        self.assertEqual(claim['verdict'], 'open')
+        self.assertIn('OPEN', ledger.render_markdown())
+
+    def test_equivalent_noop_cannot_establish_false_relation(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('x = 2')
+        step = ledger.record(P.expand('x = 2'), goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'does not close claim'):
+            ledger.conclude(claim['id'], [step['id']])
+
+    def test_true_relation_endpoint_can_close_identity(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('(x+1)^2 = x^2+2x+1')
+        step = ledger.record(P.expand(claim['statement']), goal=claim['id'])
+        closed = ledger.conclude(claim['id'], [step['id']])
+        self.assertEqual(closed['verdict'], 'established')
+        self.assertEqual(closed['conclusion']['closure'],
+                         'true-relation-endpoint')
+
+    def test_claim_must_be_a_relation(self):
+        ledger = Ledger()
+        with self.assertRaisesRegex(ValueError, 'top-level relation'):
+            ledger.record_claim('x^2 + 1')
+
+    def test_goal_ownership_and_connectivity_are_enforced(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(r'\lim_{x \to 0} x = 0')
+        no_goal = ledger.record(P.limit_substitute(r'\lim_{x \to 0} x'))
+        with self.assertRaisesRegex(ValueError, 'belongs to goal'):
+            ledger.conclude(claim['id'], [no_goal['id']])
+
+        first = ledger.record(P.expand('(x+1)^2'), goal=claim['id'])
+        last = ledger.record(P.limit_substitute(r'\lim_{x \to 0} x'),
+                             goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'does not continue'):
+            ledger.conclude(claim['id'], [first['id'], last['id']])
+
+    def test_replay_rejects_tampered_claim_provenance(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(r'\lim_{x \to 0} x = 0')
+        step = ledger.record(P.limit_substitute(r'\lim_{x \to 0} x'),
+                             goal=claim['id'])
+        ledger.conclude(claim['id'], [step['id']])
+        claim['conclusion']['endpoint'] = '999'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('claim replay failed', replay['reason'])
 
 
 class TestOracleCatchesLies(unittest.TestCase):

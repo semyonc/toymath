@@ -81,6 +81,12 @@ class TestPromptBuilder(unittest.TestCase):
         self.assertIn('mechanical checker', p)
         self.assertIn('## do! mode', p)
 
+    def test_prove_prompt_names_actual_shared_ledger_claim(self):
+        p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
+        self.assertIn('root claim\n`c7`', p)
+        self.assertIn('`c7` and the ordered step ids', p)
+        self.assertNotIn('ROOT_CLAIM', p)
+
 
 class TestDoSessionApi(unittest.TestCase):
     def test_transforming_call_recorded_and_streamed(self):
@@ -163,6 +169,37 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertTrue(rec['ok'])
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertEqual(session.new_steps(), [])
+
+    def test_open_proof_rejects_unrelated_verified_value(self):
+        session = DoSession()
+        root = session.claim(
+            r'\lim_{n \to \infty} \frac{n}{2^n} = 0', root=True)
+        api = make_api(session)
+        step = json.loads(api['limit_table'](
+            r'\lim_{n \to \infty} \frac{1}{n}'))
+        self.assertEqual(session.new_steps()[0]['goal'], root['id'])
+        close = json.loads(api['conclude'](root['id'],
+                                           [step['step']['id']]))
+        self.assertFalse(close['ok'])
+        self.assertIn('does not close claim', close['error'])
+        selected = json.loads(api['set_result']('0'))
+        self.assertFalse(selected['ok'])
+        self.assertIn('still open', selected['error'])
+
+    def test_concluded_proof_result_has_claim_provenance(self):
+        session = DoSession()
+        root = session.claim(r'\lim_{n \to \infty} \frac{1}{n} = 0',
+                             root=True)
+        api = make_api(session)
+        step = json.loads(api['limit_table'](
+            r'\lim_{n \to \infty} \frac{1}{n}'))
+        close = json.loads(api['conclude'](root['id'],
+                                           [step['step']['id']]))
+        self.assertTrue(close['ok'], close.get('error'))
+        selected = json.loads(api['set_result']('0'))
+        self.assertTrue(selected['ok'])
+        self.assertEqual(selected['provenance']['source'], 'claim')
+        self.assertEqual(selected['provenance']['claim'], 'c1')
 
     def test_integrate_assemble_uses_ordered_ledger_results(self):
         session = DoSession()
@@ -366,6 +403,42 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertFalse(res['ok'])
         self.assertIn('turns', res['error'])
         self.assertEqual(len(res['steps']), 2)  # partial work is kept
+
+    def test_prove_mode_closes_root_claim(self):
+        script = [
+            [tool_call('limit_table', {
+                'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s1']}, 'c2')],
+            [tool_call('set_result', {'expr': '0'}, 'c3')],
+            [message('Mechanically checked.\nThe table closes it.\n'
+                     'This extra prose must not dominate.')],
+        ]
+        res = run_instruction(
+            'prove the limit', model=ScriptedModel(script),
+            proof_goal=r'\lim_{n \to \infty} \frac{1}{n} = 0')
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['claims'][0]['verdict'], 'established')
+        self.assertEqual(res['steps'][0]['goal'], 'c1')
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(res['final_provenance']['source'], 'claim')
+        self.assertTrue(res['summary_unverified'])
+        self.assertIn('narrative truncated', res['summary'])
+
+    def test_prove_mode_leaves_failed_target_open(self):
+        script = [
+            [tool_call('limit_table', {
+                'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
+            [tool_call('set_result', {'expr': '0'}, 'c2')],
+            [message('A prose squeeze argument would go here.')],
+        ]
+        res = run_instruction(
+            'try the proof', model=ScriptedModel(script),
+            proof_goal=r'\lim_{n \to \infty} \frac{n}{2^n} = 0')
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['claims'][0]['verdict'], 'open')
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['status'], 'open')
 
     def test_notebook_ledger_accumulates(self):
         ledger = Ledger()
@@ -586,12 +659,13 @@ class TestPromptCommandModel(unittest.TestCase):
     def test_repo_commands_load(self):
         import prompt_commands as pc
         reg = pc.load_commands()
-        for name in ('int', 'diff', 'solve', 'expand'):
+        for name in ('int', 'diff', 'solve', 'expand', 'prove'):
             self.assertIn(name, reg)
         self.assertIsNone(reg['int'].direct)      # LLM tactic tier
         self.assertEqual(reg['diff'].direct, 'differentiate')
         self.assertEqual(reg['expand'].direct, 'expand')
         self.assertTrue(reg['diff'].expr)         # direct implies expr
+        self.assertEqual(reg['prove'].mode, 'prove')
 
     def test_render_substitutes_arguments(self):
         import prompt_commands as pc
@@ -613,6 +687,17 @@ class TestPromptCommandModel(unittest.TestCase):
         inline = pc.parse_command(
             '---\nname: b\ndescription: d\nexpr: true\n---\n$ARGUMENTS', 'b')
         self.assertTrue(inline.expr)
+
+    def test_prove_mode_parsed_and_cannot_compose(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command(
+            '---\nname: p\ndescription: d\nmode: prove\n---\n$ARGUMENTS',
+            'p')
+        self.assertEqual(cmd.mode, 'prove')
+        with self.assertRaises(ValueError):
+            pc.parse_command(
+                '---\nname: p\ndescription: d\nmode: prove\nexpr: true\n'
+                '---\n$ARGUMENTS', 'p')
 
     def test_fresh_field_parsed(self):
         import prompt_commands as pc
@@ -687,8 +772,9 @@ class TestPromptCommandDispatch(unittest.TestCase):
 
         def fake_run(instruction, **kw):
             box['instruction'] = instruction
+            box['kwargs'] = kw
             return {'ok': True, 'steps': [], 'assumptions': [],
-                    'final_result': None, 'summary': None}
+                    'claims': [], 'final_result': None, 'summary': None}
         return box, fake_run
 
     def test_command_prefix_renders_template(self):
@@ -698,6 +784,22 @@ class TestPromptCommandDispatch(unittest.TestCase):
             self.shell.exec('solve! 2x = 4', 1, add_to_history=True)
         self.assertIn('Solve', box['instruction'])
         self.assertIn('2x = 4', box['instruction'])
+
+    def test_prove_command_passes_raw_claim_to_harness(self):
+        box, fake = self._capture_instruction()
+        claim = r'\lim_{n \to \infty} \frac{1}{n} = 0'
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('prove! ' + claim, 1, add_to_history=True)
+        self.assertEqual(box['kwargs']['proof_goal'], claim)
+        self.assertIn('Prove ' + claim, box['instruction'])
+
+    def test_prove_command_resolves_backref_in_harness_claim(self):
+        self.shell.exec('2 = 2', 1, add_to_history=True)
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('prove! [[1]]', 2, add_to_history=True)
+        self.assertNotIn('[[1]]', box['kwargs']['proof_goal'])
+        self.assertIn('=', box['kwargs']['proof_goal'])
 
     def test_backref_resolves_inside_command_args(self):
         self.shell.exec('2 + 3', 1, add_to_history=True)  # result 5
