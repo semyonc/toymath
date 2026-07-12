@@ -30,7 +30,9 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
 
 1. **substitute(expr, var, value)** — notation-graph replacement, wraps
    values in parens so juxtaposition never corrupts (`2x`, x:=3 → `2(3)`,
-   never `23`). Checked by evaluating input-with-binding vs output.
+   never `23`). Big-operator binders are respected: substituting a bound
+   variable, or inserting a value that would be captured by one, is refused.
+   Checked by evaluating input-with-binding vs output.
 2. **apply_both_sides(eq, op, arg)**, op ∈ {`+`,`-`,`*`,`/`,`^`} — the spine
    of equation solving. Multiplication/division by a non-constant records
    the assumption `arg ≠ 0` in the step (record, don't prove). Refuses `*0`
@@ -49,7 +51,9 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    grouping (`\sin(x)` ≡ `\sin x`). Exact rational subexpressions
    inside an opaque atom are canonicalized recursively, so
    `\ln(4+(x^2)^2)` prints as `\ln(x^4+4)` and shares an atom with that
-   spelling. Function powers enter the
+   spelling. Indexed big operators keep their entire scoped body in one
+   atom, so factors cannot commute out of a limit, sum, product, or bounded
+   integral. Function powers enter the
    polynomial layer (`\sin^2 x` is `atom(\sin x)^2`, so
    `(\sin x)^2 - \sin^2 x → 0` and `\sin^2 x \cdot \sin x → \sin^3 x`;
    `\sin^{-1}` keeps its arcsin reading and stays opaque).
@@ -198,6 +202,11 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
   provided and `differentiate` refuses it. Bare `|expr|` parses only around a
   single scalar (`|x|`, `|x^2|`); wrap products/sums as `\left|x-1\right|` or
   `|{x-1}|`. `\lfloor·\rfloor`/`\lceil·\rceil` are not yet modelled.
+- Limits, sums, products, and bounded integrals are scope-safe opaque atoms,
+  not yet evaluable tactics. Free-symbol discovery excludes their bound
+  variables, identical binders compare canonically, and alpha-renamed binders
+  remain honestly `unknown`. `\infty` is accepted in an operator bound but is
+  never sampled or treated as a cancellable ring variable elsewhere.
 
 ## The `do!` endpoint (Jupyter)
 

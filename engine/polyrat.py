@@ -463,7 +463,7 @@ def to_ratfunc(sym, notation):
     f = notation.get(sym)
     if f is None:
         if (sym.name in FUNCTION_NAMES or sym.name in Notation.styles
-                or sym.name in Notation.p_oper):
+                or sym.name in Notation.p_oper or sym.name == '\\infty'):
             raise NotInFragment(f'operator symbol {sym.name}')
         return RatFunc(Poly.var(sym.name))
     name = f.sym.name

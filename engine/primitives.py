@@ -191,6 +191,155 @@ def canonical_or_same(latex):
 # free symbols
 # ---------------------------------------------------------------------------
 
+def _transparent_inner(sym, notation):
+    """Remove ordinary grouping around binder metadata."""
+    while isinstance(sym, Symbol):
+        f = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if f is None or f.props.get('br') == '||':
+            break
+        sym = f.args[0]
+    return sym
+
+
+def _big_operator_name(sym, notation):
+    """Return the p_oper name for a bare or INDEX-decorated operator."""
+    if isinstance(sym, Symbol) and notation.get(sym) is None:
+        return sym.name if sym.name in Notation.p_oper else None
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return None
+    base = _transparent_inner(f.args[0], notation)
+    if (isinstance(base, Symbol) and notation.get(base) is None
+            and base.name in Notation.p_oper):
+        return base.name
+    return None
+
+
+def _plain_symbol_name(sym, notation):
+    sym = _transparent_inner(sym, notation)
+    if isinstance(sym, Symbol) and notation.get(sym) is None:
+        return sym.name
+    return None
+
+
+def _binder_info(head, notation, tail=()):
+    """Describe one big-operator binder from its head and product tail.
+
+    The parser represents ``\\lim_{x \\to a}``, ``\\sum_{k=0}^n`` and
+    bounded integrals as an INDEX-headed P_LIST.  This helper is the single
+    place that interprets those dimensions.  ``parameters`` are the free
+    parts of the point/bounds, while ``body`` excludes a conventional
+    trailing differential for integrals.
+    """
+    name = _big_operator_name(head, notation)
+    if name is None:
+        return None
+    info = {'operator': name, 'bound': None, 'parameters': [],
+            'body': list(tail)}
+    f = notation.getf(head, Notation.INDEX)
+    if f is not None:
+        _sub_l, _sup_l, upper, lower = f.args[1]
+        lower_inner = _transparent_inner(lower, notation)
+        rel = notation.getf(lower_inner, Notation.COMP)
+        if rel is not None and rel.sym.props.get('op') in ('=', '\\to'):
+            info['bound'] = _plain_symbol_name(rel.args[0], notation)
+            info['parameters'].append(rel.args[1])
+        elif lower is not None:
+            info['parameters'].append(lower)
+        if upper is not None:
+            info['parameters'].append(upper)
+
+    if name in ('\\int', '\\intop', '\\iint', '\\iiint', '\\iiiint',
+                '\\idotsint', '\\oint'):
+        body = list(tail)
+        # Standard parser shape: [... integrand ..., \, d, x].  Styling
+        # tokens are harmless separators; only d + a plain final symbol
+        # establish a binder.
+        significant = [(i, a) for i, a in enumerate(body)
+                       if not (isinstance(a, Symbol)
+                               and notation.get(a) is None
+                               and a.name in Notation.styles)]
+        if len(significant) >= 2:
+            (di, d), (_vi, var) = significant[-2:]
+            if (_plain_symbol_name(d, notation) == 'd'
+                    and _plain_symbol_name(var, notation) is not None):
+                info['bound'] = _plain_symbol_name(var, notation)
+                info['body'] = body[:di]
+    return info
+
+
+def _bound_symbols(sym, notation):
+    """All variables bound by a big operator anywhere below ``sym``."""
+    result = set()
+    seen = set()
+
+    def visit_product(items):
+        for i, item in enumerate(items):
+            info = _binder_info(item, notation, items[i + 1:])
+            if info is None:
+                visit(item)
+                continue
+            if info['bound'] is not None:
+                result.add(info['bound'])
+            for p in info['parameters']:
+                visit(p)
+            visit_product(info['body'])
+            return
+
+    def visit(s):
+        if not isinstance(s, Symbol) or s in seen:
+            return
+        seen.add(s)
+        f = notation.get(s)
+        if f is None:
+            return
+        if f.sym == Notation.P_LIST:
+            visit_product(list(f.args))
+            return
+        info = _binder_info(s, notation)
+        if info is not None:
+            if info['bound'] is not None:
+                result.add(info['bound'])
+            for p in info['parameters']:
+                visit(p)
+            return
+        for a in f.args:
+            if isinstance(a, (tuple, list)):
+                for x in a:
+                    visit(x)
+            else:
+                visit(a)
+
+    visit(sym)
+    return result
+
+
+def _contains_free_infinity(sym, notation):
+    """Whether ``\\infty`` occurs outside big-operator point/bounds."""
+    seen = set()
+
+    def visit(s, allowed=False):
+        if s is None or isinstance(s, Value):
+            return False
+        if isinstance(s, (tuple, list)):
+            return any(visit(x, allowed) for x in s)
+        if not isinstance(s, Symbol):
+            return False
+        f = notation.get(s)
+        if f is None:
+            return s.name == '\\infty' and not allowed
+        marker = (s, allowed)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        if f.sym == Notation.INDEX and _big_operator_name(s, notation):
+            # Infinity denotes an endpoint only inside the operator's
+            # dimensions.  Its body is visited normally by the P_LIST.
+            return visit(f.args[1], True)
+        return visit(f.args, allowed)
+
+    return visit(sym)
+
 def _subscript_var(sym, notation):
     """`x_{1}`-style INDEX used as an atomic variable: a leaf, non-function
     base carrying a pure numeral right subscript (dims slot 3). Returns the
@@ -226,28 +375,51 @@ def _subscript_var(sym, notation):
 def free_symbols(sym, notation):
     res = set()
 
-    def visit(s):
+    def visit_product(items, bound):
+        for i, item in enumerate(items):
+            info = _binder_info(item, notation, items[i + 1:])
+            if info is None:
+                visit(item, bound)
+                continue
+            for p in info['parameters']:
+                visit(p, bound)
+            body_bound = bound | ({info['bound']}
+                                  if info['bound'] is not None else set())
+            visit_product(info['body'], body_bound)
+            return
+
+    def visit(s, bound=frozenset()):
         if s is None or isinstance(s, Value):
             return
         if isinstance(s, (list, tuple)):
             for t in s:
-                visit(t)
+                visit(t, bound)
             return
         if isinstance(s, Symbol):
             f = notation.get(s)
             if f is None:
                 name = s.name
                 if (name in FUNC_NAMES or name in CONSTANT_NAMES
-                        or name in Notation.styles):
+                        or name in Notation.styles or name in Notation.p_oper
+                        or name == '\\infty' or name in bound):
                     return
                 res.add(name)
                 return
+            if f.sym == Notation.P_LIST:
+                visit_product(list(f.args), bound)
+                return
+            info = _binder_info(s, notation)
+            if info is not None:
+                for p in info['parameters']:
+                    visit(p, bound)
+                return
             key = _subscript_var(s, notation)
             if key is not None:
-                res.add(key)
-                visit(f.args[1][2])  # a power on the subscripted variable
+                if key not in bound:
+                    res.add(key)
+                visit(f.args[1][2], bound)  # power on subscripted variable
                 return
-            visit(f.args)
+            visit(f.args, bound)
 
     visit(sym)
     return res
@@ -662,6 +834,24 @@ class Substitutor(Replicator):
         super(Substitutor, self).__init__(notation, output_notation)
         self.mapping = mapping
 
+    def __call__(self, sym):
+        targets = {s.name for s in self.mapping
+                   if isinstance(s, Symbol) and self.notation.get(s) is None}
+        bound = _bound_symbols(sym, self.notation)
+        captured_targets = targets & bound
+        if captured_targets:
+            names = ', '.join(sorted(captured_targets))
+            raise PrimitiveError(
+                f'cannot substitute bound variable(s): {names}')
+        captured_values = set()
+        for value_sym, value_notation in self.mapping.values():
+            captured_values |= free_symbols(value_sym, value_notation) & bound
+        if captured_values:
+            names = ', '.join(sorted(captured_values))
+            raise PrimitiveError(
+                f'substitution would capture bound variable(s): {names}')
+        return super(Substitutor, self).__call__(sym)
+
     def _lookup(self, sym):
         entry = self.mapping.get(sym)
         if entry is None:
@@ -981,11 +1171,25 @@ def substitute(expr, var, value):
     except PrimitiveError as e:
         return _error('substitute', args, str(e))
     var_symbol = Symbol(var)
+    bound = _bound_symbols(sym, notation)
+    if var in bound:
+        return _error('substitute', args,
+                      f'cannot substitute bound variable {var!r}')
+    captured = free_symbols(vsym, vnotation) & bound
+    if captured:
+        return _error(
+            'substitute', args,
+            'substitution would capture bound variable(s): '
+            + ', '.join(sorted(captured)))
     if var not in free_symbols(sym, notation):
         return _error('substitute', args,
                       f'variable {var!r} does not occur in expression')
     out_n = Notation()
-    out_s = Substitutor(notation, out_n, {var_symbol: (vsym, vnotation)})(sym)
+    try:
+        out_s = Substitutor(
+            notation, out_n, {var_symbol: (vsym, vnotation)})(sym)
+    except PrimitiveError as e:
+        return _error('substitute', args, str(e))
     result = write_latex(out_s, out_n)
     rec = _result('substitute', args, expr, result)
     # check: substituting into the input must equal evaluating the output
@@ -1444,15 +1648,16 @@ def _atomize_walk(sym, notation, out_n, store):
         i = 0
         while i < len(args):
             a = args[i]
-            if isinstance(a, Symbol) and notation.get(a) is None \
-                    and a.name == '\\int':
-                # unevaluated integral: the rest of the product is one unit
+            if _big_operator_name(a, notation) is not None:
+                # A big operator binds the rest of the product.  Keeping the
+                # whole span as one atom prevents its body from commuting out
+                # of scope in the rational core.
                 # (taken from the unfiltered factors, so \, survives)
                 raw = list(f.args)
                 tail = raw[raw.index(a):]
                 span = notation.setf(Notation.P_LIST, tail) \
                     if len(tail) > 1 else a
-                units.append(('int', span))
+                units.append(('oper', span))
                 break
             if is_head(a):
                 inner, j = _func_arg_span(args, i, notation, is_head)
@@ -1489,7 +1694,7 @@ def _atomize_walk(sym, notation, out_n, store):
         # pass 3: atomize the remaining scalar units as before
         out_args = []
         for kind, payload in units:
-            if kind == 'int':
+            if kind == 'oper':
                 out_args.append(store.atom(payload, notation))
             elif kind == 'head':
                 a, inner = payload
@@ -1530,6 +1735,8 @@ def _atomize_walk(sym, notation, out_n, store):
 def _atomized_ratfunc(sym, notation, store):
     """RatFunc over opaque atoms; the caller substitutes atoms back via
     store.mapping()."""
+    if _contains_free_infinity(sym, notation):
+        raise NotInFragment('infinity outside a big-operator bound')
     work = notation.clone()
     out_n = Notation()
     new_sym = _atomize_walk(sym, work, out_n, store)
@@ -1558,6 +1765,8 @@ def _plist_head_kind(a, notation):
             return 'func'
         if a.name in Notation.p_oper:
             return 'oper'
+    if _big_operator_name(a, notation) is not None:
+        return 'oper'
     if _func_power(a, notation) is not None:
         return 'func'
     return None

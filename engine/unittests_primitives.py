@@ -1169,6 +1169,75 @@ class TestAbsoluteValue(unittest.TestCase):
         self.assertEqual(c['status'], 'disagree')
 
 
+class TestBigOperatorScoping(unittest.TestCase):
+    def test_indexed_operators_keep_their_bodies_in_one_atom(self):
+        cases = (
+            ('2\\lim_{x \\to 0} \\frac{\\sin x}{x}'
+             ' - \\lim_{x \\to 0} \\frac{\\sin x}{x}', '\\lim_'),
+            ('2\\sum_{k=0}^{n} x^k - \\sum_{k=0}^{n} x^k', '\\sum_'),
+            ('2\\prod_{j=1}^{m} (j+x) - \\prod_{j=1}^{m} (j+x)',
+             '\\prod_'),
+            ('2\\int_0^1 x^2 \\, dx - \\int_0^1 x^2 \\, dx',
+             '\\int_'),
+        )
+        for expr, operator in cases:
+            with self.subTest(expr=expr):
+                r = P.expand(expr)
+                self.assertTrue(r['ok'], r.get('error'))
+                self.assertEqual(r['opaque_atoms'], 1)
+                self.assertIn(operator, r['result'])
+                self.assertTrue(r['result'].startswith(operator))
+                self.assertNotIn('2' + operator, r['result'])
+
+    def test_binder_aware_free_symbols(self):
+        cases = (
+            ('\\lim_{x \\to a} \\frac{\\sin x}{x}', {'a'}),
+            ('\\sum_{k=0}^{n} x^k', {'n', 'x'}),
+            ('\\prod_{j=1}^{m} (j+x)', {'m', 'x'}),
+            ('\\int_0^1 x^2 y \\, dx', {'y'}),
+        )
+        for expr, expected in cases:
+            with self.subTest(expr=expr):
+                sym, notation = P.parse_latex(expr)
+                self.assertEqual(P.free_symbols(sym, notation), expected)
+
+    def test_substitution_refuses_bound_variables(self):
+        for expr, var in (
+                ('\\lim_{x \\to 0} \\frac{\\sin x}{x}', 'x'),
+                ('\\sum_{k=0}^{n} x^k', 'k'),
+                ('\\prod_{j=1}^{m} (j+x)', 'j'),
+                ('\\int_0^1 x^2 \\, dx', 'x')):
+            with self.subTest(expr=expr):
+                r = P.substitute(expr, var, '3')
+                self.assertFalse(r['ok'])
+                self.assertIn('bound variable', r['error'])
+
+    def test_substitution_still_enters_free_part_of_binder(self):
+        r = P.substitute('\\sum_{k=0}^{n} x^k', 'x', 'y')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('y^k', r['result'])
+        self.assertIn('k={0}', r['result'])
+
+    def test_substitution_refuses_capture_from_replacement(self):
+        r = P.substitute('\\sum_{k=0}^{n} x^k', 'x', 'k')
+        self.assertFalse(r['ok'])
+        self.assertIn('would capture bound variable', r['error'])
+
+    def test_infinity_is_not_a_sampled_ring_variable(self):
+        r = P.expand('\\infty - \\infty')
+        self.assertFalse(r['ok'])
+        self.assertIn('infinity outside', r['error'])
+        check = P.numeric_spot_check('\\infty', '\\infty')
+        self.assertEqual(check['status'], 'skipped')
+
+    def test_infinity_is_allowed_as_a_big_operator_bound(self):
+        r = P.expand('2\\sum_{k=0}^{\\infty} x^k'
+                     ' - \\sum_{k=0}^{\\infty} x^k')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['opaque_atoms'], 1)
+        self.assertIn('\\infty', r['result'])
+
+
 class TestSubscriptedVariables(unittest.TestCase):
     # gen 15: x_{1}-style names are atomic variables INDEPENDENT of their
     # base. The oracle samples them (before: every check on C_{1}-style
