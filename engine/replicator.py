@@ -338,7 +338,7 @@ class Replicator(object):
 
     def enter_plist(self, sym, f):
         args = self.build_list(f, self.enter_expr)
-        return self.output_notation.repf(self.mapsym(sym), Func(Notation.P_LIST, args))
+        return self.output_notation.repf(self.mapsym(sym), Func(Notation.P_LIST, args, **f.props))
 
     def enter_slashExpr(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),

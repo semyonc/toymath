@@ -941,6 +941,18 @@ class TestSubtermRelax(unittest.TestCase):
         s, n = P.parse_latex('x^{2}+x^{12}')
         self.assertEqual(P.write_latex(s, n), 'x^{2}+x^{12}')
 
+    def test_explicit_cdot_is_notation_until_transformed(self):
+        # a \cdot product round-trips (series terms like 1/(1*2) must not
+        # display as 1/(12) or fold to 1/2)...
+        s, n = P.parse_latex('\\frac{1}{1 \\cdot 2}')
+        self.assertEqual(P.write_latex(s, n).replace(' ', ''),
+                         '\\frac{1}{1\\cdot2}')
+        # ...but explicit canonicalization still computes it
+        self.assertEqual(P.expand('1 \\cdot 2')['result'], '2')
+        self.assertEqual(P.evaluate('1 \\cdot 2')['result'], '2')
+        eq = P.equal_exprs('1 \\cdot 2', '2')
+        self.assertEqual(eq['verdict'], 'yes')
+
     def test_root_and_equation_outputs_unchanged(self):
         self.assertEqual(P.rewrite('x^2 - 4', 'diff_squares')['result'],
                          '(x+2)(x-2)')
@@ -1684,6 +1696,16 @@ class TestLimitTactics(unittest.TestCase):
         r = P.limit_table('\\lim_{x \\to 0} \\frac{\\tan x}{x}')
         self.assertFalse(r['ok'])
         self.assertIn('no table rule', r['error'])
+
+    def test_rightarrow_binder_normalizes(self):
+        # \rightarrow lexes to the canonical \to: the binder is a real
+        # comparison (n stays bound) and every limit tactic accepts it
+        r = self.ok(P.limit_table(
+            '\\lim_{n \\rightarrow \\infty} \\frac{3}{2^n}'))
+        self.assertEqual(r['result'], '0')
+        s, n = P.parse_latex('\\lim_{n \\rightarrow \\infty} \\frac{3}{2^n}')
+        self.assertEqual(P.free_symbols(s, n), set())
+        self.assertIn('\\to', P.write_latex(s, n))
 
     def test_geometric_decay_at_infinity(self):
         for latex in (

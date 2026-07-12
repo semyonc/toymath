@@ -174,6 +174,14 @@ class TestScenario(unittest.TestCase):
     def test_mul1(self):
         self.checkEqual("mul! (x+1)(x-1)", "x^2 -1")
 
+    def test_cdot_notation_preserved(self):
+        # explicit \cdot products are notation: the calculator must not
+        # fold their numeric factors (series terms like 1/(1*2)+1/(2*3)+...)
+        self.checkEqual("2 \\cdot 3", "2 \\cdot 3")
+        self.checkEqual("\\frac{1}{1 \\cdot 2}", "\\frac{1}{1 \\cdot 2}")
+        self.checkEqual("2 * 3", "6")  # keyboard star still computes
+        self.checkEqual("(2)(3)", "6")  # juxtaposition still computes
+
     def test_sin1(self):
         self.checkEqual("\\sin x \\sin x", "(\\sin x)^2")
 

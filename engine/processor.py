@@ -413,6 +413,15 @@ class Calculator(Replacer):
                 or contains_matrix_node(sym, self.output_notation))
 
     def enter_plist(self, sym, f):
+        if f.props.get('cdot'):
+            # an explicit \cdot product is notation (a series term like
+            # 1 \cdot 2): keep the factors unfolded and unmerged; the
+            # preserved mark keeps the fixed-point iteration idempotent
+            args = self.build_list(f, self.enter_expr)
+            if len(args) == 1:
+                return args[0]
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, args, **f.props))
         args = self.build_list(f, self.enter_expr)
         middle_args = []
         acc = {}

@@ -151,13 +151,14 @@ class Preprocessor(Replacer):
             i += 1
         return res
 
-    def transform_plist(self, sym, args):
+    def transform_plist(self, sym, args, props=None):
         res = self.transform_prefix(args)
         res = self.transform_suffix(res)
         if len(res) == 1:
             return res[0]
-        return self.output_notation.repf(sym, Func(Notation.P_LIST, res))
+        return self.output_notation.repf(
+            sym, Func(Notation.P_LIST, res, **(props or {})))
 
     def enter_plist(self, sym, f):
         args = self.build_list(f, self.enter_expr)
-        return self.transform_plist(self.mapsym(sym), args)
+        return self.transform_plist(self.mapsym(sym), args, f.props)

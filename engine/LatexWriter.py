@@ -395,10 +395,12 @@ class LaTexWriter(object):
         self.writeString('}')
 
     def write_plist(self, f):
+        explicit = f.props.get('cdot', False)
         for i, expr in enumerate(f.args):
             if i > 0:
                 f1 = self.notation.getf(expr, Notation.GROUP)
-                if f1 is not None and f1.props.get('br', '') == '{}':
+                if explicit or (f1 is not None
+                                and f1.props.get('br', '') == '{}'):
                     self.writeString('\\cdot')
             self.write_expr(expr)
 

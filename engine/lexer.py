@@ -163,9 +163,14 @@ class MathLexer(object):
 
              
      def t_LITERAL(self, t):
-         r'\\[A-Za-z]+|[A-Za-z]|\#\w+|\#\#' 
+         r'\\[A-Za-z]+|[A-Za-z]|\#\w+|\#\#'
          val = t.value
          if val[0] == '\\':
+           if val == '\\rightarrow':
+             # normalize the synonym arrow to the canonical \to binder so
+             # \lim_{n \rightarrow \infty} parses as a comparison, not a
+             # product of plain symbols
+             val = t.value = '\\to'
            if val[1:] in MathLexer.tokens:
              t.type = val[1:]
            else:
