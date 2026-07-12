@@ -185,6 +185,50 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(selected['provenance']['step'], 's4')
         self.assertEqual(session.ledger.replay()['status'], 'verified')
 
+    def test_limit_assemble_uses_ordered_ledger_results(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['limit_linearity'](
+            '\\lim_{x \\to 0} (\\frac{\\sin x}{x}+x^2)'))
+        first = json.loads(api['limit_table'](
+            linearity['limits'][0]))
+        second = json.loads(api['limit_substitute'](
+            linearity['limits'][1]))
+        rec = json.loads(api['limit_assemble'](
+            linearity['step']['id'],
+            [first['step']['id'], second['step']['id']]))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '1')
+        self.assertEqual(rec['sources'], {
+            'linearity': 's1', 'values': ['s2', 's3']})
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_assemble_rejects_wrong_source_order(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['limit_linearity'](
+            '\\lim_{x \\to 0} (\\frac{\\sin x}{x}+x^2)'))
+        first = json.loads(api['limit_table'](linearity['limits'][0]))
+        second = json.loads(api['limit_substitute'](linearity['limits'][1]))
+        rec = json.loads(api['limit_assemble'](
+            's1', [second['step']['id'], first['step']['id']]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('piece 1', rec['error'])
+
+    def test_replay_rejects_tampered_limit_assembly_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        linearity = json.loads(api['limit_linearity'](
+            '\\lim_{x \\to 0} (\\frac{\\sin x}{x}+x^2)'))
+        first = json.loads(api['limit_table'](linearity['limits'][0]))
+        second = json.loads(api['limit_substitute'](linearity['limits'][1]))
+        json.loads(api['limit_assemble'](
+            's1', [first['step']['id'], second['step']['id']]))
+        session.ledger.steps[-1]['sources']['values'][0] = 's3'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
     def test_integrate_assemble_rejects_wrong_source_order(self):
         session = DoSession()
         api = make_api(session)

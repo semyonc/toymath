@@ -13,13 +13,13 @@ touch the fixed-point rewrite rules.
 | Module | Purpose |
 |---|---|
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly` (`{monomial: Fraction}`), `RatFunc` with cancellation in the constructor (monomial GCD, univariate Euclidean GCD, multivariate exact trial division, sign/content normalization), `to_ratfunc` / `ratfunc_to_notation` |
-| `engine/primitives.py` | The seven primitives + `equal_exprs` checker + numeric oracle |
+| `engine/primitives.py` | The named primitives + `equal_exprs` checker + numeric oracle |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification, chain-continuity detection |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
 | `engine/agent_do.py` | The `do!` Jupyter endpoint: OpenRouter-backed agent (OpenAI Agents SDK) whose only way to do math is calling the primitives |
 | `engine/plot_sandbox.py` | Sandboxed plotting backends for the do! agent (backend seam; v1: Pyodide under Deno) |
 | `engine/pyodide_runner.mjs` | Vendored Deno script: runs agent plot code in the Pyodide WASM sandbox, captures matplotlib figures as base64 PNGs |
-| `engine/unittests_primitives.py` | 150 tests |
+| `engine/unittests_primitives.py` | Focused primitive/oracle/ledger tests |
 | `engine/unittests_do.py` | do! endpoint tests (scripted fake model; live OpenRouter test behind `TOYMATH_LIVE_TESTS=1`) |
 
 ## The primitives
@@ -119,6 +119,20 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    denominators derivable without trusting the agent's final arithmetic:
    propose partial fractions, split, solve each piece, then assemble the
    recorded results.
+11. **limit_rewrite / limit_substitute / limit_linearity / limit_table /
+   limit_lhopital / limit_assemble** — tactic-shaped limits in place of an
+   autonomous evaluator. `limit_rewrite` carries the binder only after
+   `equal?` verifies the proposed body. `limit_substitute` records continuity
+   and requires an independent approach-sampling oracle to converge.
+   `limit_table` handles constants, six standard zero limits, and finite
+   rational leading-coefficient limits at infinity. `limit_lhopital` performs
+   one step only after numeric probes observe `0/0` or `infinity/infinity`;
+   it records differentiability/nonzero-derivative/existence premises and
+   checks both derivatives plus the original/transformed approach values.
+   One-sided binders (`a^+`, `a^-`) are parsed and sampled directionally.
+   `limit_linearity` records existence assumptions for every piece, and
+   `limit_assemble` retrieves/checks the ordered piece values so a retyped
+   wrong sum cannot enter the ledger.
 
 **equal?** additionally compares canonically over *shared opaque atoms*
 when both sides leave the fragment: syntactic atom equality is conclusive
@@ -133,8 +147,8 @@ Equations compare per-side.
 
 Deliberately absent: `solve` and `simplify` (either would collapse the
 derivation into one opaque move — the visible steps are the product),
-autonomous `integrate` (tactics the agent picks are the honest shape), and
-general `factor` (specialized named factorings instead).
+autonomous `integrate` or `limit` (tactics the agent picks are the honest
+shape), and general `factor` (specialized named factorings instead).
 
 ## Two independent trust legs
 
@@ -202,11 +216,14 @@ s2#43bdac6 [ok] expand: {2}x+{3} - {3} = {7} - {3}  ==>  {2}x = {4}
   provided and `differentiate` refuses it. Bare `|expr|` parses only around a
   single scalar (`|x|`, `|x^2|`); wrap products/sums as `\left|x-1\right|` or
   `|{x-1}|`. `\lfloor·\rfloor`/`\lceil·\rceil` are not yet modelled.
-- Limits, sums, products, and bounded integrals are scope-safe opaque atoms,
-  not yet evaluable tactics. Free-symbol discovery excludes their bound
-  variables, identical binders compare canonically, and alpha-renamed binders
-  remain honestly `unknown`. `\infty` is accepted in an operator bound but is
-  never sampled or treated as a cancellable ring variable elsewhere.
+- Sums, products, and bounded integrals are scope-safe opaque atoms, not yet
+  evaluable tactics. Limits have the named tactic chain above, but table
+  coverage is intentionally narrow and the approach oracle may return
+  `skipped` when Richardson estimates do not converge. Free-symbol discovery
+  excludes bound variables; identical binders compare canonically and
+  alpha-renamed binders remain honestly `unknown`. `\infty` is accepted in an
+  operator bound but is never sampled or treated as a cancellable ring
+  variable elsewhere.
 
 ## The `do!` endpoint (Jupyter)
 

@@ -279,6 +279,15 @@ class MathParser(object):
         '''index-expr : '^' scalar '''
         p[0] = (p[2], None)
 
+     def p_index_expr_approach_direction(self, p):
+        '''index-expr : '^' additive
+                      | '^' '{' additive '}' '''
+        # A bare +/- superscript is not an arithmetic expression: in
+        # ``\lim_{x \to a^+}`` it is an approach-direction marker.  Keep
+        # it as a raw symbol in the power slot so the ordinary index writer
+        # round-trips both braced and unbraced input.
+        p[0] = (p[2] if len(p) == 3 else p[3], None)
+
      def p_index_expr_superscript_subscript(self, p):
         '''index-expr : '^' scalar '_' scalar '''
         p[0] = (p[2], p[4])

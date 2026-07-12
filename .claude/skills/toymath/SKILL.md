@@ -31,6 +31,12 @@ it appends each verified step to a replayable ledger.
 | `evaluate EXPR` | `evaluate "2(2)+3 = 7"` | exact arithmetic; on an equation reports `holds: true/false` |
 | `diff EXPR VAR` | `diff "x \sin x" x` | derivative, checked by central differences |
 | `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root, or at the first matching subterm (reported as `at`). Power terms also match perfect-power constants and monomials: `x^2-4` → `(x+2)(x-2)`, `4x^2-9` → `(2x+3)(2x-3)`, `x^3-8` via `diff_cubes` (binding reported as `numeric`) |
+| `limit_rewrite EXPR NEW_BODY` | `limit_rewrite "\lim_{x \to 1} \frac{x^2-1}{x-1}" "x+1"` | replace the body only after `equal` verifies the proposal |
+| `limit_substitute EXPR` | `limit_substitute "\lim_{x \to 2}(x^2+1)"` | continuity substitution at a finite point; records continuity and requires converged approach samples |
+| `limit_table EXPR` | `limit_table "\lim_{x \to 0}\frac{\sin x}{x}"` | standard zero-limit/constant rules and finite rational leading-coefficient limits at infinity |
+| `limit_lhopital EXPR` | `limit_lhopital "\lim_{x \to 0}\frac{e^x-1}{x}"` | one conditional l'Hopital step after the oracle observes `0/0` or `infinity/infinity`; records theorem premises |
+| `limit_linearity EXPR` | `limit_linearity "\lim_{x \to 0}(\frac{\sin x}{x}+x^2)"` | split a top-level sum and record that every piece limit exists |
+| `limit_assemble EXPR VALUES...` | `limit_assemble "<original limit>" 1 0` | CLI form: independently check ordered piece values and signed assembly; in do! pass the linearity step id and value-step ids so provenance is replayable |
 | `integrate_power_rule EXPR VAR` | `integrate_power_rule "3x^2+2x" x` | term-by-term power rule; accepts `\int ... dx` wrappers; refuses the `1/x` case (that is the table's log rule) |
 | `integrate_table EXPR VAR` | `integrate_table "2\cos x" x` | sin, cos, e^x, sinh, cosh, `1/x`→`ln x` (records `x > 0`); closed under sums and constant factors |
 | `integrate_by_parts EXPR VAR U DV` | `integrate_by_parts "x \sin x" x "x" "\sin x"` | verifies `u·dv` equals the integrand, returns `u v - \int v du`; feed `remaining_integral` to the next tactic |
@@ -89,6 +95,18 @@ recorded step ids in the exact order returned by `integrate_linearity`.
 It applies the recorded signs and adds the single `+ C`; do not type the
 sum into `expand`, because that checks only the expression you typed, not
 whether it contains the right piece results.
+
+## How to take a limit (there is deliberately no autonomous `limit`)
+
+Use one narrow move at a time. Algebraic cancellation belongs in
+`limit_rewrite`; continuity belongs in `limit_substitute`; standard forms in
+`limit_table`; and l'Hopital applies only one conditional derivative-quotient
+step. One-sided `a^+`/`a^-` and infinite approach points are supported. For a
+sum, call `limit_linearity`, solve each returned limit, and in do! finish with
+`limit_assemble(linearity_step, value_steps)`. Do not type the final sum into
+`expand`: that would verify only the typed arithmetic, not which branch values
+were used. Approach sampling uses Richardson extrapolation; non-convergence is
+oracle ignorance and must never be presented as a counterexample.
 
 ## Matrices and vectors (literal, phase 1)
 

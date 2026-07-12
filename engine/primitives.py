@@ -222,6 +222,25 @@ def _plain_symbol_name(sym, notation):
     return None
 
 
+def _approach_point(sym, notation):
+    """Return ``(point, direction)`` for a limit endpoint.
+
+    The parser represents ``a^+`` / ``a^-`` as INDEX(a, power='+/-').
+    Ordinary powered endpoints (``a^2``) remain untouched.  Direction is
+    ``right`` / ``left`` / ``two-sided``.
+    """
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return sym, 'two-sided'
+    sub_l, sup_l, power, sub_r = f.args[1]
+    if sub_l is not None or sup_l is not None or sub_r is not None:
+        return sym, 'two-sided'
+    if (isinstance(power, Symbol) and notation.get(power) is None
+            and power.name in ('+', '-')):
+        return f.args[0], 'right' if power.name == '+' else 'left'
+    return sym, 'two-sided'
+
+
 def _binder_info(head, notation, tail=()):
     """Describe one big-operator binder from its head and product tail.
 
@@ -243,7 +262,10 @@ def _binder_info(head, notation, tail=()):
         rel = notation.getf(lower_inner, Notation.COMP)
         if rel is not None and rel.sym.props.get('op') in ('=', '\\to'):
             info['bound'] = _plain_symbol_name(rel.args[0], notation)
-            info['parameters'].append(rel.args[1])
+            point = rel.args[1]
+            if name == '\\lim':
+                point, _direction = _approach_point(point, notation)
+            info['parameters'].append(point)
         elif lower is not None:
             info['parameters'].append(lower)
         if upper is not None:
@@ -1469,6 +1491,15 @@ def _canonicalize_atom_payload(sym, notation, output_notation):
                 args[1] = _canonicalize_atom_payload(
                     args[1], notation, output_notation)
             return output_notation.setf(f.sym, tuple(args), **f.props)
+        if f is not None and f.sym in (Notation.PLUS, Notation.MINUS):
+            # A signed term inside a mixed opaque payload must keep its
+            # S_LIST separator.  Canonicalizing ``+x^2`` as a standalone
+            # rational expression drops the PLUS wrapper and silently
+            # changes ``opaque + x^2`` into ``opaque * x^2`` when copied
+            # back into the parent list.
+            inner = _canonicalize_atom_payload(
+                f.args[0], notation, output_notation)
+            return output_notation.setf(f.sym, (inner,), **f.props)
 
     try:
         rf = to_ratfunc(sym, notation)
@@ -3031,6 +3062,567 @@ def factor_quadratic(expr, var):
     rec = _result('factor_quadratic', args, expr, result,
                   extra={'roots': roots})
     return _checked(rec)
+
+
+# ---------------------------------------------------------------------------
+# limit tactics (no autonomous `limit`: the agent picks the tactic)
+# ---------------------------------------------------------------------------
+
+def _strip_limit(sym, notation):
+    """Return the body and binder metadata of ``\\lim_{x \\to a} body``."""
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
+                                 Notation.S_GROUP])
+        if g is None or g.props.get('br') == '||':
+            break
+        sym = g.args[0]
+    f = notation.getf(sym, Notation.P_LIST)
+    if f is None:
+        raise PrimitiveError('expected a limit expression')
+    raw = list(f.args)
+    significant = [a for a in raw if not (isinstance(a, Symbol)
+                                           and notation.get(a) is None
+                                           and a.name in Notation.styles)]
+    if len(significant) < 2:
+        raise PrimitiveError('malformed limit (missing body)')
+    head = significant[0]
+    if _big_operator_name(head, notation) != '\\lim':
+        raise PrimitiveError('expected a limit expression')
+    ix = notation.getf(head, Notation.INDEX)
+    if ix is None:
+        raise PrimitiveError('malformed limit (missing approach binder)')
+    sub_l, sup_l, upper, lower = ix.args[1]
+    if sub_l is not None or sup_l is not None or upper is not None:
+        raise PrimitiveError('unsupported decorations on limit operator')
+    lower = _transparent_inner(lower, notation)
+    rel = notation.getf(lower, Notation.COMP)
+    if rel is None or rel.sym.props.get('op') != '\\to':
+        raise PrimitiveError('limit binder must have the form x \\to a')
+    var = _plain_symbol_name(rel.args[0], notation)
+    if var is None:
+        raise PrimitiveError('limit variable must be a plain symbol')
+    point, direction = _approach_point(rel.args[1], notation)
+    if var in free_symbols(point, notation):
+        raise PrimitiveError('limit point must not contain the bound variable')
+    body_items = significant[1:]
+    body = (body_items[0] if len(body_items) == 1 else
+            notation.setf(Notation.P_LIST, tuple(body_items)))
+    return body, var, point, direction
+
+
+def _limit_parts(expr):
+    sym, notation = parse_latex(expr)
+    body, var, point, direction = _strip_limit(sym, notation)
+    return {
+        'sym': sym,
+        'notation': notation,
+        'body': body,
+        'body_latex': write_latex(body, notation),
+        'var': var,
+        'point': point,
+        'point_latex': write_latex(point, notation),
+        'direction': direction,
+    }
+
+
+def _infinity_sign(sym, notation):
+    sym = _transparent_inner(sym, notation)
+    neg = notation.getf(sym, Notation.MINUS)
+    if neg is not None:
+        inner = _transparent_inner(neg.args[0], notation)
+        if (isinstance(inner, Symbol) and notation.get(inner) is None
+                and inner.name == '\\infty'):
+            return -1
+    if (isinstance(sym, Symbol) and notation.get(sym) is None
+            and sym.name == '\\infty'):
+        return 1
+    return None
+
+
+def _limit_latex(var, point, direction, body):
+    suffix = {'two-sided': '', 'left': '^{-}', 'right': '^{+}'}[direction]
+    body = body.strip()
+    if _is_sum_str(body) or body.startswith('-'):
+        body = _paren(body)
+    return f'\\lim_{{{var} \\to {point}{suffix}}} {body}'
+
+
+def _limit_sample_envs(parsed, var, samples, seed=20260705):
+    variables = set()
+    for sym, notation in parsed:
+        variables |= free_symbols(sym, notation)
+    variables.discard(var)
+    if not variables:
+        return [{}]
+    rng = random.Random(seed)
+    return [_sample_point(variables, rng) for _ in range(samples)]
+
+
+def _approach_estimate(body, notation, var, point, point_notation,
+                       direction, env):
+    """Independent numeric limit estimate plus a convergence-error bound."""
+    inf = _infinity_sign(point, point_notation)
+    if inf is not None:
+        x1, x2 = inf * 1e3, inf * 1e4
+        vals = []
+        for x in (x1, x2):
+            e = dict(env)
+            e[var] = x
+            vals.append(numeric_eval(body, notation, e))
+        if any(isinstance(v, list) for v in vals):
+            raise EvalError('matrix-valued limit')
+        v1, v2 = vals
+        # Richardson for a leading O(1/x) error term.
+        return (10 * v2 - v1) / 9, abs(v1 - v2) / 9
+
+    a = numeric_eval(point, point_notation, env)
+    if isinstance(a, list):
+        raise EvalError('matrix-valued limit point')
+    h = 1e-2 * max(1.0, abs(a))
+
+    def at(offset):
+        e = dict(env)
+        e[var] = a + offset
+        v = numeric_eval(body, notation, e)
+        if isinstance(v, list):
+            raise EvalError('matrix-valued limit')
+        return v
+
+    if direction == 'two-sided':
+        coarse = (at(h) + at(-h)) / 2
+        fine = (at(h / 2) + at(-h / 2)) / 2
+        return (4 * fine - coarse) / 3, abs(coarse - fine) / 3
+    sign = 1 if direction == 'right' else -1
+    coarse, fine = at(sign * h), at(sign * h / 2)
+    return 2 * fine - coarse, abs(coarse - fine)
+
+
+def _limit_check(body_latex, var, point_latex, direction, expected_latex,
+                 samples=6):
+    """Check a claimed limit by approach sampling, independently of tactics."""
+    try:
+        body, bn = parse_latex(body_latex)
+        point, pn = parse_latex(point_latex)
+        expected, en = parse_latex(expected_latex)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if var in free_symbols(expected, en):
+        return {'status': 'skipped',
+                'reason': 'claimed limit still contains the bound variable'}
+    envs = _limit_sample_envs(
+        [(body, bn), (point, pn), (expected, en)], var, samples)
+    agreed = 0
+    for env in envs:
+        try:
+            estimate, error = _approach_estimate(
+                body, bn, var, point, pn, direction, env)
+            expected_value = numeric_eval(expected, en, env)
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        if isinstance(expected_value, list):
+            continue
+        scale = max(1.0, abs(estimate), abs(expected_value))
+        delta = abs(estimate - expected_value)
+        if delta / scale > 1e-4:
+            if delta <= 16 * error:
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'expected': expected_value, 'numeric': estimate}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'approach samples did not converge'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'approach-sampling with Richardson extrapolation'}
+
+
+def _limit_equivalence_check(parts, new_body, samples=6):
+    """Approach-sample two bodies at the same binder and compare limits."""
+    try:
+        old, on = parse_latex(parts['body_latex'])
+        new, nn = parse_latex(new_body)
+        point, pn = parse_latex(parts['point_latex'])
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    envs = _limit_sample_envs(
+        [(old, on), (new, nn), (point, pn)], parts['var'], samples)
+    agreed = 0
+    for env in envs:
+        try:
+            a, ea = _approach_estimate(
+                old, on, parts['var'], point, pn, parts['direction'], env)
+            b, eb = _approach_estimate(
+                new, nn, parts['var'], point, pn, parts['direction'], env)
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        scale = max(1.0, abs(a), abs(b))
+        delta = abs(a - b)
+        if delta / scale > 1e-4:
+            if delta <= 16 * (ea + eb):
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'original': a, 'transformed': b}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'approach samples did not converge'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'paired approach-sampling with Richardson extrapolation'}
+
+
+def _limit_fraction(sym, notation):
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
+                                 Notation.S_GROUP])
+        if g is None or g.props.get('br') == '||':
+            break
+        sym = g.args[0]
+    f = notation.get(sym)
+    if f is not None and (f.sym == Notation.SLASH
+                          or f.sym.name in FRAC_NAMES):
+        return f.args[0], f.args[1]
+    return None
+
+
+def _limit_indeterminate_form(parts, numerator, denominator):
+    """Spot-check whether a quotient has 0/0 or infinity/infinity form."""
+    try:
+        ns, nn = parse_latex(numerator)
+        ds, dn = parse_latex(denominator)
+        point, pn = parse_latex(parts['point_latex'])
+    except PrimitiveError:
+        return None
+    envs = _limit_sample_envs(
+        [(ns, nn), (ds, dn), (point, pn)], parts['var'], 4)
+    inf = _infinity_sign(point, pn)
+    for env in envs:
+        if inf is None:
+            try:
+                a = numeric_eval(point, pn, env)
+                at = dict(env)
+                at[parts['var']] = a
+                nv, dv = numeric_eval(ns, nn, at), numeric_eval(ds, dn, at)
+                if (not isinstance(nv, list) and not isinstance(dv, list)
+                        and abs(nv) < 1e-8 and abs(dv) < 1e-8):
+                    return '0/0'
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                pass
+        try:
+            if inf is not None:
+                xs = (inf * 1e2, inf * 1e3)
+            else:
+                a = numeric_eval(point, pn, env)
+                sign = -1 if parts['direction'] == 'left' else 1
+                h = 1e-2 * max(1.0, abs(a))
+                xs = (a + sign * h, a + sign * h / 2)
+            nm, dm = [], []
+            for x in xs:
+                e = dict(env)
+                e[parts['var']] = x
+                nm.append(abs(numeric_eval(ns, nn, e)))
+                dm.append(abs(numeric_eval(ds, dn, e)))
+            if (nm[1] > 50 and dm[1] > 50
+                    and nm[1] > 1.5 * nm[0]
+                    and dm[1] > 1.5 * dm[0]):
+                return 'infinity/infinity'
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError,
+                TypeError):
+            continue
+    return None
+
+
+def limit_rewrite(expr, new_body):
+    """Replace a limit body by an agent-proposed mechanically equal body."""
+    args = {'expr': expr, 'new_body': new_body}
+    try:
+        parts = _limit_parts(expr)
+        parse_latex(new_body)
+    except PrimitiveError as e:
+        return _error('limit_rewrite', args, str(e))
+    eq = equal_exprs(new_body, parts['body_latex'])
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('limit_rewrite', args,
+                      'new body is not mechanically equal to the current '
+                      f'one (verdict: {eq.get("verdict", "error")})')
+    result = _limit_latex(parts['var'], parts['point_latex'],
+                          parts['direction'], new_body)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('limit_rewrite', args,
+                      f'internal: unparseable result: {e}')
+    check = {'status': 'agree',
+             'method': f'body equality via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    return _result('limit_rewrite', args, expr, result, check=check,
+                   extra={'body': parts['body_latex']})
+
+
+def limit_substitute(expr):
+    """Apply continuity: substitute the approach point into the limit body."""
+    args = {'expr': expr}
+    try:
+        parts = _limit_parts(expr)
+    except PrimitiveError as e:
+        return _error('limit_substitute', args, str(e))
+    ps, pn = parse_latex(parts['point_latex'])
+    if _infinity_sign(ps, pn) is not None:
+        return _error('limit_substitute', args,
+                      'continuity substitution requires a finite point')
+    sub = substitute(parts['body_latex'], parts['var'], parts['point_latex'])
+    if not sub.get('ok'):
+        return _error('limit_substitute', args,
+                      'cannot substitute the approach point: '
+                      + sub.get('error', 'unknown error'))
+    result = sub['result']
+    folded = expand(result)
+    if folded.get('ok') and folded.get('check', {}).get('status') != 'disagree':
+        result = folded['result']
+    check = _limit_check(parts['body_latex'], parts['var'],
+                         parts['point_latex'], parts['direction'], result)
+    if check.get('status') != 'agree':
+        return _error('limit_substitute', args,
+                      'continuity substitution was not confirmed by the '
+                      'approach oracle: ' + check.get('reason',
+                                                      check.get('status',
+                                                                'unknown')))
+    assumption = {'text': (f'{parts["body_latex"]} is continuous at '
+                           f'{parts["var"]} = {parts["point_latex"]}')}
+    return _result('limit_substitute', args, expr, result,
+                   assumptions=[assumption], check=check,
+                   extra={'body': parts['body_latex'],
+                          'var': parts['var'],
+                          'point': parts['point_latex'],
+                          'direction': parts['direction']})
+
+
+def limit_linearity(expr):
+    """Split the limit of a top-level sum, conditional on piece limits."""
+    args = {'expr': expr}
+    try:
+        parts = _limit_parts(expr)
+    except PrimitiveError as e:
+        return _error('limit_linearity', args, str(e))
+    sym, notation = parse_latex(parts['body_latex'])
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
+                                 Notation.S_GROUP])
+        if g is None or g.props.get('br') == '||':
+            break
+        sym = g.args[0]
+    f = notation.getf(sym, Notation.S_LIST)
+    if f is None:
+        return _error('limit_linearity', args,
+                      'limit body is not a top-level sum; nothing to split')
+    terms = []
+    assumptions = []
+    for term in f.args:
+        sign = notation.vgetf(term, [Notation.PLUS, Notation.MINUS])
+        neg = sign is not None and sign.sym == Notation.MINUS
+        inner = sign.args[0] if sign is not None else term
+        body = write_latex(inner, notation)
+        piece = _limit_latex(parts['var'], parts['point_latex'],
+                             parts['direction'], body)
+        terms.append({'sign': -1 if neg else 1, 'limit': piece})
+        assumptions.append({'text': f'{piece} exists'})
+    result = ('-' if terms[0]['sign'] < 0 else '') + terms[0]['limit']
+    for term in terms[1:]:
+        result += (' - ' if term['sign'] < 0 else ' + ') + term['limit']
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('limit_linearity', args,
+                      f'internal: unparseable result: {e}')
+    return _result('limit_linearity', args, expr, result,
+                   assumptions=assumptions,
+                   check={'status': 'exact',
+                          'method': 'linearity of limits'},
+                   extra={'limits': [t['limit'] for t in terms],
+                          'terms': terms})
+
+
+def limit_assemble(expr, values):
+    """Assemble recorded results of a ``limit_linearity`` split.
+
+    ``values`` is ordered like the split terms.  Each candidate is checked
+    independently against its own limit before the signed sum is built, and
+    the whole result is checked once more against the original limit.
+    """
+    args = {'expr': expr,
+            'values': list(values) if isinstance(values, (list, tuple))
+            else values}
+    if not isinstance(values, (list, tuple)):
+        return _error('limit_assemble', args,
+                      'values must be an ordered list')
+    split = limit_linearity(expr)
+    if not split.get('ok'):
+        return _error('limit_assemble', args,
+                      'cannot assemble without a linearity split: '
+                      + split.get('error', 'unknown error'))
+    terms = split['terms']
+    if len(values) != len(terms):
+        return _error('limit_assemble', args,
+                      f'expected {len(terms)} values in linearity order, '
+                      f'got {len(values)}')
+    rendered = []
+    piece_checks = []
+    for i, (term, value) in enumerate(zip(terms, values), 1):
+        if not isinstance(value, str) or not value.strip():
+            return _error('limit_assemble', args,
+                          f'piece {i} has no limit value')
+        try:
+            parse_latex(value)
+            piece = _limit_parts(term['limit'])
+        except PrimitiveError as e:
+            return _error('limit_assemble', args,
+                          f'piece {i} is malformed: {e}')
+        check = _limit_check(piece['body_latex'], piece['var'],
+                             piece['point_latex'], piece['direction'], value)
+        if check.get('status') != 'agree':
+            return _error('limit_assemble', args,
+                          f'piece {i} is not confirmed as the limit of '
+                          f'{piece["body_latex"]!r}')
+        piece_checks.append({'piece': i, 'check': check})
+        rendered.append(('-' if term['sign'] < 0 else '+', _paren(value)))
+    first_sign, first = rendered[0]
+    assembled = ('-' if first_sign == '-' else '') + first
+    for sign, value in rendered[1:]:
+        assembled += f' {sign} {value}'
+    folded = expand(assembled)
+    if not folded.get('ok'):
+        return _error('limit_assemble', args,
+                      'could not canonicalize the signed assembly: '
+                      + folded.get('error', 'unknown error'))
+    result = folded['result']
+    original = _limit_parts(expr)
+    whole_check = _limit_check(
+        original['body_latex'], original['var'], original['point_latex'],
+        original['direction'], result)
+    if whole_check.get('status') != 'agree':
+        return _error('limit_assemble', args,
+                      'the signed assembly was not confirmed against the '
+                      'original limit')
+    check = whole_check
+    for item in piece_checks:
+        check = _merge_checks(check, item['check'])
+    if check.get('status') == 'agree':
+        check['method'] = 'per-piece limits plus signed linearity'
+    return _result('limit_assemble', args, expr, result,
+                   assumptions=split['assumptions'], check=check,
+                   extra={'pieces': piece_checks,
+                          'linearity_terms': terms})
+
+
+def limit_table(expr):
+    """Apply one narrow standard-limit or rational-at-infinity table rule."""
+    args = {'expr': expr}
+    try:
+        parts = _limit_parts(expr)
+    except PrimitiveError as e:
+        return _error('limit_table', args, str(e))
+    body, bn = parse_latex(parts['body_latex'])
+    point, pn = parse_latex(parts['point_latex'])
+    rule = None
+    result = None
+    if parts['var'] not in free_symbols(body, bn):
+        result, rule = parts['body_latex'], 'constant'
+    elif _infinity_sign(point, pn) is not None:
+        try:
+            rf = to_ratfunc(body, bn)
+            if (rf.variables() - {parts['var']}
+                    or rf.num.degree(parts['var']) > rf.den.degree(parts['var'])):
+                raise NotInFragment('non-finite rational limit')
+            if rf.num.degree(parts['var']) < rf.den.degree(parts['var']):
+                result = '0'
+            else:
+                result = _q_str(rf.num.leading_coeff()
+                                / rf.den.leading_coeff())
+            rule = 'rational leading coefficients at infinity'
+        except (NotInFragment, ZeroDivisionError):
+            pass
+    else:
+        zero = equal_exprs(parts['point_latex'], '0')
+        if zero.get('ok') and zero.get('verdict') == 'yes':
+            x = parts['var']
+            table = [
+                (f'\\frac{{\\sin {x}}}{{{x}}}', '1', 'sin(x)/x'),
+                (f'\\frac{{{x}}}{{\\sin {x}}}', '1', 'x/sin(x)'),
+                (f'\\frac{{1-\\cos {x}}}{{{x}}}', '0',
+                 '(1-cos(x))/x'),
+                (f'\\frac{{1-\\cos {x}}}{{{x}^2}}', '\\frac{1}{2}',
+                 '(1-cos(x))/x^2'),
+                (f'\\frac{{e^{{{x}}}-1}}{{{x}}}', '1', '(e^x-1)/x'),
+                (f'\\frac{{\\ln(1+{x})}}{{{x}}}', '1', 'ln(1+x)/x'),
+            ]
+            for pattern, value, name in table:
+                eq = equal_exprs(parts['body_latex'], pattern)
+                if eq.get('ok') and eq.get('verdict') == 'yes':
+                    result, rule = value, name
+                    break
+    if result is None:
+        return _error('limit_table', args,
+                      'no table rule for this limit; use limit_rewrite, '
+                      'limit_substitute, or limit_lhopital')
+    if rule == 'constant':
+        check = {'status': 'exact', 'method': 'limit of a constant'}
+    else:
+        check = _limit_check(parts['body_latex'], parts['var'],
+                             parts['point_latex'], parts['direction'], result)
+    return _result('limit_table', args, expr, result, check=check,
+                   extra={'rule': rule, 'body': parts['body_latex'],
+                          'var': parts['var'],
+                          'point': parts['point_latex'],
+                          'direction': parts['direction']})
+
+
+def limit_lhopital(expr):
+    """One conditional l'Hopital step on a sampled 0/0 or infinity/infinity."""
+    args = {'expr': expr}
+    try:
+        parts = _limit_parts(expr)
+        frac = _limit_fraction(parts['body'], parts['notation'])
+        if frac is None:
+            raise PrimitiveError('limit body is not a quotient')
+        numerator = write_latex(frac[0], parts['notation'])
+        denominator = write_latex(frac[1], parts['notation'])
+    except PrimitiveError as e:
+        return _error('limit_lhopital', args, str(e))
+    form = _limit_indeterminate_form(parts, numerator, denominator)
+    if form is None:
+        return _error('limit_lhopital', args,
+                      'oracle did not confirm a 0/0 or infinity/infinity '
+                      'indeterminate form')
+    nd = differentiate(numerator, parts['var'])
+    dd = differentiate(denominator, parts['var'])
+    if not nd.get('ok') or not dd.get('ok'):
+        return _error('limit_lhopital', args,
+                      'could not differentiate numerator and denominator')
+    new_body = _d_frac(nd['result'], dd['result'])
+    result = _limit_latex(parts['var'], parts['point_latex'],
+                          parts['direction'], new_body)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('limit_lhopital', args,
+                      f'internal: unparseable result: {e}')
+    assumptions = [
+        {'text': (f'{numerator} and {denominator} are differentiable in '
+                  'a punctured neighborhood of the approach point')},
+        {'text': (f'{dd["result"]} \\ne 0 in that punctured neighborhood')},
+        {'text': f'the transformed limit exists or diverges to infinity'},
+    ]
+    check = _limit_equivalence_check(parts, new_body)
+    check = _merge_checks(check, nd.get('check', {'status': 'skipped'}))
+    check = _merge_checks(check, dd.get('check', {'status': 'skipped'}))
+    if check.get('status') == 'agree':
+        check['method'] = ('paired approach samples plus independently '
+                           'checked derivatives')
+    return _result('limit_lhopital', args, expr, result,
+                   assumptions=assumptions, check=check,
+                   extra={'indeterminate_form': form,
+                          'numerator_derivative': nd['result'],
+                          'denominator_derivative': dd['result']})
 
 
 # ---------------------------------------------------------------------------

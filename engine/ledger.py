@@ -21,6 +21,8 @@ LEDGER_VERSION = 1
 TRANSFORMING_OPS = frozenset({
     'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
     'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
+    'limit_rewrite', 'limit_substitute', 'limit_linearity', 'limit_table',
+    'limit_lhopital', 'limit_assemble',
     'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
     'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
     'integrate_assemble'})
@@ -80,8 +82,9 @@ class Ledger(object):
             'assumptions': result.get('assumptions', []),
             'check': result.get('check', {'status': 'skipped'}),
         }
-        # integration steps mint their constant; keep that provenance so
-        # later cells can tell a session constant from a user variable
+        # Integration constants and assembly source ids stay in the
+        # replayable artifact; later cells can distinguish session constants
+        # from user variables and replay can audit provenance.
         if result.get('constant'):
             step['constant'] = result['constant']
         if result.get('terms'):
@@ -149,6 +152,16 @@ class Ledger(object):
             'factor_gcd': lambda a: primitives.factor_gcd(a['expr']),
             'factor_quadratic': lambda a: primitives.factor_quadratic(
                 a['expr'], a['var']),
+            'limit_rewrite': lambda a: primitives.limit_rewrite(
+                a['expr'], a['new_body']),
+            'limit_substitute': lambda a: primitives.limit_substitute(
+                a['expr']),
+            'limit_linearity': lambda a: primitives.limit_linearity(
+                a['expr']),
+            'limit_table': lambda a: primitives.limit_table(a['expr']),
+            'limit_lhopital': lambda a: primitives.limit_lhopital(a['expr']),
+            'limit_assemble': lambda a: primitives.limit_assemble(
+                a['expr'], a['values']),
             'integrate_power_rule': lambda a: primitives.integrate_power_rule(
                 a['expr'], a['var']),
             'integrate_table': lambda a: primitives.integrate_table(
@@ -196,6 +209,29 @@ class Ledger(object):
                             'status': 'failed', 'step': step['id'],
                             'reason': ('antiderivative provenance mismatch '
                                        f'at {source_id}')}
+            if step['op'] == 'limit_assemble':
+                sources = step.get('sources') or {}
+                linearity = seen.get(sources.get('linearity'))
+                if linearity is None or linearity.get('op') != \
+                        'limit_linearity':
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'missing limit-linearity provenance'}
+                args = step.get('args', {})
+                if linearity.get('input') != args.get('expr'):
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'limit-linearity provenance mismatch'}
+                source_ids = sources.get('values') or []
+                values = args.get('values') or []
+                if len(source_ids) != len(values):
+                    return {'status': 'failed', 'step': step['id'],
+                            'reason': 'limit-value provenance mismatch'}
+                for source_id, value in zip(source_ids, values):
+                    source = seen.get(source_id)
+                    if source is None or source.get('result') != value:
+                        return {
+                            'status': 'failed', 'step': step['id'],
+                            'reason': ('limit-value provenance mismatch at '
+                                       f'{source_id}')}
             fn = dispatch.get(step['op'])
             if fn is None:
                 return {'status': 'failed', 'step': step['id'],
@@ -261,6 +297,11 @@ class Ledger(object):
                 ids = ', '.join(src.get('antiderivatives', []))
                 arg_note = (f" — sources `{src.get('linearity', '?')}` "
                             f"→ `{ids}`")
+            elif step['op'] == 'limit_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('values', []))
+                arg_note = (f" — sources `{src.get('linearity', '?')}` "
+                            f"→ `{ids}`")
             lines.append(f"**{step['id']}** `{step['op']}`{arg_note} "
                          f"— *{mark}*{branch}")
             lines.append('')
@@ -294,6 +335,12 @@ class Ledger(object):
                     '      sources: linearity '
                     + src.get('linearity', '?') + '; pieces '
                     + ', '.join(src.get('antiderivatives', [])))
+            elif step['op'] == 'limit_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: linearity '
+                    + src.get('linearity', '?') + '; values '
+                    + ', '.join(src.get('values', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
         if self.assumptions:

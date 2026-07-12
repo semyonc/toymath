@@ -126,6 +126,32 @@ def main(argv=None):
     p.add_argument('expr')
     p.add_argument('var')
 
+    p = add_parser('limit_rewrite',
+                   help='replace a limit body by a verified-equal body')
+    p.add_argument('expr')
+    p.add_argument('new_body')
+
+    p = add_parser('limit_substitute',
+                   help='evaluate a finite limit by continuity substitution')
+    p.add_argument('expr')
+
+    p = add_parser('limit_linearity',
+                   help='split the limit of a sum (conditional on pieces)')
+    p.add_argument('expr')
+
+    p = add_parser('limit_table',
+                   help='apply a standard limit table rule')
+    p.add_argument('expr')
+
+    p = add_parser('limit_lhopital',
+                   help='apply one checked conditional lHopital step')
+    p.add_argument('expr')
+
+    p = add_parser('limit_assemble',
+                   help='assemble ordered values after limit_linearity')
+    p.add_argument('expr')
+    p.add_argument('values', nargs='+')
+
     p = add_parser('factor_gcd', help='pull out the common factor')
     p.add_argument('expr')
 
@@ -175,6 +201,18 @@ def main(argv=None):
                                            args.new_integrand)
     elif args.cmd == 'integrate_linearity':
         res = primitives.integrate_linearity(args.expr, args.var)
+    elif args.cmd == 'limit_rewrite':
+        res = primitives.limit_rewrite(args.expr, args.new_body)
+    elif args.cmd == 'limit_substitute':
+        res = primitives.limit_substitute(args.expr)
+    elif args.cmd == 'limit_linearity':
+        res = primitives.limit_linearity(args.expr)
+    elif args.cmd == 'limit_table':
+        res = primitives.limit_table(args.expr)
+    elif args.cmd == 'limit_lhopital':
+        res = primitives.limit_lhopital(args.expr)
+    elif args.cmd == 'limit_assemble':
+        res = primitives.limit_assemble(args.expr, args.values)
     elif args.cmd == 'factor_gcd':
         res = primitives.factor_gcd(args.expr)
     elif args.cmd == 'factor_quadratic':

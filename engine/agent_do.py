@@ -94,6 +94,12 @@ _DO_RULES = """
   then call `integrate_assemble` with the linearity step id and the ordered
   ledger step ids of the piece antiderivatives. Never type the final sum into
   `expand`: that checks only the typed expression, not piece provenance.
+- For limits: use `limit_rewrite` for an equal body, `limit_substitute` only
+  at a continuity point, `limit_table` for a named standard form, and
+  `limit_lhopital` for one sampled 0/0 or infinity/infinity step. Split sums
+  with `limit_linearity`, solve every returned piece, then call
+  `limit_assemble` with the linearity step id and ordered value-step ids.
+  Never type the final sum into `expand`; provenance must stay explicit.
 """
 
 _PLOT_RULES = """
@@ -116,7 +122,7 @@ returns one JSON record; `check.status: "agree"` means an independent
 numeric oracle confirmed the step. There is deliberately no `solve`,
 `simplify`, or autonomous `integrate`: drive the derivation move by move
 (apply / expand / collect / substitute / evaluate / diff / rewrite /
-factor_* / integrate_* tactics), feeding each step's `result` verbatim
+factor_* / integrate_* / limit_* tactics), feeding each step's `result` verbatim
 into the next call. Surface recorded assumptions; results are
 "mechanically checked", not "proved".
 """
@@ -298,6 +304,95 @@ def make_api(session):
             var: differentiation variable.
         """
         return _run(primitives.differentiate, expr, var)
+
+    def limit_rewrite(expr: str, new_body: str) -> str:
+        """Replace a limit body by an expression YOU propose; equal?
+        mechanically verifies the bodies before carrying the binder over.
+
+        Args:
+            expr: full LaTeX limit, e.g. "\\lim_{x \\to 1} ...".
+            new_body: mechanically equivalent body in LaTeX.
+        """
+        return _run(primitives.limit_rewrite, expr, new_body)
+
+    def limit_substitute(expr: str) -> str:
+        """Evaluate a finite limit by continuity substitution. Records the
+        continuity assumption and requires the approach oracle to converge.
+
+        Args:
+            expr: full LaTeX limit expression.
+        """
+        return _run(primitives.limit_substitute, expr)
+
+    def limit_linearity(expr: str) -> str:
+        """Split the limit of a top-level sum into ordered limit pieces.
+        The result records existence assumptions; solve the pieces and close
+        them with limit_assemble.
+
+        Args:
+            expr: full LaTeX limit whose body is a sum.
+        """
+        return _run(primitives.limit_linearity, expr)
+
+    def limit_table(expr: str) -> str:
+        """Apply a standard finite limit rule, constant rule, or finite
+        rational leading-coefficient rule at infinity.
+
+        Args:
+            expr: full LaTeX limit expression.
+        """
+        return _run(primitives.limit_table, expr)
+
+    def limit_lhopital(expr: str) -> str:
+        """Apply one l'Hopital step after the oracle observes 0/0 or
+        infinity/infinity; records the theorem's differentiability and
+        existence premises.
+
+        Args:
+            expr: full quotient limit expression.
+        """
+        return _run(primitives.limit_lhopital, expr)
+
+    def limit_assemble(linearity_step: str,
+                       value_steps: list[str]) -> str:
+        """Assemble a limit-linearity split from RECORDED piece values.
+
+        Args:
+            linearity_step: ledger id of the limit_linearity step.
+            value_steps: ordered ledger ids whose results are piece limits.
+        """
+        with session._lock:
+            steps = list(session.ledger.steps)
+        by_id = {step['id']: step for step in steps}
+        linearity = by_id.get(linearity_step)
+        if linearity is None or linearity.get('op') != 'limit_linearity':
+            return json.dumps({
+                'ok': False, 'op': 'limit_assemble',
+                'error': (f'{linearity_step!r} is not a recorded '
+                          'limit_linearity step'),
+            }, ensure_ascii=False)
+        if not isinstance(value_steps, list):
+            return json.dumps({
+                'ok': False, 'op': 'limit_assemble',
+                'error': 'value_steps must be an ordered list',
+            }, ensure_ascii=False)
+        values = []
+        for source_id in value_steps:
+            source = by_id.get(source_id)
+            if source is None or source.get('result') is None:
+                return json.dumps({
+                    'ok': False, 'op': 'limit_assemble',
+                    'error': f'unknown transforming step {source_id!r}',
+                }, ensure_ascii=False)
+            values.append(source['result'])
+        result = primitives.limit_assemble(linearity['input'], values)
+        if result.get('ok'):
+            result['sources'] = {
+                'linearity': linearity_step,
+                'values': list(value_steps),
+            }
+        return json.dumps(session.record(result), ensure_ascii=False,
+                          default=str)
 
     def rewrite(expr: str, lemma: str, direction: str) -> str:
         """Apply a registered equality lemma at the root or first matching
@@ -548,6 +643,8 @@ def make_api(session):
         return json.dumps(reply, ensure_ascii=False)
 
     fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
+           limit_rewrite, limit_substitute, limit_linearity, limit_table,
+           limit_lhopital, limit_assemble,
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, integrate_rewrite, integrate_linearity,
            integrate_assemble,

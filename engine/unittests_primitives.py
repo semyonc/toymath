@@ -1542,6 +1542,103 @@ class TestPuiseuxFold(unittest.TestCase):
         self.assertEqual(r['assumptions'], [])
 
 
+class TestLimitTactics(unittest.TestCase):
+    def ok(self, rec, status='agree'):
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], status, rec.get('check'))
+        return rec
+
+    def test_opaque_binder_sum_keeps_plus_separator(self):
+        # Stress regression: deep atom canonicalization used to turn the
+        # mixed body ``sin(x)/x + x^2`` into a product while the opaque
+        # limit made the ordinary oracle skip the transformation.
+        r = P.expand('\\lim_{x \\to 0} (\\frac{\\sin x}{x}+x^2)')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('+x^{2}', r['result'].replace(' ', ''))
+
+    def test_one_sided_limit_round_trip_and_scope(self):
+        for text, marker in [
+                ('\\lim_{x \\to 0^-} \\frac{1}{x}', '^-'),
+                ('\\lim_{x \\to 0^{+}} \\frac{1}{x}', '^+')]:
+            sym, notation = P.parse_latex(text)
+            out = P.write_latex(sym, notation).replace(' ', '')
+            self.assertIn(marker, out)
+            self.assertEqual(P.free_symbols(sym, notation), set())
+            P.parse_latex(out)
+
+    def test_continuity_substitution(self):
+        r = self.ok(P.limit_substitute(
+            '\\lim_{x \\to 2} (x^2+1)'))
+        self.assertEqual(r['result'], '5')
+        self.assertIn('continuous', r['assumptions'][0]['text'])
+
+    def test_continuity_substitution_refuses_pole(self):
+        r = P.limit_substitute('\\lim_{x \\to 0} \\frac{1}{x}')
+        self.assertFalse(r['ok'])
+        self.assertIn('approach oracle', r['error'])
+
+    def test_rewrite_body_preserves_direction(self):
+        r = self.ok(P.limit_rewrite(
+            '\\lim_{x \\to 1^+} \\frac{x^2-1}{x-1}', 'x+1'))
+        self.assertIn('^{+}', r['result'])
+        self.assertIn('x+1', r['result'].replace(' ', ''))
+
+    def test_standard_table_and_rational_infinity(self):
+        constant = self.ok(P.limit_table(
+            '\\lim_{x \\to \\infty} 7'), status='exact')
+        self.assertEqual(constant['result'], '7')
+        r = self.ok(P.limit_table(
+            '\\lim_{x \\to 0} \\frac{\\sin x}{x}'))
+        self.assertEqual(r['result'], '1')
+        self.assertEqual(r['rule'], 'sin(x)/x')
+        r = self.ok(P.limit_table(
+            '\\lim_{x \\to \\infty} '
+            '\\frac{3x^2+1}{x^2-2}'))
+        self.assertEqual(r['result'], '3')
+
+    def test_table_refuses_unknown_form(self):
+        r = P.limit_table('\\lim_{x \\to 0} \\frac{\\tan x}{x}')
+        self.assertFalse(r['ok'])
+        self.assertIn('no table rule', r['error'])
+
+    def test_lhopital_zero_over_zero(self):
+        r = self.ok(P.limit_lhopital(
+            '\\lim_{x \\to 0} \\frac{e^x-1}{x}'))
+        self.assertEqual(r['indeterminate_form'], '0/0')
+        self.assertIn('e^{x}', r['result'])
+        self.assertTrue(r['assumptions'])
+
+    def test_lhopital_infinity_over_infinity(self):
+        r = self.ok(P.limit_lhopital(
+            '\\lim_{x \\to \\infty} '
+            '\\frac{x^2+1}{x^2-1}'))
+        self.assertEqual(r['indeterminate_form'], 'infinity/infinity')
+
+    def test_lhopital_refuses_non_indeterminate_quotient(self):
+        r = P.limit_lhopital(
+            '\\lim_{x \\to 0} \\frac{x+1}{x+2}')
+        self.assertFalse(r['ok'])
+        self.assertIn('indeterminate form', r['error'])
+
+    def test_linearity_and_checked_assembly(self):
+        expr = '\\lim_{x \\to 0} (\\frac{\\sin x}{x}+x^2)'
+        split = self.ok(P.limit_linearity(expr), status='exact')
+        self.assertEqual(len(split['terms']), 2)
+        assembled = self.ok(P.limit_assemble(expr, ['1', '0']))
+        self.assertEqual(assembled['result'], '1')
+        bad = P.limit_assemble(expr, ['0', '1'])
+        self.assertFalse(bad['ok'])
+        self.assertIn('piece 1', bad['error'])
+
+    def test_limit_steps_replay(self):
+        ledger = Ledger()
+        ledger.record(P.limit_lhopital(
+            '\\lim_{x \\to 0} \\frac{e^x-1}{x}'))
+        ledger.record(P.limit_substitute(ledger.last_result()))
+        self.assertEqual(ledger.last_result(), '1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
 class TestIndexItemRoundTrip(unittest.TestCase):
     def test_raw_frac_power_is_braced(self):
         # the kernel Preprocessor puts raw FracValue in INDEX power slots;
