@@ -349,7 +349,10 @@ class MathShell(object):
             self._do_error(str(e))
             return
         try:
-            sym, notation = primitives.parse_latex(text)
+            # ellipsis may legitimately appear inside a command argument
+            # (the agent interprets it via sum_from_ellipsis); the glue
+            # expand() below still rejects it outside command results
+            sym, notation = primitives.parse_latex(text, allow_ellipsis=True)
         except primitives.PrimitiveError as e:
             self._do_error(str(e))
             return

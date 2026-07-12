@@ -149,14 +149,31 @@ class ExprResolver(Replicator):
             raise ExprCommandError(res.get('error', f'{cmd.name}! failed'))
         result = res.get('final_result')
         if not result:
-            raise ExprCommandError(f'{cmd.name}! produced no result')
+            raise ExprCommandError(
+                self._with_summary(f'{cmd.name}! produced no result', res))
         provenance = res.get('final_provenance') or {}
         if provenance.get('status') != 'verified':
             raise ExprCommandError(
                 f'{cmd.name}! produced an unverified final value; inline '
                 'commands must return a result established by a ledger step')
+        if (provenance.get('source') != 'claim'
+                and not _chains_to_goal(res.get('steps') or [],
+                                        provenance.get('step'), arg_latex)):
+            raise ExprCommandError(self._with_summary(
+                f'{cmd.name}! did not close: its final value comes from a '
+                'verified step that is not connected to the requested '
+                'expression by a checked chain', res))
         self.cache[key] = result
         return result
+
+    @staticmethod
+    def _with_summary(message, res):
+        summary = ' '.join((res.get('summary') or '').split())
+        if not summary:
+            return message
+        if len(summary) > 600:
+            summary = summary[:600] + '…'
+        return f'{message} — agent notes: {summary}'
 
     def _run_direct(self, cmd, arg_latex, var=None):
         """The zero-token tier: the command IS one verified primitive. No
@@ -188,7 +205,10 @@ class ExprResolver(Replicator):
         C across cells); otherwise ambiguity is refused, never guessed -
         `name! [x] <expr>` chooses explicitly."""
         import primitives
-        sym, notation = primitives.parse_latex(arg_latex)
+        try:
+            sym, notation = primitives.parse_latex(arg_latex)
+        except primitives.PrimitiveError as e:
+            raise ExprCommandError(f'{cmd.name}! ({cmd.direct}): {e}')
         names = sorted(n for n in primitives.free_symbols(sym, notation)
                        if '_{' not in n and n not in self.minted_names)
         if len(names) == 1:
@@ -258,6 +278,37 @@ class ExprResolver(Replicator):
             self.minted_names.add(fresh)
         self.used_names |= (rnames - renamed)
         return mapping
+
+
+def _chains_to_goal(steps, final_id, goal_latex):
+    """True when the run's final step is connected to the goal expression
+    by an unbroken input==result chain of this run's recorded steps.
+
+    Guards the last-transform fallback in `run_instruction`: a sub-run that
+    verified steps about *pieces* of the goal (or something else entirely)
+    must not have its last intermediate spliced in as the command's value.
+    Linkage is structural identity (no oracle): agents pass recorded
+    strings verbatim, and value-equality would be too permissive here."""
+    import primitives
+    transforming = [s for s in steps if s.get('result') is not None]
+    if not transforming:
+        return False
+    by_id = {s['id']: s for s in transforming}
+    cur = by_id.get(final_id, transforming[-1])
+    seen = set()
+    while cur is not None and cur['id'] not in seen:
+        seen.add(cur['id'])
+        cur_input = cur.get('input') or ''
+        if primitives.covers_goal(cur_input, goal_latex):
+            return True
+        prev = None
+        for s in transforming:
+            if s['id'] == cur['id']:
+                break
+            if primitives.same_expression(s['result'], cur_input):
+                prev = s
+        cur = prev
+    return False
 
 
 def command_names(sym, notation):

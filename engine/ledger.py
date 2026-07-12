@@ -23,6 +23,7 @@ TRANSFORMING_OPS = frozenset({
     'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
     'limit_rewrite', 'limit_substitute', 'limit_linearity', 'limit_table',
     'limit_lhopital', 'limit_assemble',
+    'sum_from_ellipsis', 'sum_rewrite', 'sum_telescope',
     'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
     'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
     'integrate_assemble'})
@@ -362,6 +363,12 @@ class Ledger(object):
             'limit_lhopital': lambda a: primitives.limit_lhopital(a['expr']),
             'limit_assemble': lambda a: primitives.limit_assemble(
                 a['expr'], a['values']),
+            'sum_from_ellipsis': lambda a: primitives.sum_from_ellipsis(
+                a['expr'], a['sum_form']),
+            'sum_rewrite': lambda a: primitives.sum_rewrite(
+                a['expr'], a['new_summand']),
+            'sum_telescope': lambda a: primitives.sum_telescope(
+                a['expr'], a['term']),
             'integrate_power_rule': lambda a: primitives.integrate_power_rule(
                 a['expr'], a['var']),
             'integrate_table': lambda a: primitives.integrate_table(

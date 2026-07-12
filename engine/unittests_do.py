@@ -336,7 +336,38 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(len(session.new_steps()), 1)
 
 
+LIM_SUM_EXPR = ('\\lim _{n \\rightarrow \\infty}\\left['
+                '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+                '+\\ldots+\\frac{1}{n(n+1)}\\right]')
+
+LIM_SUM_SCRIPT = [
+    [tool_call('sum_from_ellipsis',
+               {'expr': LIM_SUM_EXPR,
+                'sum_form': '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}'}, 'c1')],
+    [tool_call('sum_telescope',
+               {'expr': ('\\lim_{n \\to \\infty} \\sum_{k=1}^{n} '
+                         '\\frac{1}{k(k+1)}'),
+                'term': '\\frac{1}{k}'}, 'c2')],
+    [tool_call('limit_table',
+               {'expr': '\\lim_{n \\to \\infty} \\frac{n}{n+1}'}, 'c3')],
+    [message('Interpreted the ellipsis, telescoped, closed at 1.')],
+]
+
+
 class TestScriptedAgent(unittest.TestCase):
+    def test_ellipsis_series_limit_closes_via_sum_tactics(self):
+        res = run_instruction('evaluate ' + LIM_SUM_EXPR,
+                              model=ScriptedModel(LIM_SUM_SCRIPT))
+        self.assertTrue(res['ok'])
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['sum_from_ellipsis', 'sum_telescope',
+                          'limit_table'])
+        self.assertEqual(res['final_result'], '1')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        # the pattern continuation is honestly conditional
+        self.assertTrue(any('\\ldots' in a['text']
+                            for a in res['assumptions']))
+
     def test_full_run(self):
         seen = []
         res = run_instruction('solve 2x + 3 = 7 for x',
@@ -881,12 +912,26 @@ class TestPromptCommandDispatch(unittest.TestCase):
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
 
 
-def _ok(result):
+def _ok(result, goal=None):
+    """A well-behaved sub-run: when `goal` is given, the run carries one
+    transforming step from the goal to the result (the chain an inline
+    expr command now requires); without it the run is step-less."""
+    steps = [] if goal is None else [
+        {'id': 's1', 'op': 'scripted', 'input': goal, 'result': result}]
     return {'ok': True, 'final_result': result, 'assumptions': [],
-            'steps': [], 'summary': None,
+            'steps': steps, 'summary': None,
             'final_provenance': {
                 'status': 'verified', 'source': 'ledger', 'step': 's1',
                 'method': 'test-fixture'}}
+
+
+def _arg_of(instruction):
+    """The argument embedded in a rendered int! instruction (first line:
+    'Apply symbolic integration for <ARG>.')."""
+    first = instruction.split('\n', 1)[0]
+    prefix = 'Apply symbolic integration for '
+    assert first.startswith(prefix) and first.endswith('.'), first
+    return first[len(prefix):-1]
 
 
 def _fail(error='no scripted answer'):
@@ -926,7 +971,7 @@ class TestExprComposite(unittest.TestCase):
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
             if instruction.startswith('Apply symbolic integration'):
-                return _ok('\\frac{x^4}{4} + C')
+                return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
             return _fail()
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
@@ -947,7 +992,7 @@ class TestExprComposite(unittest.TestCase):
 
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} + {int! x^2}', 1, add_to_history=True)
         self.assertEqual(len(calls), 1)          # identical arg -> one call
@@ -965,7 +1010,7 @@ class TestExprComposite(unittest.TestCase):
         # {int! f} - {int! f} is an arbitrary constant, not 0: the memoised
         # result is spliced twice but each splice mints its own C
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} - {int! x^2}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -977,7 +1022,7 @@ class TestExprComposite(unittest.TestCase):
 
     def test_single_command_keeps_plain_constant(self):
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -988,7 +1033,7 @@ class TestExprComposite(unittest.TestCase):
     def test_user_constant_never_captured(self):
         # a C the user wrote in the cell must stay distinct from the minted one
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} + C', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -1002,8 +1047,8 @@ class TestExprComposite(unittest.TestCase):
         # own argument (the inner result) - bound, not minted, so not renamed
         def fake(instruction, ledger=None, on_step=None, **kw):
             if 'frac' in instruction:  # outer call sees the spliced inner result
-                return _ok('\\frac{x^3}{6} + Cx + K')
-            return _ok('\\frac{x^2}{2} + C')
+                return _ok('\\frac{x^3}{6} + Cx + K', _arg_of(instruction))
+            return _ok('\\frac{x^2}{2} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! {int! x}}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -1017,7 +1062,7 @@ class TestExprComposite(unittest.TestCase):
 
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
-            return _ok('\\frac{x^4}{4} + C')
+            return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('int! x^3', 1, add_to_history=True)  # no braces
         self.assertEqual(len(calls), 1)
@@ -1073,9 +1118,92 @@ class TestExprComposite(unittest.TestCase):
         sym, notation = primitives.parse_latex('{int! x} + {int! x^2}')
         r = expr_commands.ExprResolver(
             notation, Notation(), cmds, self.shell.ledger, None,
-            lambda *a, **k: _ok('F'), max_calls=1)
+            lambda instruction, **k: _ok('F', _arg_of(instruction)),
+            max_calls=1)
         with self.assertRaises(expr_commands.ExprCommandError):
             r(sym)
+
+    def test_non_closing_subrun_refused_and_summary_surfaced(self):
+        # the run's only verified step answers a DIFFERENT question than
+        # the cell asked; its result must not become the cell's value
+        run = {'ok': True, 'final_result': '0', 'assumptions': [],
+               'steps': [{'id': 's1', 'op': 'limit_table',
+                          'input': '\\lim_{n \\to \\infty} \\frac{1}{n}',
+                          'result': '0'}],
+               'summary': 'the tactics do not close this; a telescoping '
+                          'move is missing',
+               'final_provenance': {'status': 'verified', 'source': 'ledger',
+                                    'step': 's1', 'method': 'last-step'}}
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: run):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        html = self._html()
+        self.assertIn('did not close', html)
+        self.assertIn('telescoping move is missing', html)
+        self.assertEqual(self.shell.ledger.steps, [])
+
+    def test_operator_wrapped_root_step_accepted(self):
+        # agents legitimately restate a bare integrand goal inside \int
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            arg = _arg_of(instruction)
+            run = _ok('\\frac{x^4}{4} + C',
+                      goal=f'\\int {arg} \\, dx')
+            run['final_provenance']['method'] = 'last-step'
+            return run
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+
+    def test_whole_cell_lim_ellipsis_closes_via_sum_tactics(self):
+        # the original failing notebook cell, end to end through the shell
+        # composite path with a scripted agent (offline)
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda: ScriptedModel(list(LIM_SUM_SCRIPT))):
+            self.shell.exec('lim! ' + LIM_SUM_EXPR, 1, add_to_history=True)
+        html = self._html()
+        self.assertNotIn('do! error', html)
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['sum_from_ellipsis', 'sum_telescope',
+                               'limit_table', 'expand'])
+        chained = self.shell.resolve_backrefs('[[1]]')
+        import primitives
+        self.assertEqual(primitives.equal_exprs(chained, '1')['verdict'],
+                         'yes')
+        # the pattern-continuation assumption is surfaced on the cell
+        self.assertIn('continues the pattern', html)
+
+
+class TestChainsToGoal(unittest.TestCase):
+    """The goal-coverage gate on inline expr sub-runs."""
+
+    def _steps(self, *triples):
+        return [{'id': f's{i}', 'op': 'scripted', 'input': a, 'result': b}
+                for i, (a, b) in enumerate(triples, 1)]
+
+    def test_connected_chain_accepted(self):
+        import expr_commands as ec
+        steps = self._steps(('x^{3}', '3x^{2}'), ('3x^2', '6x'))
+        self.assertTrue(ec._chains_to_goal(steps, 's2', 'x^3'))
+
+    def test_disconnected_final_step_rejected(self):
+        import expr_commands as ec
+        steps = self._steps(('x^{3}', '3x^{2}'), ('y', '1'))
+        self.assertFalse(ec._chains_to_goal(steps, 's2', 'x^3'))
+
+    def test_branch_piece_rejected(self):
+        # the lim! failure mode: a split produced pieces; a piece result
+        # is not an answer to the whole
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\lim_{x \\to 0}(\\frac{\\sin x}{x} + x^2)',
+             '\\lim_{x \\to 0} \\frac{\\sin x}{x} + \\lim_{x \\to 0} x^2'),
+            ('\\lim_{x \\to 0} x^2', '0'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's2', '\\lim_{x \\to 0}(\\frac{\\sin x}{x} + x^2)'))
+
+    def test_no_steps_rejected(self):
+        import expr_commands as ec
+        self.assertFalse(ec._chains_to_goal([], 's1', 'x'))
 
 
 class TestDirectCommands(unittest.TestCase):
@@ -1126,7 +1254,7 @@ class TestDirectCommands(unittest.TestCase):
         # {diff! {int! x^3}}: the inner splice contains the minted C; the
         # direct differentiate must infer x, not refuse as ambiguous
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^4}{4} + C')
+            return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
         step = self.shell.ledger.steps[0]

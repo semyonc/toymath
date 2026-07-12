@@ -456,6 +456,40 @@ def make_api(session):
         return json.dumps(session.record(result), ensure_ascii=False,
                           default=str)
 
+    def sum_from_ellipsis(expr: str, sum_form: str) -> str:
+        """Interpret an ellipsis sum (t_1 + t_2 + \\ldots + t_n), optionally
+        inside a \\lim, as an explicit finite \\sum. Every displayed term is
+        mechanically checked against the proposed summand at its index; the
+        continuation of the pattern is recorded as an assumption.
+
+        Args:
+            expr: LaTeX ellipsis sum, or a \\lim whose body is one.
+            sum_form: the proposed bare \\sum_{k=a}^{b} summand form.
+        """
+        return _run(primitives.sum_from_ellipsis, expr, sum_form)
+
+    def sum_rewrite(expr: str, new_summand: str) -> str:
+        """Replace the summand of a finite \\sum (optionally inside a \\lim)
+        by a mechanically equal expression; equal? gates the proposal.
+
+        Args:
+            expr: LaTeX finite sum, or a \\lim whose body is one.
+            new_summand: proposed equal summand in the bound variable.
+        """
+        return _run(primitives.sum_rewrite, expr, new_summand)
+
+    def sum_telescope(expr: str, term: str) -> str:
+        """Collapse a telescoping sum \\sum_{k=a}^{b} (f(k) - f(k+1)) to
+        f(a) - f(b+1). equal? must confirm the summand equals
+        f(k) - f(k+1) for the proposed f, and a literal finite-sum
+        evaluation independently confirms the closed form.
+
+        Args:
+            expr: LaTeX finite sum (optionally inside a \\lim).
+            term: the telescoping f(k), written in the bound variable.
+        """
+        return _run(primitives.sum_telescope, expr, term)
+
     def rewrite(expr: str, lemma: str, direction: str) -> str:
         """Apply a registered equality lemma at the root or first matching
         subterm.
@@ -750,6 +784,7 @@ def make_api(session):
     fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
            limit_rewrite, limit_substitute, limit_linearity, limit_table,
            limit_lhopital, limit_assemble,
+           sum_from_ellipsis, sum_rewrite, sum_telescope,
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, integrate_rewrite, integrate_linearity,
            integrate_assemble,
@@ -858,10 +893,13 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             'reason': 'no mechanically checked closing chain was recorded',
         }
     elif last_transform is not None:
+        # fallback, not a designation: the step is verified, but nothing
+        # says its result answers the instruction — consumers that need a
+        # goal-covering value (inline expr commands) must check the chain
         final = last_transform['result']
         provenance = {
             'status': 'verified', 'source': 'ledger',
-            'step': last_transform['id'], 'method': 'exact-result',
+            'step': last_transform['id'], 'method': 'last-step',
         }
     else:
         final = None

@@ -153,6 +153,21 @@ def main(argv=None):
     p.add_argument('expr')
     p.add_argument('values', nargs='+')
 
+    p = add_parser('sum_from_ellipsis',
+                   help='interpret an ellipsis sum as an explicit finite sum')
+    p.add_argument('expr')
+    p.add_argument('sum_form')
+
+    p = add_parser('sum_rewrite',
+                   help='replace a summand by a verified-equal one')
+    p.add_argument('expr')
+    p.add_argument('new_summand')
+
+    p = add_parser('sum_telescope',
+                   help='collapse a telescoping sum to its closed form')
+    p.add_argument('expr')
+    p.add_argument('term')
+
     p = add_parser('factor_gcd', help='pull out the common factor')
     p.add_argument('expr')
 
@@ -220,6 +235,12 @@ def main(argv=None):
         res = primitives.limit_lhopital(args.expr)
     elif args.cmd == 'limit_assemble':
         res = primitives.limit_assemble(args.expr, args.values)
+    elif args.cmd == 'sum_from_ellipsis':
+        res = primitives.sum_from_ellipsis(args.expr, args.sum_form)
+    elif args.cmd == 'sum_rewrite':
+        res = primitives.sum_rewrite(args.expr, args.new_summand)
+    elif args.cmd == 'sum_telescope':
+        res = primitives.sum_telescope(args.expr, args.term)
     elif args.cmd == 'factor_gcd':
         res = primitives.factor_gcd(args.expr)
     elif args.cmd == 'factor_quadratic':

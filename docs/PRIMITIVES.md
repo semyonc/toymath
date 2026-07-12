@@ -135,6 +135,23 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    `limit_linearity` records existence assumptions for every piece, and
    `limit_assemble` retrieves/checks the ordered piece values so a retyped
    wrong sum cannot enter the ledger.
+12. **sum_from_ellipsis / sum_rewrite / sum_telescope** — tactic-shaped
+   finite sums (each accepts either a bare `\sum_{k=a}^{b}` or a `\lim`
+   whose body is one, and carries the binder through). Ellipsis commands
+   (`\ldots` and friends) parse as opaque symbols with no mechanical
+   semantics, so **every other primitive rejects them at the door** with a
+   pointer here. `sum_from_ellipsis(expr, sum_form)` checks each displayed
+   term against the proposed summand at its index (at least two leading
+   terms anchor the pattern; trailing terms are matched at `b`, `b-1`, …)
+   and records the pattern continuation as an assumption — the one honest
+   reading of "…". `sum_rewrite` replaces the summand only after `equal?`
+   verifies the proposal (exact in the rational fragment — partial
+   fractions live here). `sum_telescope(expr, f)` collapses
+   `\sum_{k=a}^{b} (f(k) − f(k+1))` to `f(a) − f(b+1)`: `equal?` gates
+   the summand-difference identity, and the independent oracle leg
+   literally evaluates the finite sum for several integer upper bounds
+   against the closed form (`numeric_eval` performs real summation loops,
+   sharing nothing with the symbolic path).
 
 **equal?** additionally compares canonically over *shared opaque atoms*
 when both sides leave the fragment: syntactic atom equality is conclusive

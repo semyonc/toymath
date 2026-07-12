@@ -72,8 +72,22 @@ def _normalize_matrix_envs(latex):
     return latex
 
 
-def parse_latex(latex):
+# Ellipsis commands parse as opaque symbols with no mechanical semantics
+# ("continue the pattern" is a human reading), so every primitive rejects
+# them at the door except sum_from_ellipsis, which interprets them.
+_ELLIPSIS_NAMES = frozenset({
+    '\\ldots', '\\cdots', '\\dots', '\\vdots', '\\ddots', '\\hdots',
+    '\\dotsb', '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'})
+_ELLIPSIS_RE = re.compile(r'\\(?:[lcvdh])?dots[bcimo]?(?![A-Za-z])')
+
+
+def parse_latex(latex, allow_ellipsis=False):
     # the lexer has no bare < / > tokens, only the \lt / \gt commands
+    if not allow_ellipsis and _ELLIPSIS_RE.search(latex):
+        raise PrimitiveError(
+            'the ellipsis in the expression has no mechanical semantics; '
+            'interpret it first with sum_from_ellipsis by proposing the '
+            'explicit \\sum_{k=a}^{b} form it abbreviates')
     normalized = _normalize_matrix_envs(latex)
     normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
@@ -150,12 +164,70 @@ class _GroupStripper(Replicator):
         return super(_GroupStripper, self).enter_vgroup(sym, f)
 
 
-def _normal_form(latex):
+def _normal_form(latex, allow_ellipsis=False):
     """Parse and print with {}-groups stripped: two strings with equal
     normal forms parse to the same expression."""
-    sym, notation = parse_latex(latex)
+    sym, notation = parse_latex(latex, allow_ellipsis=allow_ellipsis)
     out = Notation()
     return _write_std(_GroupStripper(notation, out)(sym), out)
+
+
+def same_expression(latex1, latex2):
+    """Structural identity modulo grouping and whitespace — no oracle, no
+    algebra. Used for provenance linkage, where value-equality via the
+    oracle would be too permissive and parse failures must count as
+    different. Ellipsis expressions compare structurally too (the guard is
+    about doing MATH on an ellipsis, not about comparing spellings)."""
+    if latex1 == latex2:
+        return True
+    try:
+        return (_normal_form(latex1, allow_ellipsis=True)
+                == _normal_form(latex2, allow_ellipsis=True))
+    except PrimitiveError:
+        return False
+
+
+def _operator_body_latex(latex):
+    """The body of a top-level big-operator expression (``\\lim``, ``\\int``
+    without its differential, ``\\sum``), or None."""
+    try:
+        sym, notation = parse_latex(latex, allow_ellipsis=True)
+    except PrimitiveError:
+        return None
+    try:
+        body, _var, _point, _direction = _strip_limit(sym, notation)
+        return write_latex(body, notation)
+    except PrimitiveError:
+        pass
+    inner = _peel_groups(sym, notation)
+    f = notation.getf(inner, Notation.P_LIST)
+    if f is None:
+        return None
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and notation.get(a) is None
+                                       and a.name in Notation.styles)]
+    if not items:
+        return None
+    info = _binder_info(items[0], notation, items[1:])
+    if info is None or not info['body']:
+        return None
+    body = (info['body'][0] if len(info['body']) == 1 else
+            notation.setf(Notation.P_LIST, tuple(info['body'])))
+    return write_latex(body, notation)
+
+
+def covers_goal(input_latex, goal_latex):
+    """Whether a step input structurally restates the goal: identical
+    modulo grouping, or one is a big-operator wrapper whose body is the
+    other (agents legitimately wrap a bare integrand/body goal in its
+    ``\\int``/``\\lim`` binder, or state the body of a wrapped goal)."""
+    if same_expression(input_latex, goal_latex):
+        return True
+    body = _operator_body_latex(input_latex)
+    if body is not None and same_expression(body, goal_latex):
+        return True
+    goal_body = _operator_body_latex(goal_latex)
+    return goal_body is not None and same_expression(input_latex, goal_body)
 
 
 def write_latex(sym, notation):
@@ -711,6 +783,37 @@ def _func_arg_span(args, i, notation, is_head):
     return inner, j
 
 
+_SUM_EVAL_CAP = 100000
+
+
+def _eval_finite_sum(info, notation, env):
+    """The oracle's independent leg for finite ``\\sum``: a literal
+    summation loop over integer bound values, sharing nothing with the
+    symbolic sum tactics."""
+    if info is None or info['bound'] is None or len(info['parameters']) != 2:
+        raise EvalError('sum without an explicit k=a..b binder')
+    if not info['body']:
+        raise EvalError('sum without a summand')
+    lo = numeric_eval(info['parameters'][0], notation, env)
+    hi = numeric_eval(info['parameters'][1], notation, env)
+    if isinstance(lo, list) or isinstance(hi, list):
+        raise EvalError('matrix-valued sum bound')
+    if abs(lo - round(lo)) > 1e-9 or abs(hi - round(hi)) > 1e-9:
+        raise EvalError('non-integer sum bound')
+    lo, hi = int(round(lo)), int(round(hi))
+    if hi - lo + 1 > _SUM_EVAL_CAP:
+        raise EvalError('sum too long to evaluate')
+    total = 0.0
+    e = dict(env)
+    for k in range(lo, hi + 1):
+        e[info['bound']] = float(k)
+        v = _eval_plist(info['body'], notation, e)
+        if isinstance(v, list):
+            raise EvalError('matrix-valued summand')
+        total += v
+    return total
+
+
 def _eval_plist(args, notation, env):
     result = 1.0
     i = 0
@@ -723,6 +826,11 @@ def _eval_plist(args, notation, env):
 
     while i < len(args):
         a = args[i]
+        if _big_operator_name(a, notation) == '\\sum':
+            # the sum binds every remaining factor as its summand
+            info = _binder_info(a, notation, args[i + 1:])
+            return _num_mul(result,
+                            _eval_finite_sum(info, notation, env))
         fname, power = (a.name, None) if _is_func_name(a, notation) else (
             _func_power(a, notation) or (None, None))
         if fname is not None:
@@ -3701,6 +3809,373 @@ def limit_lhopital(expr):
                    extra={'indeterminate_form': form,
                           'numerator_derivative': nd['result'],
                           'denominator_derivative': dd['result']})
+
+
+# ---------------------------------------------------------------------------
+# finite-sum tactics (no autonomous series evaluation: the agent proposes
+# the reading/reshape/telescope, toymath mechanically checks it)
+# ---------------------------------------------------------------------------
+
+
+def _peel_groups(sym, notation):
+    """Remove ordinary grouping (including \\left[...\\right]) around a
+    subexpression; absolute-value bars are not grouping."""
+    while True:
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
+                                 Notation.S_GROUP])
+        if g is None or g.props.get('br') == '||':
+            return sym
+        sym = g.args[0]
+
+
+def _int_literal(sym, notation):
+    """The integer value of a literal like ``1`` / ``{-2}``, else None."""
+    if isinstance(sym, Symbol):
+        sym = _peel_groups(sym, notation)
+    neg = False
+    if isinstance(sym, Symbol):
+        m = notation.getf(sym, Notation.MINUS)
+        if m is not None:
+            neg = True
+            sym = m.args[0]
+            if isinstance(sym, Symbol):
+                sym = _peel_groups(sym, notation)
+    if isinstance(sym, IntegerValue):
+        return -sym.val if neg else sym.val
+    return None
+
+
+def _strip_limit_maybe(sym, notation):
+    """(body, limit-binder-dict-or-None): unwrap one \\lim if present."""
+    try:
+        body, var, point, direction = _strip_limit(sym, notation)
+    except PrimitiveError:
+        return sym, None
+    return body, {'var': var, 'point_latex': write_latex(point, notation),
+                  'direction': direction}
+
+
+def _sum_parts(expr, allow_ellipsis=False):
+    """Parse ``\\sum_{k=a}^{b} summand`` — optionally inside a ``\\lim``
+    binder — into its pieces; raises PrimitiveError otherwise."""
+    sym, notation = parse_latex(expr, allow_ellipsis=allow_ellipsis)
+    body, limit = _strip_limit_maybe(sym, notation)
+    body = _peel_groups(body, notation)
+    f = notation.getf(body, Notation.P_LIST)
+    if f is None:
+        raise PrimitiveError('expected a \\sum_{k=a}^{b} expression')
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and notation.get(a) is None
+                                       and a.name in Notation.styles)]
+    if not items or _big_operator_name(items[0], notation) != '\\sum':
+        raise PrimitiveError('expected a \\sum_{k=a}^{b} expression')
+    info = _binder_info(items[0], notation, items[1:])
+    if info['bound'] is None or len(info['parameters']) != 2:
+        raise PrimitiveError('sum binder must have the form \\sum_{k=a}^{b}')
+    if not info['body']:
+        raise PrimitiveError('sum has no summand')
+    summand = (info['body'][0] if len(info['body']) == 1 else
+               notation.setf(Notation.P_LIST, tuple(info['body'])))
+    lower, upper = info['parameters']
+    bound = info['bound']
+    if bound in (free_symbols(lower, notation)
+                 | free_symbols(upper, notation)):
+        raise PrimitiveError('sum bounds must not contain the bound variable')
+    if (_infinity_sign(lower, notation) is not None
+            or _infinity_sign(upper, notation) is not None):
+        raise PrimitiveError(
+            'infinite sum bounds are not supported; rewrite the series as '
+            'the limit of its partial sums (\\lim_{n \\to \\infty} '
+            '\\sum_{k=a}^{n} ...) and drive the sum and limit tactics')
+    if isinstance(lower, Symbol):
+        lower = _peel_groups(lower, notation)
+    if isinstance(upper, Symbol):
+        upper = _peel_groups(upper, notation)
+    return {
+        'limit': limit,
+        'bound': bound,
+        'lower': lower, 'lower_latex': write_latex(lower, notation),
+        'upper': upper, 'upper_latex': write_latex(upper, notation),
+        'summand': summand,
+        'summand_latex': write_latex(summand, notation),
+        'notation': notation,
+    }
+
+
+def _sum_latex(bound, lower_latex, upper_latex, summand_latex):
+    body = summand_latex.strip()
+    if _is_sum_str(body) or body.startswith('-'):
+        body = _paren(body)
+    return f'\\sum_{{{bound}={lower_latex}}}^{{{upper_latex}}} {body}'
+
+
+def _rewrap_limit(limit, body_latex):
+    if limit is None:
+        return body_latex
+    return _limit_latex(limit['var'], limit['point_latex'],
+                        limit['direction'], body_latex)
+
+
+def _finite_sum_check(sum_latex, closed_latex, upper_var, lower_int,
+                      samples=6, seed=20260705):
+    """Evaluate the literal finite sum against a closed form at several
+    integer upper bounds — the independent numeric leg for sum tactics."""
+    try:
+        ss, sn = parse_latex(sum_latex)
+        cs, cn = parse_latex(closed_latex)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    variables = free_symbols(ss, sn) | free_symbols(cs, cn)
+    if upper_var is not None:
+        variables.discard(upper_var)
+    deltas = (-1, 0, 1, 2, 3, 5, 9) if upper_var is not None \
+        else tuple(range(samples))
+    rng = random.Random(seed)
+    agreed = 0
+    for delta in deltas:
+        env = _sample_point(variables, rng)
+        if upper_var is not None:
+            env[upper_var] = float(lower_int + delta)
+        try:
+            v1 = numeric_eval(ss, sn, env)
+            v2 = numeric_eval(cs, cn, env)
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        agree = _num_agree(v1, v2, 1e-6)
+        if agree is None:
+            continue
+        if not agree:
+            return {'status': 'disagree', 'point': env,
+                    'sum': v1, 'closed': v2}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'no evaluable integer sample points'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'literal finite-sum evaluation vs closed form'}
+
+
+def sum_from_ellipsis(expr, sum_form):
+    """Interpret an ellipsis sum as an explicit finite ``\\sum``.
+
+    Every displayed term is mechanically checked against the proposed
+    summand at its index; the continuation of the pattern under the
+    ellipsis is recorded as an assumption, not proved."""
+    args = {'expr': expr, 'sum_form': sum_form}
+    try:
+        sym, notation = parse_latex(expr, allow_ellipsis=True)
+    except PrimitiveError as e:
+        return _error('sum_from_ellipsis', args, str(e))
+    body, limit = _strip_limit_maybe(sym, notation)
+    body = _peel_groups(body, notation)
+    body_latex = write_latex(body, notation)
+    f = notation.getf(body, Notation.S_LIST)
+    if f is None:
+        return _error('sum_from_ellipsis', args,
+                      'expected a sum of terms containing an ellipsis')
+    terms = []
+    ellipsis_at = None
+    for idx, t in enumerate(f.args):
+        sign = notation.vgetf(t, [Notation.PLUS, Notation.MINUS])
+        if sign is not None and sign.sym == Notation.MINUS:
+            return _error('sum_from_ellipsis', args,
+                          'only plain + ellipsis sums are supported')
+        inner = sign.args[0] if sign is not None else t
+        peeled = _peel_groups(inner, notation)
+        if (isinstance(peeled, Symbol) and notation.get(peeled) is None
+                and peeled.name in _ELLIPSIS_NAMES):
+            if ellipsis_at is not None:
+                return _error('sum_from_ellipsis', args,
+                              'more than one ellipsis in the sum')
+            ellipsis_at = idx
+            continue
+        terms.append((idx, write_latex(inner, notation)))
+    if ellipsis_at is None:
+        return _error('sum_from_ellipsis', args,
+                      'no ellipsis found; use sum_rewrite for explicit sums')
+    prefix = [t for t in terms if t[0] < ellipsis_at]
+    suffix = [t for t in terms if t[0] > ellipsis_at]
+    if len(prefix) < 2:
+        return _error('sum_from_ellipsis', args,
+                      'need at least two displayed leading terms to anchor '
+                      'the pattern')
+    if not suffix:
+        return _error('sum_from_ellipsis', args,
+                      'the ellipsis must be followed by the final term(s)')
+    try:
+        parts = _sum_parts(sum_form)
+    except PrimitiveError as e:
+        return _error('sum_from_ellipsis', args, f'sum_form: {e}')
+    if parts['limit'] is not None:
+        return _error('sum_from_ellipsis', args,
+                      'sum_form must be a bare \\sum, without the \\lim')
+    body_free = free_symbols(body, notation) - _ELLIPSIS_NAMES
+    form_sym, form_notation = parse_latex(sum_form)
+    stray = free_symbols(form_sym, form_notation) - body_free
+    if stray:
+        return _error('sum_from_ellipsis', args,
+                      'sum_form introduces new free variable(s): '
+                      + ', '.join(sorted(stray)))
+    k = parts['bound']
+    lo = _int_literal(parts['lower'], parts['notation'])
+    if lo is None:
+        return _error('sum_from_ellipsis', args,
+                      'sum lower bound must be an integer literal')
+    matched = []
+    todo = ([(term, str(lo + i)) for i, (_, term) in enumerate(prefix)]
+            + [(term, parts['upper_latex'] if j == len(suffix) - 1 else
+                f'{parts["upper_latex"]}-{len(suffix) - 1 - j}')
+               for j, (_, term) in enumerate(suffix)])
+    for term_latex, k_value in todo:
+        sub = substitute(parts['summand_latex'], k, k_value)
+        if not sub.get('ok'):
+            return _error('sum_from_ellipsis', args,
+                          f'cannot instantiate the summand at {k}={k_value}: '
+                          + sub.get('error', 'unknown error'))
+        eq = equal_exprs(sub['result'], term_latex)
+        if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+            return _error('sum_from_ellipsis', args,
+                          f'displayed term {term_latex!r} does not match the '
+                          f'summand at {k}={k_value} (verdict: '
+                          f'{eq.get("verdict", "error")})')
+        matched.append({'k': k_value, 'term': term_latex,
+                        'method': eq.get('method')})
+    canonical = _sum_latex(k, parts['lower_latex'], parts['upper_latex'],
+                           parts['summand_latex'])
+    result = _rewrap_limit(limit, canonical)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('sum_from_ellipsis', args,
+                      f'internal: unparseable result: {e}')
+    assumption = {
+        'text': f'{body_latex} = {canonical}',
+        'display': (f'the ellipsis in ${body_latex}$ continues the pattern '
+                    f'of ${parts["summand_latex"]}$: the sum is read as '
+                    f'${canonical}$'),
+    }
+    return _result('sum_from_ellipsis', args, expr, result,
+                   assumptions=[assumption],
+                   check={'status': 'exact',
+                          'method': (f'all {len(matched)} displayed terms '
+                                     'match the summand at their index; the '
+                                     'continuation is recorded as an '
+                                     'assumption')},
+                   extra={'sum': canonical, 'matched': matched})
+
+
+def sum_rewrite(expr, new_summand):
+    """Replace the summand of a finite sum by an agent-proposed
+    mechanically equal one."""
+    args = {'expr': expr, 'new_summand': new_summand}
+    try:
+        parts = _sum_parts(expr)
+        parse_latex(new_summand)
+    except PrimitiveError as e:
+        return _error('sum_rewrite', args, str(e))
+    eq = equal_exprs(new_summand, parts['summand_latex'])
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('sum_rewrite', args,
+                      'new summand is not mechanically equal to the current '
+                      f'one (verdict: {eq.get("verdict", "error")})')
+    result = _rewrap_limit(
+        parts['limit'], _sum_latex(parts['bound'], parts['lower_latex'],
+                                   parts['upper_latex'], new_summand))
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('sum_rewrite', args,
+                      f'internal: unparseable result: {e}')
+    check = {'status': 'agree',
+             'method': f'summand equality via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    return _result('sum_rewrite', args, expr, result, check=check,
+                   extra={'summand': parts['summand_latex']})
+
+
+def sum_telescope(expr, term):
+    """Collapse ``\\sum_{k=a}^{b} (f(k) - f(k+1))`` to ``f(a) - f(b+1)``
+    for the agent-proposed ``f``, written in the bound variable."""
+    args = {'expr': expr, 'term': term}
+    try:
+        parts = _sum_parts(expr)
+        parse_latex(term)
+    except PrimitiveError as e:
+        return _error('sum_telescope', args, str(e))
+    k = parts['bound']
+    lo = _int_literal(parts['lower'], parts['notation'])
+    if lo is None:
+        return _error('sum_telescope', args,
+                      'sum lower bound must be an integer literal')
+    upper_var = _plain_symbol_name(parts['upper'], parts['notation'])
+    upper_int = _int_literal(parts['upper'], parts['notation'])
+    if upper_var is None and upper_int is None:
+        return _error('sum_telescope', args,
+                      'sum upper bound must be a plain symbol or an '
+                      'integer literal')
+    shifted = substitute(term, k, f'{k}+1')
+    if not shifted.get('ok'):
+        return _error('sum_telescope', args,
+                      f'cannot form the term at {k}+1: '
+                      + shifted.get('error', 'unknown error'))
+    head = _paren(term) if (_is_sum_str(term.strip())
+                            or term.strip().startswith('-')) \
+        else term.strip()
+    eq = equal_exprs(parts['summand_latex'],
+                     f'{head} - {_paren(shifted["result"])}')
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('sum_telescope', args,
+                      f'summand is not mechanically equal to the difference '
+                      f'{term} - ({term} at {k}+1) (verdict: '
+                      f'{eq.get("verdict", "error")})')
+    first = substitute(term, k, parts['lower_latex'])
+    last = substitute(term, k, f'{parts["upper_latex"]}+1')
+    if not first.get('ok') or not last.get('ok'):
+        return _error('sum_telescope', args,
+                      'cannot instantiate the telescoping term at the '
+                      'bounds')
+    closed = (
+        (_paren(first['result']) if _is_sum_str(first['result'])
+         else first['result'])
+        + ' - ' + _paren(last['result']))
+    folded = expand(closed)
+    if folded.get('ok') and folded.get('check', {}).get('status') != \
+            'disagree':
+        closed = folded['result']
+    check = _finite_sum_check(
+        _sum_latex(k, parts['lower_latex'], parts['upper_latex'],
+                   parts['summand_latex']),
+        closed, upper_var, lo)
+    if check.get('status') != 'agree':
+        return _error('sum_telescope', args,
+                      'telescoped form was not confirmed by the finite-sum '
+                      'oracle: ' + check.get('reason',
+                                             check.get('status', 'unknown')))
+    check = dict(check)
+    check['method'] += ' (summand gated by equal?)'
+    assumptions = [
+        {'text': f'{parts["upper_latex"]} \\ge {parts["lower_latex"]} - 1',
+         'display': (f'${parts["upper_latex"]} \\ge '
+                     f'{parts["lower_latex"]} - 1$ '
+                     '(below that the empty-sum convention applies)')},
+        {'text': (f'{term}\\ \\text{{is defined for}}\\ {k} = '
+                  f'{parts["lower_latex"]}, \\dots, {parts["upper_latex"]}'
+                  '+1'),
+         'display': (f'${term}$ is defined at every integer ${k}$ from '
+                     f'${parts["lower_latex"]}$ to ${parts["upper_latex"]}'
+                     '+1$')},
+    ]
+    result = _rewrap_limit(parts['limit'], closed)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('sum_telescope', args,
+                      f'internal: unparseable result: {e}')
+    return _result('sum_telescope', args, expr, result,
+                   assumptions=assumptions, check=check,
+                   extra={'summand': parts['summand_latex'],
+                          'closed_form': closed})
 
 
 # ---------------------------------------------------------------------------

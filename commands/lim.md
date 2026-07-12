@@ -21,9 +21,19 @@ themselves (one-sided `a^+`/`a^-` binders included). Order of attack:
 4. limit_lhopital — only on a quotient, only when the oracle confirms
    0/0 or infinity/infinity, one step at a time; keep the recorded
    differentiability and existence assumptions.
-5. limit_linearity to split a top-level sum; finish every piece, then
-   call limit_assemble with the linearity step id and the piece step ids
-   in the returned order — never retype the assembled sum.
+5. limit_linearity to split a top-level sum of FIXED length; finish
+   every piece, then call limit_assemble with the linearity step id and
+   the piece step ids in the returned order — never retype the
+   assembled sum. Never split an ellipsis sum this way: its length
+   depends on the variable.
+6. An ellipsis sum (`t_1 + t_2 + \ldots + t_n`) must be interpreted
+   first: propose the explicit form with
+   sum_from_ellipsis(expr, "\sum_{k=a}^{b} ...") — pass the whole \lim
+   expression; the displayed terms are checked, the continuation is a
+   recorded assumption. Then collapse the sum with
+   sum_telescope(expr, f) (propose the telescoping f(k); use
+   sum_rewrite for the partial-fraction reshape when f is not obvious)
+   and finish with the limit tactics on the closed form.
 
 The table is intentionally narrow. If no tactic chain closes the limit,
 report the last verified form and what move is missing, then stop —

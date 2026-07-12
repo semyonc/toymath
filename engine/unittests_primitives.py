@@ -1846,5 +1846,190 @@ class TestLedgerComment(unittest.TestCase):
             ledger.record_comment('   ')
 
 
+TELESCOPING_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left['
+                     '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+                     '+\\ldots+\\frac{1}{n(n+1)}\\right]')
+TELESCOPING_SUM_FORM = '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}'
+
+
+class TestEllipsisGuard(unittest.TestCase):
+    def test_primitives_reject_ellipsis_with_steering_error(self):
+        for rec in (P.expand('1 + 2 + \\ldots + n'),
+                    P.equal_exprs('1 + \\cdots + n', '\\frac{n(n+1)}{2}'),
+                    P.limit_linearity(TELESCOPING_LIMIT),
+                    P.limit_table(TELESCOPING_LIMIT)):
+            self.assertFalse(rec.get('ok'))
+            self.assertIn('sum_from_ellipsis', rec['error'])
+
+    def test_cdot_and_dot_are_not_ellipsis(self):
+        self.assertEqual(P.evaluate('2 \\cdot 3')['result'], '6')
+
+    def test_sum_from_ellipsis_is_the_one_door(self):
+        rec = P.sum_from_ellipsis(TELESCOPING_LIMIT, TELESCOPING_SUM_FORM)
+        self.assertTrue(rec['ok'])
+
+
+class TestSumOracle(unittest.TestCase):
+    def test_finite_sum_evaluates_numerically(self):
+        self.assertEqual(
+            P.equal_exprs('\\sum_{k=1}^{5} k', '15')['verdict'], 'yes')
+
+    def test_empty_sum_convention(self):
+        self.assertEqual(
+            P.equal_exprs('\\sum_{k=3}^{2} k', '0')['verdict'], 'yes')
+
+    def test_symbolic_summand_with_constant_factor(self):
+        self.assertEqual(
+            P.equal_exprs('\\sum_{k=1}^{4} 2k', '20')['verdict'], 'yes')
+
+
+class TestSumFromEllipsis(unittest.TestCase):
+    def test_interprets_inside_limit_binder(self):
+        rec = P.sum_from_ellipsis(TELESCOPING_LIMIT, TELESCOPING_SUM_FORM)
+        self.assertTrue(rec['ok'])
+        self.assertIn('\\lim', rec['result'])
+        self.assertIn('\\sum', rec['result'])
+        self.assertEqual(rec['check']['status'], 'exact')
+        self.assertEqual(len(rec['assumptions']), 1)
+
+    def test_interprets_bare_ellipsis_sum(self):
+        rec = P.sum_from_ellipsis(
+            '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+            '+\\ldots+\\frac{1}{n(n+1)}', TELESCOPING_SUM_FORM)
+        self.assertTrue(rec['ok'])
+        self.assertNotIn('\\lim', rec['result'])
+
+    def test_wrong_summand_rejected(self):
+        rec = P.sum_from_ellipsis(TELESCOPING_LIMIT,
+                                  '\\sum_{k=1}^{n} \\frac{1}{k^2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not match', rec['error'])
+
+    def test_single_leading_term_rejected(self):
+        rec = P.sum_from_ellipsis('\\frac{1}{2} + \\ldots + \\frac{1}{n}',
+                                  '\\sum_{k=2}^{n} \\frac{1}{k}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('two displayed leading terms', rec['error'])
+
+    def test_minus_terms_rejected(self):
+        rec = P.sum_from_ellipsis('1 - 2 + \\ldots - n',
+                                  '\\sum_{k=1}^{n} k')
+        self.assertFalse(rec['ok'])
+
+    def test_stray_variable_rejected(self):
+        rec = P.sum_from_ellipsis(
+            '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+            '+\\ldots+\\frac{1}{n(n+1)}',
+            '\\sum_{k=1}^{m} \\frac{1}{k(k+1)}')
+        self.assertFalse(rec['ok'])
+
+    def test_pattern_continuation_is_an_assumption(self):
+        rec = P.sum_from_ellipsis(TELESCOPING_LIMIT, TELESCOPING_SUM_FORM)
+        self.assertIn('\\ldots', rec['assumptions'][0]['text'])
+        self.assertIn('continues the pattern',
+                      rec['assumptions'][0]['display'])
+
+
+class TestSumRewriteTelescope(unittest.TestCase):
+    def test_sum_rewrite_partial_fractions(self):
+        rec = P.sum_rewrite('\\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+                            '\\frac{1}{k} - \\frac{1}{k+1}')
+        self.assertTrue(rec['ok'])
+        self.assertIn('\\sum', rec['result'])
+
+    def test_sum_rewrite_keeps_limit_binder(self):
+        rec = P.sum_rewrite(
+            '\\lim_{n \\to \\infty} \\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+            '\\frac{1}{k} - \\frac{1}{k+1}')
+        self.assertTrue(rec['ok'])
+        self.assertIn('\\lim', rec['result'])
+
+    def test_sum_rewrite_rejects_inequivalent_summand(self):
+        rec = P.sum_rewrite('\\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+                            '\\frac{1}{k}')
+        self.assertFalse(rec['ok'])
+
+    def test_telescope_closes_the_sum(self):
+        rec = P.sum_telescope('\\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+                              '\\frac{1}{k}')
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(
+            P.equal_exprs(rec['result'], '\\frac{n}{n+1}')['verdict'], 'yes')
+        self.assertTrue(rec['assumptions'])
+
+    def test_telescope_carries_limit_binder(self):
+        rec = P.sum_telescope(
+            '\\lim_{n \\to \\infty} \\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+            '\\frac{1}{k}')
+        self.assertTrue(rec['ok'])
+        self.assertIn('\\lim', rec['result'])
+
+    def test_telescope_rejects_wrong_term(self):
+        rec = P.sum_telescope('\\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+                              '\\frac{1}{k+1}')
+        self.assertFalse(rec['ok'])
+
+    def test_infinite_bounds_refused_with_partial_sum_steering(self):
+        # sampling \infty as a finite variable once "verified" r^{\infty+1};
+        # infinite bounds must be refused at the door (gen-21 invariant)
+        rec = P.sum_telescope('\\sum_{k=0}^{\\infty} r^k',
+                              '\\frac{r^k}{1-r}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('partial sums', rec['error'])
+        rec = P.sum_from_ellipsis(
+            '1 + r + \\ldots + r^n', '\\sum_{k=0}^{\\infty} r^k')
+        self.assertFalse(rec['ok'])
+        rec = P.sum_rewrite('\\sum_{k=0}^{\\infty} r^k', 'r^k')
+        self.assertFalse(rec['ok'])
+
+    def test_telescope_subsumes_table_sums(self):
+        # Faulhaber via agent-proposed negated f: no sum_table needed
+        rec = P.sum_telescope('\\sum_{k=1}^{n} k', '-\\frac{k(k-1)}{2}')
+        self.assertTrue(rec['ok'])
+        self.assertEqual(
+            P.equal_exprs(rec['result'],
+                          '\\frac{n(n+1)}{2}')['verdict'], 'yes')
+
+    def test_telescope_numeric_upper_bound(self):
+        rec = P.sum_telescope('\\sum_{k=1}^{9} \\frac{1}{k(k+1)}',
+                              '\\frac{1}{k}')
+        self.assertTrue(rec['ok'])
+        self.assertEqual(
+            P.equal_exprs(rec['result'], '\\frac{9}{10}')['verdict'], 'yes')
+
+    def test_full_chain_closes_the_series_limit_and_replays(self):
+        ledger = Ledger()
+        ledger.record(P.sum_from_ellipsis(TELESCOPING_LIMIT,
+                                          TELESCOPING_SUM_FORM))
+        ledger.record(P.sum_telescope(ledger.last_result(), '\\frac{1}{k}'))
+        ledger.record(P.limit_table(ledger.last_result()))
+        self.assertEqual(ledger.last_result(), '1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
+class TestGoalCoverage(unittest.TestCase):
+    def test_same_expression_ignores_grouping(self):
+        self.assertTrue(P.same_expression('x^{2}', 'x^2'))
+        self.assertFalse(P.same_expression('x^2', '2x'))
+
+    def test_same_expression_compares_ellipsis_spellings(self):
+        # agents normalize \rightarrow to \to and drop spaces when they
+        # restate the goal; the linkage must still recognize it
+        self.assertTrue(P.same_expression(
+            TELESCOPING_LIMIT,
+            '\\lim_{n \\to \\infty}\\left[\\frac{1}{1 \\cdot 2}'
+            '+\\frac{1}{2 \\cdot 3}+\\ldots+\\frac{1}{n(n+1)}\\right]'))
+
+    def test_covers_goal_accepts_operator_wrappers(self):
+        self.assertTrue(P.covers_goal('\\int x^3 \\, dx', 'x^3'))
+        self.assertTrue(P.covers_goal('x^3', '\\int x^3 \\, dx'))
+        self.assertTrue(P.covers_goal(
+            '\\lim_{x \\to 0} \\frac{\\sin x}{x}',
+            '\\frac{\\sin x}{x}'))
+        self.assertFalse(P.covers_goal(
+            '\\lim_{n \\to \\infty} \\frac{1}{n(n+1)}', TELESCOPING_LIMIT))
+
+
 if __name__ == '__main__':
     unittest.main()
