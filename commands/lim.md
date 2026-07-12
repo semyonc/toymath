@@ -8,8 +8,11 @@ Evaluate the limit $ARGUMENTS using the verified limit tactics only.
 Always pass the whole `\lim` expression — the tactics parse the binder
 themselves (one-sided `a^+`/`a^-` binders included). Order of attack:
 
-1. limit_table — constants, the standard zero limits, and finite
-   rational leading-coefficient limits at infinity.
+1. limit_table — constants, the standard zero limits, finite rational
+   leading-coefficient limits at infinity, and geometric decay at
+   +infinity (`r^n` with numeric `0<r<1`, or division by `s^n` with
+   numeric `s>1`, times constant factors — rewrite `e^{-cn}` into that
+   form first).
 2. limit_substitute — continuity at a finite approach point.
 3. limit_rewrite — propose a mechanically equal body that IS in tactic
    shape (cancel, regroup, divide through by the dominant power). equal?

@@ -38,6 +38,27 @@ def _claim_hash(statement, parent):
     return h.hexdigest()[:7]
 
 
+def assumption_markdown(assumption):
+    """Markdown/MathJax form of one assumption record. A record carrying a
+    `display` field renders prose as prose with inline `$...$` math spans;
+    a bare `text` (pure math, and every pre-`display` record) keeps the
+    historical whole-line math wrapping."""
+    display = assumption.get('display')
+    if display is not None:
+        return display
+    return f"${assumption['text']}$"
+
+
+def _presentation_free(conclusion):
+    """Conclusion record with presentation-only assumption fields removed,
+    so replay compares mechanical content across renderer versions."""
+    out = dict(conclusion or {})
+    out['assumptions'] = [
+        {k: v for k, v in a.items() if k != 'display'}
+        for a in (out.get('assumptions') or [])]
+    return out
+
+
 def _eq_yes(left, right):
     """Semantic equality used only for ledger connectivity/closure."""
     import primitives
@@ -455,7 +476,8 @@ class Ledger(object):
                     claim['id'], recorded.get('steps'),
                     steps=replayed_steps)
                 if (claim.get('verdict') != checked.pop('verdict')
-                        or recorded != checked):
+                        or _presentation_free(recorded)
+                        != _presentation_free(checked)):
                     raise ValueError('claim conclusion mismatch')
             except (KeyError, ValueError, primitives.PrimitiveError) as e:
                 return {'status': 'failed',
@@ -493,7 +515,7 @@ class Ledger(object):
             lines.append('')
         if self.assumptions:
             lines.append('**Valid under the assumptions:** '
-                         + ', '.join(f'${a["text"]}$'
+                         + ', '.join(assumption_markdown(a)
                                      for a in self.assumptions))
             lines.append('')
         for step in self.steps:
@@ -536,7 +558,7 @@ class Ledger(object):
             lines.append(f"$${step['input']} \\;\\Longrightarrow\\; "
                          f"{step['result']}$$")
             for a in step['assumptions']:
-                lines.append(f"- assumes ${a['text']}$")
+                lines.append(f"- assumes {assumption_markdown(a)}")
             lines.append('')
         lines.append(f'*{len(self.steps)} steps; replay with '
                      f'`toymath replay --session <file>`.*')

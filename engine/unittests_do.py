@@ -440,6 +440,38 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertIsNone(res['final_result'])
         self.assertEqual(res['final_provenance']['status'], 'open')
 
+    def test_open_claim_caps_plain_do_summary(self):
+        # even outside prove!, prose must not dominate an open claim
+        script = [
+            [tool_call('claim', {
+                'statement': r'\lim_{n \to \infty} \frac{n}{2^n} = 0'},
+                'c1')],
+            [message('An informal argument follows.\n'
+                     '\\[\n2^n \\ge n^2 \\text{ for } n \\ge 4\n\\]\n'
+                     'Therefore the sequence is squeezed to zero, which '
+                     'this prose must not be allowed to assert.')],
+        ]
+        res = run_instruction('prove informally',
+                              model=ScriptedModel(script))
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['claims'][0]['verdict'], 'open')
+        self.assertTrue(res['summary_unverified'])
+        self.assertIn('narrative truncated', res['summary'])
+        self.assertNotIn('\\[', res['summary'])
+
+    def test_cap_prefers_sentence_boundary_and_strips_math(self):
+        from agent_do import _cap_prove_summary
+        capped = _cap_prove_summary(
+            'The claim remains open. Mechanically checked, the chain '
+            'reached\n\\[\n\\lim_{n \\to \\infty} e^{-n}\n\\]')
+        self.assertIn('narrative truncated', capped)
+        self.assertNotIn('\\[', capped)
+        long_prose = ('This sentence is padded out to be long enough to '
+                      'trigger the character cap on its own. ' * 5)
+        capped = _cap_prove_summary(long_prose)
+        self.assertIn('narrative truncated', capped)
+        self.assertTrue(capped.split(' … ')[0].endswith('.'))
+
     def test_notebook_ledger_accumulates(self):
         ledger = Ledger()
         run_instruction('solve', model=ScriptedModel(SOLVE_SCRIPT),
@@ -584,6 +616,15 @@ class TestMathShellDo(unittest.TestCase):
 
     def _html(self):
         return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def test_assumption_html_prose_and_math(self):
+        mixed = self.shell._assumption_html(
+            {'text': 'x \\ne 0 in that neighborhood',
+             'display': '$x \\ne 0$ in that <neighborhood>'})
+        self.assertEqual(mixed,
+                         '$x \\ne 0$ in that &lt;neighborhood&gt;')
+        bare = self.shell._assumption_html({'text': 'x > 0'})
+        self.assertEqual(bare, '$x > 0$')
 
     def test_resolve_backrefs(self):
         self.shell.exec('2 + 3', 1, add_to_history=True)

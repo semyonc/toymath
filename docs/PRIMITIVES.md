@@ -124,8 +124,10 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    autonomous evaluator. `limit_rewrite` carries the binder only after
    `equal?` verifies the proposed body. `limit_substitute` records continuity
    and requires an independent approach-sampling oracle to converge.
-   `limit_table` handles constants, six standard zero limits, and finite
-   rational leading-coefficient limits at infinity. `limit_lhopital` performs
+   `limit_table` handles constants, six standard zero limits, finite
+   rational leading-coefficient limits at infinity, and geometric decay
+   at `+\infty` (`r^n` for numeric `0 < r < 1`, or division by `s^n`
+   with numeric `s > 1`, times constant factors). `limit_lhopital` performs
    one step only after numeric probes observe `0/0` or `infinity/infinity`;
    it records differentiability/nonzero-derivative/existence premises and
    checks both derivatives plus the original/transformed approach values.

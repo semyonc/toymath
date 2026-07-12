@@ -394,8 +394,11 @@ def make_api(session):
         return _run(primitives.limit_linearity, expr)
 
     def limit_table(expr: str) -> str:
-        """Apply a standard finite limit rule, constant rule, or finite
-        rational leading-coefficient rule at infinity.
+        """Apply a standard finite limit rule, constant rule, finite
+        rational leading-coefficient rule at infinity, or geometric decay
+        at +infinity (r^var with numeric 0<r<1, or divided by s^var with
+        numeric s>1, times constants — rewrite e^{-c n} into that form
+        first).
 
         Args:
             expr: full LaTeX limit expression.
@@ -877,11 +880,29 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             out['error'] = f'{type(e).__name__}: {e}'
     else:
         summary = str(holder['res'].final_output or '').strip()
-        if proof_goal is not None:
+        open_claims = any((c.get('verdict') or 'open') == 'open'
+                          for c in out['claims'])
+        if proof_goal is not None or open_claims:
+            # an open claim must stay visibly unfinished: prose can never
+            # substitute for the missing chain, in prove! or plain do!
             summary = _cap_prove_summary(summary)
             out['summary_unverified'] = True
         out['summary'] = summary
     return out
+
+
+def _strip_dangling_math(text):
+    """Drop an unterminated trailing math block a hard cap left behind."""
+    while True:
+        for opener, closer in (('\\[', '\\]'), ('\\(', '\\)')):
+            idx = text.rfind(opener)
+            if idx != -1 and text.find(closer, idx) == -1:
+                text = text[:idx].rstrip()
+                break
+        else:
+            if text.count('$') % 2:
+                text = text[:text.rfind('$')].rstrip()
+            return text
 
 
 def _cap_prove_summary(text, max_lines=2, max_chars=280):
@@ -891,7 +912,12 @@ def _cap_prove_summary(text, max_lines=2, max_chars=280):
     clipped = ' '.join(lines[:max_lines])
     truncated = len(lines) > max_lines or len(clipped) > max_chars
     if len(clipped) > max_chars:
-        clipped = clipped[:max_chars].rstrip()
+        cut = clipped[:max_chars]
+        # prefer a sentence boundary so the cap never stops mid-formula
+        dot = cut.rfind('. ')
+        clipped = cut[:dot + 1] if dot >= 40 else cut.rstrip()
+    stripped = _strip_dangling_math(clipped)
+    truncated = truncated or stripped != clipped
     if truncated:
-        clipped += ' … [narrative truncated; record claims and steps]'
-    return clipped
+        stripped += ' … [narrative truncated; record claims and steps]'
+    return stripped

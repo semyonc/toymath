@@ -1685,6 +1685,45 @@ class TestLimitTactics(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('no table rule', r['error'])
 
+    def test_geometric_decay_at_infinity(self):
+        for latex in (
+                '\\lim_{n \\to \\infty} \\left(\\frac{1}{2}\\right)^n',
+                '\\lim_{n \\to \\infty} \\frac{1}{2^n \\ln(2)}',
+                '\\lim_{n \\to \\infty} \\frac{1}{\\ln(2) 2^n}',
+                '\\lim_{n \\to \\infty} \\frac{3}{2^n}'):
+            r = self.ok(P.limit_table(latex))
+            self.assertEqual(r['result'], '0', latex)
+            self.assertEqual(r['rule'], 'geometric decay at infinity')
+
+    def test_geometric_decay_stays_narrow(self):
+        for latex in (
+                # variable outside the decaying power
+                '\\lim_{n \\to \\infty} \\frac{n}{2^n}',
+                # growth, not decay
+                '\\lim_{n \\to \\infty} 2^n',
+                '\\lim_{n \\to \\infty} \\frac{1}{(\\frac{1}{2})^{n}}',
+                # decay only at +infinity
+                '\\lim_{n \\to -\\infty} \\left(\\frac{1}{2}\\right)^n'):
+            r = P.limit_table(latex)
+            self.assertFalse(r['ok'], latex)
+            self.assertIn('no table rule', r['error'])
+
+    def test_lhopital_assumption_display_and_render(self):
+        r = self.ok(P.limit_lhopital(
+            '\\lim_{x \\to 0} \\frac{e^x-1}{x}'))
+        displays = [a.get('display') for a in r['assumptions']]
+        self.assertTrue(all(displays))
+        # mixed record: math inside $...$ spans, prose outside them
+        self.assertIn(' are differentiable', displays[0])
+        self.assertNotIn('differentiable', ''.join(
+            displays[0].split('$')[1::2]))
+        ledger = Ledger()
+        ledger.record(r)
+        md = ledger.render_markdown()
+        # prose is no longer swallowed by a whole-line math wrapping
+        self.assertIn('are differentiable in a punctured neighborhood', md)
+        self.assertNotIn('the approach point$', md)
+
     def test_lhopital_zero_over_zero(self):
         r = self.ok(P.limit_lhopital(
             '\\lim_{x \\to 0} \\frac{e^x-1}{x}'))

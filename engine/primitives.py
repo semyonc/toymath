@@ -1404,7 +1404,9 @@ def apply_both_sides(equation, op, arg):
             assumptions.append({'text': f'{rhs_s} \\ne 0', 'nonzero': rhs_s})
         if arg_const is not None and arg_const != int(arg_const) or arg_const is None:
             assumptions.append(
-                {'text': f'both sides must be in the domain of x^{{{arg_s}}}'})
+                {'text': f'both sides must be in the domain of x^{{{arg_s}}}',
+                 'display': ('both sides must be in the domain of '
+                             f'$x^{{{arg_s}}}$')})
         new_lhs = f'{_paren(lhs_s)}^{{{arg_s}}}'
         new_rhs = f'{_paren(rhs_s)}^{{{arg_s}}}'
 
@@ -3163,17 +3165,24 @@ def _approach_estimate(body, notation, var, point, point_notation,
     """Independent numeric limit estimate plus a convergence-error bound."""
     inf = _infinity_sign(point, point_notation)
     if inf is not None:
-        x1, x2 = inf * 1e3, inf * 1e4
-        vals = []
-        for x in (x1, x2):
-            e = dict(env)
-            e[var] = x
-            vals.append(numeric_eval(body, notation, e))
-        if any(isinstance(v, list) for v in vals):
-            raise EvalError('matrix-valued limit')
-        v1, v2 = vals
-        # Richardson for a leading O(1/x) error term.
-        return (10 * v2 - v1) / 9, abs(v1 - v2) / 9
+        # fixed ladder: fall back to nearer approach points only when the
+        # farther ones overflow (e.g. 2^{10^4} in a decaying denominator)
+        for x1, x2 in ((inf * 1e3, inf * 1e4), (inf * 1e2, inf * 1e3),
+                       (inf * 30.0, inf * 300.0)):
+            vals = []
+            try:
+                for x in (x1, x2):
+                    e = dict(env)
+                    e[var] = x
+                    vals.append(numeric_eval(body, notation, e))
+            except OverflowError:
+                continue
+            if any(isinstance(v, list) for v in vals):
+                raise EvalError('matrix-valued limit')
+            v1, v2 = vals
+            # Richardson for a leading O(1/x) error term.
+            return (10 * v2 - v1) / 9, abs(v1 - v2) / 9
+        raise EvalError('approach samples overflowed')
 
     a = numeric_eval(point, point_notation, env)
     if isinstance(a, list):
@@ -3388,7 +3397,9 @@ def limit_substitute(expr):
                                                       check.get('status',
                                                                 'unknown')))
     assumption = {'text': (f'{parts["body_latex"]} is continuous at '
-                           f'{parts["var"]} = {parts["point_latex"]}')}
+                           f'{parts["var"]} = {parts["point_latex"]}'),
+                  'display': (f'${parts["body_latex"]}$ is continuous at '
+                              f'${parts["var"]} = {parts["point_latex"]}$')}
     return _result('limit_substitute', args, expr, result,
                    assumptions=[assumption], check=check,
                    extra={'body': parts['body_latex'],
@@ -3425,7 +3436,8 @@ def limit_linearity(expr):
         piece = _limit_latex(parts['var'], parts['point_latex'],
                              parts['direction'], body)
         terms.append({'sign': -1 if neg else 1, 'limit': piece})
-        assumptions.append({'text': f'{piece} exists'})
+        assumptions.append({'text': f'{piece} exists',
+                            'display': f'${piece}$ exists'})
     result = ('-' if terms[0]['sign'] < 0 else '') + terms[0]['limit']
     for term in terms[1:]:
         result += (' - ' if term['sign'] < 0 else ' + ') + term['limit']
@@ -3514,6 +3526,64 @@ def limit_assemble(expr, values):
                           'linearity_terms': terms})
 
 
+def _plain_var_power_base(sym, notation, var):
+    """Rational base value when ``sym`` is INDEX(numeric base, power = the
+    plain limit variable) with no other decorations, else None."""
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return None
+    base, (sub, sup_l, power, sup_r) = f.args
+    if sub is not None or sup_l is not None or sup_r is not None:
+        return None
+    if power is None or _plain_symbol_name(power, notation) != var:
+        return None
+    return _rational_const(base, notation)
+
+
+def _geometric_decay_zero(body, notation, var):
+    """True when ``body`` is a (signed) product/quotient whose var-bearing
+    factors are all numeric-base powers ``r^var`` that decay as
+    var → +infinity (0 < r < 1 in a numerator, r > 1 in a denominator)
+    and every other factor is a finite constant — the geometric-decay
+    standard limit ``r^n → 0``."""
+    def peel(sym):
+        while True:
+            inner = _transparent_inner(sym, notation)
+            signed = notation.vgetf(inner, [Notation.MINUS, Notation.PLUS])
+            if signed is None:
+                return inner
+            sym = signed.args[0]
+
+    def factor_list(sym):
+        sym = peel(sym)
+        f = notation.getf(sym, Notation.P_LIST)
+        return [peel(a) for a in f.args] if f is not None else [sym]
+
+    sym = peel(body)
+    frac = _limit_fraction(sym, notation)
+    if frac is not None:
+        sides = ((factor_list(frac[0]), False), (factor_list(frac[1]), True))
+    else:
+        sides = ((factor_list(sym), False), ((), True))
+    decaying = 0
+    for side, inverted in sides:
+        for factor in side:
+            if var not in free_symbols(factor, notation):
+                if _contains_free_infinity(factor, notation):
+                    return False
+                continue
+            base = _plain_var_power_base(factor, notation, var)
+            if base is None or base <= 0:
+                return False
+            if inverted:
+                if base <= 1:
+                    return False
+            elif base >= 1:
+                return False
+            decaying += 1
+    return decaying > 0
+
+
 def limit_table(expr):
     """Apply one narrow standard-limit or rational-at-infinity table rule."""
     args = {'expr': expr}
@@ -3541,6 +3611,9 @@ def limit_table(expr):
             rule = 'rational leading coefficients at infinity'
         except (NotInFragment, ZeroDivisionError):
             pass
+        if (result is None and _infinity_sign(point, pn) > 0
+                and _geometric_decay_zero(body, bn, parts['var'])):
+            result, rule = '0', 'geometric decay at infinity'
     else:
         zero = equal_exprs(parts['point_latex'], '0')
         if zero.get('ok') and zero.get('verdict') == 'yes':
@@ -3608,9 +3681,14 @@ def limit_lhopital(expr):
                       f'internal: unparseable result: {e}')
     assumptions = [
         {'text': (f'{numerator} and {denominator} are differentiable in '
-                  'a punctured neighborhood of the approach point')},
-        {'text': (f'{dd["result"]} \\ne 0 in that punctured neighborhood')},
-        {'text': f'the transformed limit exists or diverges to infinity'},
+                  'a punctured neighborhood of the approach point'),
+         'display': (f'${numerator}$ and ${denominator}$ are differentiable '
+                     'in a punctured neighborhood of the approach point')},
+        {'text': (f'{dd["result"]} \\ne 0 in that punctured neighborhood'),
+         'display': (f'${dd["result"]} \\ne 0$ in that punctured '
+                     'neighborhood')},
+        {'text': 'the transformed limit exists or diverges to infinity',
+         'display': 'the transformed limit exists or diverges to infinity'},
     ]
     check = _limit_equivalence_check(parts, new_body)
     check = _merge_checks(check, nd.get('check', {'status': 'skipped'}))

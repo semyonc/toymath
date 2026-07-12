@@ -222,8 +222,20 @@ class MathShell(object):
                  f"{step['result']}$</div>"]
         for a in step['assumptions']:
             lines.append(f'<div style="margin-left:2em;color:#888">'
-                         f'assumes ${a["text"]}$</div>')
+                         f'assumes {self._assumption_html(a)}</div>')
         return ''.join(lines)
+
+    @staticmethod
+    def _assumption_html(assumption):
+        """One assumption as HTML: with a `display` field, prose stays
+        prose (escaped) and only the inline $...$ spans reach MathJax;
+        a bare `text` keeps the historical whole-line math wrapping."""
+        display = assumption.get('display')
+        if display is None:
+            return f'${assumption["text"]}$'
+        parts = display.split('$')
+        return ''.join(f'${seg}$' if i % 2 else _html.escape(seg)
+                       for i, seg in enumerate(parts))
 
     @staticmethod
     def render_do_claim(claim):
@@ -301,7 +313,8 @@ class MathShell(object):
             display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
                          f'{_html.escape(res["summary"])}</em></div>'))
         if res['assumptions']:
-            asm = '; '.join(f'${a["text"]}$' for a in res['assumptions'])
+            asm = '; '.join(self._assumption_html(a)
+                            for a in res['assumptions'])
             display(HTML(f'<div style="color:#888">assumptions: '
                          f'{asm}</div>'))
         if res['final_result']:
