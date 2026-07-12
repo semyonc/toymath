@@ -208,6 +208,32 @@ class TestScenario(unittest.TestCase):
     def test_add2(self):
         self.checkEqual("add! x_0 - ({mul! 2(x_1 - 2 x_2)})", "x_{0}-{2}x_{1}+{4}x_{2}")
 
+    # soundness guards (processor.merge_barrier / is_infty_factor):
+    # matrix factors never merge across a product (A B A != A^2 B) and
+    # \infty never takes part in like-term arithmetic
+
+    def test_matrix_word_order(self):
+        aba = "\\pmatrix{1 & 2 \\cr 3 & 4} \\pmatrix{0 & 1 \\cr 1 & 0} \\pmatrix{1 & 2 \\cr 3 & 4}"
+        self.checkEqual(aba, aba)
+
+    def test_matrix_scalar_still_commutes(self):
+        self.checkEqual(
+            "x \\pmatrix{1 & 2 \\cr 3 & 4} x",
+            "x^2 \\pmatrix{1 & 2 \\cr 3 & 4}",
+        )
+
+    def test_infty_no_cancel(self):
+        self.checkEqual("\\infty - \\infty", "\\infty - \\infty")
+
+    def test_infty_no_zero_collapse(self):
+        self.checkEqual("0 \\cdot \\infty", "{0} \\infty")
+
+    def test_infty_bound_still_merges(self):
+        self.checkEqual(
+            "2\\sum_{n=1}^{\\infty} \\frac{1}{n^2} + \\sum_{n=1}^{\\infty} \\frac{1}{n^2}",
+            "{3} \\sum_{n=1}^{\\infty} \\frac{1}{n^2}",
+        )
+
     def test_prolog1(self):
         m = PrologModel(
             [
