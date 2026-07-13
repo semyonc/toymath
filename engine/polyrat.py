@@ -525,6 +525,12 @@ def _index_power(power, notation):
         break
     if isinstance(power, IntegerValue):
         return -power.val if neg else power.val
+    if isinstance(power, Symbol):
+        # an expression subtree: its internal node name is meaningless to
+        # the caller, but a plain symbolic exponent's name is worth showing
+        if notation.get(power) is None:
+            raise NotInFragment(f'non-integer exponent {power.name}')
+        raise NotInFragment('non-integer exponent')
     raise NotInFragment(f'non-integer exponent {power!r}')
 
 

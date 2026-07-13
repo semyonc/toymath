@@ -147,7 +147,11 @@ class _GroupStripper(Replicator):
     """Copy a graph dropping transparent {}-groups, for normal-form
     comparison only (the result may not print as valid LaTeX).
     With all_brackets=True, ()-groups and \\left...\\right groups are
-    stripped too (used for atom identity, where any grouping is noise)."""
+    stripped too (used for atom identity, where any grouping is noise).
+    Division spelling is canonicalized: \\frac-family nodes become SLASH,
+    so `x^{\\frac 1 2}` and `x^{1/2}` share one normal form (agents
+    normalize fraction spelling when they re-type an expression, exactly
+    like arrow spelling)."""
 
     def __init__(self, notation, output_notation, all_brackets=False):
         super(_GroupStripper, self).__init__(notation, output_notation)
@@ -164,6 +168,13 @@ class _GroupStripper(Replicator):
         if self.all_brackets and f.props.get('br') == '()':
             return self.enter_formula(f.args[0])
         return super(_GroupStripper, self).enter_vgroup(sym, f)
+
+    def enter_oper(self, sym, f):
+        if f.sym.name in FRAC_NAMES and len(f.args) == 2:
+            args = tuple(self.enter_expr(expr) for expr in f.args)
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.SLASH, args))
+        return super(_GroupStripper, self).enter_oper(sym, f)
 
 
 def _normal_form(latex, allow_ellipsis=False):
@@ -218,18 +229,94 @@ def _operator_body_latex(latex):
     return write_latex(body, notation)
 
 
+def _integral_parts_latex(latex):
+    """(var, integrand_latex) for a top-level indefinite ``\\int`` in
+    either canonical (``\\int f \\, dx``) or textbook differential-in-
+    numerator (``\\int \\frac{f \\, dx}{g}``) form; None when the
+    expression is not such an integral. The variable is discovered from
+    the differential itself, so the two spellings of one integral can be
+    compared integrand-to-integrand."""
+    try:
+        sym, notation = parse_latex(latex, allow_ellipsis=True)
+    except PrimitiveError:
+        return None
+    inner = _peel_groups(sym, notation)
+    f = notation.getf(inner, Notation.P_LIST)
+    if f is None:
+        return None
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and a.name in Notation.styles)]
+    if not (items and isinstance(items[0], Symbol)
+            and notation.get(items[0]) is None
+            and items[0].name == '\\int'):
+        return None
+    tail = items[1:]
+    var = None
+    if (len(tail) >= 2 and isinstance(tail[-1], Symbol)
+            and notation.get(tail[-1]) is None
+            and isinstance(tail[-2], Symbol)
+            and notation.get(tail[-2]) is None
+            and tail[-2].name == 'd'):
+        var = tail[-1].name
+    elif len(tail) == 1:
+        body = tail[0]
+        g = notation.vgetf(body, [Notation.GROUP, Notation.V_GROUP])
+        if g is not None and g.props.get('br') != '||':
+            body = g.args[0]
+        fr = notation.get(body)
+        if fr is not None and (fr.sym == Notation.SLASH
+                               or fr.sym.name in FRAC_NAMES):
+            matched, _rest, dname = _split_trailing_differential(
+                fr.args[0], notation, None)
+            if matched:
+                var = dname
+    if var is None:
+        return None
+    try:
+        integrand = _strip_integral(inner, notation, var)
+    except PrimitiveError:
+        return None
+    if integrand is None:
+        return None
+    return var, write_latex(integrand, notation)
+
+
 def covers_goal(input_latex, goal_latex):
     """Whether a step input structurally restates the goal: identical
-    modulo grouping, or one is a big-operator wrapper whose body is the
+    modulo grouping, one is a big-operator wrapper whose body is the
     other (agents legitimately wrap a bare integrand/body goal in its
-    ``\\int``/``\\lim`` binder, or state the body of a wrapped goal)."""
+    ``\\int``/``\\lim`` binder, or state the body of a wrapped goal), or
+    both are indefinite integrals in the same variable with structurally
+    identical integrands (the textbook ``\\int \\frac{dx}{g}`` and the
+    canonical ``\\int \\frac{1}{g} \\, dx`` are one integral)."""
     if same_expression(input_latex, goal_latex):
         return True
     body = _operator_body_latex(input_latex)
     if body is not None and same_expression(body, goal_latex):
         return True
     goal_body = _operator_body_latex(goal_latex)
-    return goal_body is not None and same_expression(input_latex, goal_body)
+    if goal_body is not None and same_expression(input_latex, goal_body):
+        return True
+    in_parts = _integral_parts_latex(input_latex)
+    if in_parts is None:
+        return False
+    goal_parts = _integral_parts_latex(goal_latex)
+    if goal_parts is None or in_parts[0] != goal_parts[0]:
+        return False
+    # integrands compare with ALL transparent grouping stripped (atom-identity
+    # discipline): the textbook form necessarily parenthesizes its denominator
+    try:
+        return (_all_bracket_normal_form(in_parts[1])
+                == _all_bracket_normal_form(goal_parts[1]))
+    except PrimitiveError:
+        return False
+
+
+def _all_bracket_normal_form(latex):
+    sym, notation = parse_latex(latex, allow_ellipsis=True)
+    out = Notation()
+    return _write_std(_GroupStripper(notation, out, all_brackets=True)(sym),
+                      out)
 
 
 def write_latex(sym, notation):
@@ -4837,7 +4924,9 @@ def _table_integrate(sym, notation, var, assumptions):
             return f'e^{{{var}}}'
         raise PrimitiveError(
             'no table rule for this power; integrate_power_rule handles '
-            'rational powers, or use integrate_by_parts')
+            'integer exponents, a fractional power of the variable wants '
+            'integrate_substitute with u = x^{1/n}, or use '
+            'integrate_by_parts')
     if op == Notation.FUNC:
         fname, arg = f.args[0], f.args[1]
         if isinstance(fname, Symbol) and fname.name in _ANTIDERIV_TABLE \
@@ -4899,7 +4988,10 @@ def integrate_power_rule(expr, var):
     except NotInFragment as e:
         return _error('integrate_power_rule', args,
                       f'outside the rational fragment: {e}; '
-                      'use integrate_table or integrate_by_parts')
+                      'integrate_power_rule handles integer exponents - '
+                      'for a fractional power of the variable substitute '
+                      'u = x^{1/n} via integrate_substitute, otherwise use '
+                      'integrate_table or integrate_by_parts')
     assumptions = []
     try:
         body = _power_integrate_ratfunc(rf, var, assumptions,

@@ -2208,6 +2208,77 @@ class TestGoalCoverage(unittest.TestCase):
         self.assertFalse(P.covers_goal(
             '\\lim_{n \\to \\infty} \\frac{1}{n(n+1)}', TELESCOPING_LIMIT))
 
+    def test_same_expression_unifies_fraction_spelling(self):
+        # agents retype \frac exponents as 1/2 when they restate a goal;
+        # both division spellings must share one normal form
+        self.assertTrue(P.same_expression('x^{\\frac 1 2}', 'x^{1/2}'))
+        self.assertTrue(P.same_expression('\\frac{1}{2}', '{1}/{2}'))
+        self.assertTrue(P.same_expression('\\frac{x+1}{2}', '{x+1}/{2}'))
+        self.assertFalse(P.same_expression('x^{1/2}', 'x^{1/3}'))
+
+    def test_covers_goal_unifies_textbook_integral(self):
+        # the textbook differential-in-numerator goal and the canonical
+        # first-step input are one integral; a goal typed either with a
+        # braced or a parenthesized denominator must be covered
+        canon = '\\int \\frac{1}{x^{1/2}+x^{1/3}} \\, d x'
+        braces = '\\int\\frac {dx} {x^{\\frac 1 2}+x^{\\frac 1 3}}'
+        parens = '\\int\\frac {dx} (x^{\\frac 1 2}+x^{\\frac 1 3})'
+        self.assertTrue(P.covers_goal(canon, braces))
+        self.assertTrue(P.covers_goal(canon, parens))
+        self.assertTrue(P.covers_goal(braces, canon))
+
+    def test_covers_goal_integral_negatives(self):
+        goal = '\\int\\frac{dx}{x^{1/2}+x^{1/3}}'
+        self.assertFalse(P.covers_goal(
+            '\\lim_{x \\to 0} \\frac{1}{x^{1/2}+x^{1/3}}', goal))
+        self.assertFalse(P.covers_goal(
+            '\\int \\frac{1}{x^{1/2}} \\, d x', goal))
+        self.assertFalse(P.covers_goal(
+            '\\int \\frac{1}{t^{1/2}+t^{1/3}} \\, d t', goal))
+        # |...| is semantic, never transparent grouping
+        self.assertFalse(P.covers_goal('\\int |x| \\, d x',
+                                       '\\int x \\, d x'))
+
+
+class TestFracArgumentWriting(unittest.TestCase):
+    def test_paren_group_frac_argument_is_braced(self):
+        # \frac {dx} (g) is ToyMath-dialect: a standard LaTeX reader binds
+        # the denominator to "(", so emitted instructions must brace it
+        from LatexWriter import LaTexWriter
+        sym, notation = P.parse_latex(
+            '\\frac {dx} (x^{\\frac 1 2} + x^{\\frac 1 3})')
+        out = LaTexWriter(notation)(sym)
+        self.assertIn('{(', out.replace(' ', ''))
+        self.assertTrue(P.same_expression(
+            out, '\\frac {dx} {(x^{\\frac 1 2} + x^{\\frac 1 3})}'))
+
+    def test_plain_frac_arguments_unchanged(self):
+        from LatexWriter import LaTexWriter
+        for latex in ('\\frac{a}{b}', '\\frac{1}{2}', '\\frac{x+1}{2}',
+                      '\\frac{dx}{\\left(x+1\\right)}'):
+            sym, notation = P.parse_latex(latex)
+            out = LaTexWriter(notation)(sym)
+            self.assertTrue(P.same_expression(latex, out), out)
+
+
+class TestFractionalPowerSteering(unittest.TestCase):
+    def test_power_rule_steers_to_substitution(self):
+        rec = P.integrate_power_rule('\\int x^{1/2} \\, d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('u = x^{1/n}', rec['error'])
+        self.assertNotRegex(rec['error'], r'_n\d')
+
+    def test_table_refusal_names_the_real_moves(self):
+        rec = P.integrate_table('\\int x^{1/2} \\, d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('integer exponents', rec['error'])
+        self.assertIn('u = x^{1/n}', rec['error'])
+
+    def test_symbolic_exponent_keeps_its_name(self):
+        rec = P.integrate_power_rule('\\int x^{n} \\, d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('non-integer exponent n', rec['error'])
+
 
 if __name__ == '__main__':
     unittest.main()

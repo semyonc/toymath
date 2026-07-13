@@ -224,9 +224,14 @@ class LaTexWriter(object):
                     self.write_nolimits(f)
                 elif f.sym.name in Notation.oper:
                     self.writeString(f.sym.name)
+                    braced_args = f.sym.name in ('\\frac', '\\dfrac',
+                                                 '\\tfrac', '\\cfrac')
                     for expr in f.args:
                         self.writeString(' ')
-                        self.write_expr(expr)
+                        if braced_args:
+                            self.write_frac_item(expr)
+                        else:
+                            self.write_expr(expr)
                 else:
                     self.write_scalar(sym)
             else:
@@ -297,6 +302,25 @@ class LaTexWriter(object):
         else:
             self.writeString('{')
             self.write_scalar(sym)
+            self.writeString('}')
+
+    def write_frac_item(self, sym):
+        # \frac consumes exactly one token or {...} group per argument:
+        # a ()-group or \left...\right argument emitted bare changes the
+        # meaning for any standard LaTeX reader (\frac {dx} (g) reads as
+        # numerator dx over denominator "("), so anything that is not a
+        # bare token, a {}-group, or a self-bracing value repr is wrapped
+        if isinstance(sym, Symbol):
+            f = self.notation.get(sym)
+            selfdelimited = f is None or (
+                f.sym == Notation.GROUP and f.props.get('br') == '{}')
+        else:
+            selfdelimited = sym.__repr__().startswith('{')
+        if selfdelimited:
+            self.write_expr(sym)
+        else:
+            self.writeString('{')
+            self.write_formula(sym)
             self.writeString('}')
 
     def write_index(self, f):
