@@ -9,10 +9,9 @@ checkable move and returns a JSON-able record:
     {'ok': True, 'op': 'expand', 'input': ..., 'result': ...,
      'assumptions': [...], 'check': {...}}
 
-Primitives: substitute, apply_both_sides, expand, collect, evaluate,
-differentiate, rewrite (lemma-based), and the checker equal_exprs (yes/no/
-unknown). Every transforming primitive is spot-checked by an independent
-numeric oracle (Schwartz-Zippel style random sampling).
+The public tactic surface is declared in tactic_registry.py rather than
+duplicated here. Every transforming primitive is spot-checked by an
+independent numeric oracle (Schwartz-Zippel style random sampling).
 
 Deliberately absent: solve, simplify, autonomous integrate, general factor.
 """

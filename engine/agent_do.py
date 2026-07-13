@@ -10,9 +10,8 @@ those tool executions append ledger steps. A hallucinated step cannot
 enter the artifact - the rendered cell is the ledger, not the model's
 prose.
 
-The agent instructions are generated from the committed skill file
-(.claude/skills/toymath/SKILL.md) at load time, so the CLI skill and the
-in-kernel agent cannot drift apart.
+The always-on instructions are small; subject workflows are committed
+SKILL.md files loaded progressively through a stable tactic dispatcher.
 """
 import json
 import os
@@ -20,6 +19,8 @@ import re
 import threading
 
 import primitives
+import tactic_registry
+import tactic_skills
 from ledger import Ledger, TRANSFORMING_OPS
 
 try:
@@ -47,68 +48,31 @@ class DoAgentError(Exception):
 # prompt: SKILL.md adapted for tool calling
 # ---------------------------------------------------------------------------
 
-_TOOL_PREAMBLE = """## Invocation
+_TOOL_PREAMBLE = """## Invocation inside do!
 
-You are running inside a Jupyter notebook cell. Call one tool per
-derivation step; every tool wraps exactly one toymath primitive and
-returns its JSON record. Successful transforming steps are appended to
-the notebook's session ledger automatically and rendered to the user as
-they happen - you never need to repeat them.
-
-Reading the command table and examples below: each command name is a
-tool of the same name, positional arguments are the tool's parameters in
-order, and `--session`/`show`/`replay` are handled by the notebook (there
-are no such tools). `--direction backward` is the `direction` parameter
-of `rewrite`.
+The compact core tactic skill is already present. For a subject workflow,
+call `load_skill` before attempting one of its tactics. The loaded skill gives
+the exact interface. Call `run_tactic` with a tactic name and an ordered list
+of string arguments. Successful transformations are appended to the notebook
+ledger and rendered immediately.
 """
 
 _DO_RULES = """
 ## do! mode
 
 - Work strictly step by step: plan the next move, call the tool, read the
-  record, feed its `result` verbatim into the next call.
-- When the instruction's goal is reached, call `set_result` once with the
-  established expression or equation (that becomes the cell's value,
-  which later cells reference), then stop calling tools and reply with
-  ONE short sentence (the final result and any assumptions it is
-  conditional on). `set_result` accepts any value mechanically equivalent
-  to a result already in the shared ledger, including an earlier result
-  selected after later verification. It rejects a newly synthesized value
-  after transforming steps. In a query-only run with no new transforming
-  step it accepts the value but marks it explicitly unverified. Do not
-  restate the steps; the ledger rendering does that.
-- If a tool refuses or a check disagrees, change strategy; never present
+  record, and feed its result verbatim into the next call.
+- Load only the subject skills needed for this derivation. If the work crosses
+  domains, load the next skill when the boundary is reached.
+- When the goal is reached, call set_result once with an established ledger
+  value, then stop calling tools and answer in one short sentence. A detached
+  value after transforming steps is refused; query-only values are explicitly
+  unverified.
+- If a tactic refuses or its check disagrees, change strategy. Never present
   an unverified result as the answer.
-- For equations, confirm candidate solutions with substitute + evaluate
-  when that is cheap.
-- In long derivations, use `comment` to annotate the ledger: the strategy
-  you are starting, which piece of a split you are on, why you branch.
-  Notes are unverified prose - never a step, never a result. Keep them to
-  one or two short sentences in PLAIN TEXT: no LaTeX/MathML markup, no
-  $ delimiters (comments are not rendered as math - write x^2/(1-x^2)^3
-  style notation). Never write derivations or scratch work into
-  comments; reason silently and record only the decision.
-- For integrals beyond the direct tactics: propose an equivalent integrand
-  (e.g. partial fractions) with `integrate_rewrite` (it is verified
-  mechanically), split sums with `integrate_linearity`, solve each piece,
-  then call `integrate_assemble` with the linearity step id and the ordered
-  ledger step ids of the piece antiderivatives. Never type the final sum into
-  `expand`: that checks only the typed expression, not piece provenance.
-- For limits: use `limit_rewrite` for an equal body, `limit_substitute` only
-  at a continuity point, `limit_table` for a named standard form, and
-  `limit_lhopital` for one sampled 0/0 or infinity/infinity step. Split sums
-  with `limit_linearity`, solve every returned piece, then call
-  `limit_assemble` with the linearity step id and ordered value-step ids.
-  Never type the final sum into `expand`; provenance must stay explicit.
-- For a bounded-by-sequence limit no direct tactic closes: propose lower
-  and upper bounds, close the \\lim of EACH bound as its own recorded step
-  (both must reach the same value), then call `limit_squeeze` citing those
-  step ids. The ordering lower <= body <= upper is spot-checked and
-  recorded as an assumption.
-- An ellipsis (`\\ldots`) has no mechanical meaning: interpret it FIRST via
-  `sum_from_ellipsis` (`t_1 + t_2 + \\ldots + t_n`) or `prod_from_ellipsis`
-  (`f_1 \\cdot f_2 \\ldots f_n`) by proposing the explicit \\sum / \\prod
-  form, then drive the ordinary tactics on the result.
+- Confirm equation candidates with substitute plus evaluate when cheap.
+- Use comment only for short strategy/branch annotations in plain text. Notes
+  are unverified prose, never steps or results; do not put scratch work there.
 """
 
 _PLOT_RULES = """
@@ -142,31 +106,37 @@ You are the strategist; toymath is the mechanical checker. Never do
 algebra in your head when a primitive can do it verified. Every tool
 returns one JSON record; `check.status: "agree"` means an independent
 numeric oracle confirmed the step. There is deliberately no `solve`,
-`simplify`, or autonomous `integrate`: drive the derivation move by move
-(apply / expand / collect / substitute / evaluate / diff / rewrite /
-factor_* / integrate_* / limit_* tactics), feeding each step's `result` verbatim
-into the next call. Surface recorded assumptions; results are
+`simplify`, or autonomous `integrate`: drive the derivation move by move,
+feeding each step's `result` verbatim into the next call. Surface recorded
+assumptions; results are
 "mechanically checked", not "proved".
 """
 
 
 def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
                  proof_claim_id='c1'):
-    """Agent instructions derived from SKILL.md: frontmatter stripped, the
-    bash invocation section replaced by tool-calling guidance, do!-mode
-    (and, when available, plotting) rules appended."""
+    """Build the small always-on core prompt and skill catalog."""
     try:
-        with open(skill_path, 'r', encoding='utf-8') as fh:
-            text = fh.read()
-    except OSError:
+        if os.path.abspath(skill_path) == os.path.abspath(_SKILL_PATH):
+            text = tactic_skills.render('core')
+        else:
+            with open(skill_path, 'r', encoding='utf-8') as fh:
+                text = fh.read()
+    except (OSError, ValueError):
         text = _FALLBACK_SKILL
+        interface = tactic_skills.interface_markdown('core')
+        if interface:
+            text += '\n\n' + interface
     if text.startswith('---'):
         end = text.find('\n---', 3)
         if end != -1:
             text = text[end + len('\n---'):].lstrip('\n')
-    text = re.sub(r'## Invocation.*?(?=\n## )', _TOOL_PREAMBLE, text,
-                  count=1, flags=re.S)
-    text = text.rstrip() + '\n' + _DO_RULES
+    replaced = re.sub(r'## Invocation.*?(?=\n## )', _TOOL_PREAMBLE, text,
+                      count=1, flags=re.S)
+    if replaced == text:
+        replaced = text.rstrip() + '\n\n' + _TOOL_PREAMBLE
+    text = (replaced.rstrip() + '\n\n'
+            + tactic_skills.catalog_markdown() + '\n' + _DO_RULES)
     if plotting:
         text += _PLOT_RULES
     if prove_mode:
@@ -194,6 +164,7 @@ class DoSession(object):
         self.current_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
+        self.loaded_skills = {'core'}
         # the SDK executes sync tools on a thread pool, so parallel tool
         # calls hit the ledger concurrently - serialize the appends
         self._lock = threading.Lock()
@@ -306,447 +277,67 @@ def _equivalent(left, right):
 
 
 def make_api(session):
-    """The plain-python tool implementations, name -> callable returning
-    the JSON record as a string. `make_tools` wraps these for the SDK;
-    tests call them directly."""
+    """Return the stable runtime API plus generated direct test adapters.
 
-    def _run(fn, *args):
-        return json.dumps(session.record(fn(*args)),
-                          ensure_ascii=False, default=str)
+    Only the stable control/dispatcher functions are exposed to the model by
+    make_tools. The generated tactic-name adapters preserve the plain-Python
+    test API without creating model-visible schemas.
+    """
 
-    def apply(equation: str, op: str, arg: str) -> str:
-        """Apply an operation to both sides of an equation or inequality.
-
-        Args:
-            equation: LaTeX relation, e.g. "2x + 3 = 7" or "-2x \\lt 4".
-            op: one of + - * / ^.
-            arg: LaTeX operand to apply on both sides.
-        """
-        return _run(primitives.apply_both_sides, equation, op, arg)
-
-    def expand(expr: str) -> str:
-        """Distribute products/powers and canonicalize; simplifies each
-        side of an equation; merges like terms over opaque atoms outside
-        the rational fragment.
+    def load_skill(skill: str) -> str:
+        """Load one subject tactic skill before using its tactics.
 
         Args:
-            expr: LaTeX expression or relation.
+            skill: skill name from the available-skills catalog.
         """
-        return _run(primitives.expand, expr)
+        if skill in session.loaded_skills:
+            return f'Skill {skill!r} is already loaded.'
+        try:
+            content = tactic_skills.render(skill)
+        except ValueError as exc:
+            return f'Cannot load skill: {exc}'
+        session.loaded_skills.add(skill)
+        return f'Loaded skill {skill!r}.\n\n{content}'
 
-    def collect(expr: str, var: str) -> str:
-        """Group an expression by powers of a variable (equations and
-        rational functions supported, opaque atoms handled).
+    def run_tactic(tactic: str, arguments: list[str]) -> str:
+        """Run one tactic from a loaded skill and return its checked record.
 
         Args:
-            expr: LaTeX expression or relation.
-            var: variable name to collect by, e.g. "x".
+            tactic: exact tactic name from a loaded skill.
+            arguments: ordered string arguments shown by that skill.
         """
-        return _run(primitives.collect, expr, var)
-
-    def substitute(expr: str, var: str, value: str) -> str:
-        """Replace every free occurrence of a variable by a value.
-
-        Args:
-            expr: LaTeX expression or relation.
-            var: variable name to replace.
-            value: LaTeX replacement value.
-        """
-        return _run(primitives.substitute, expr, var, value)
-
-    def evaluate(expr: str) -> str:
-        """Exact arithmetic when no free variables remain; on an equation
-        reports holds: true/false (solution checking).
-
-        Args:
-            expr: LaTeX expression or relation with numeric leaves.
-        """
-        return _run(primitives.evaluate, expr)
-
-    def diff(expr: str, var: str) -> str:
-        """Differentiate with respect to a variable (verified by central
-        differences).
-
-        Args:
-            expr: LaTeX expression.
-            var: differentiation variable.
-        """
-        return _run(primitives.differentiate, expr, var)
-
-    def limit_rewrite(expr: str, new_body: str) -> str:
-        """Replace a limit body by an expression YOU propose; equal?
-        mechanically verifies the bodies before carrying the binder over.
-
-        Args:
-            expr: full LaTeX limit, e.g. "\\lim_{x \\to 1} ...".
-            new_body: mechanically equivalent body in LaTeX.
-        """
-        return _run(primitives.limit_rewrite, expr, new_body)
-
-    def limit_substitute(expr: str) -> str:
-        """Evaluate a finite limit by continuity substitution. Records the
-        continuity assumption and requires the approach oracle to converge.
-
-        Args:
-            expr: full LaTeX limit expression.
-        """
-        return _run(primitives.limit_substitute, expr)
-
-    def limit_linearity(expr: str) -> str:
-        """Split the limit of a top-level sum into ordered limit pieces.
-        The result records existence assumptions; solve the pieces and close
-        them with limit_assemble.
-
-        Args:
-            expr: full LaTeX limit whose body is a sum.
-        """
-        return _run(primitives.limit_linearity, expr)
-
-    def limit_table(expr: str) -> str:
-        """Apply a standard finite limit rule, constant rule, finite
-        rational leading-coefficient rule at infinity, or geometric decay
-        at +infinity (r^var with numeric 0<r<1, or divided by s^var with
-        numeric s>1, times constants — rewrite e^{-c n} into that form
-        first).
-
-        Args:
-            expr: full LaTeX limit expression.
-        """
-        return _run(primitives.limit_table, expr)
-
-    def limit_lhopital(expr: str) -> str:
-        """Apply one l'Hopital step after the oracle observes 0/0 or
-        infinity/infinity; records the theorem's differentiability and
-        existence premises.
-
-        Args:
-            expr: full quotient limit expression.
-        """
-        return _run(primitives.limit_lhopital, expr)
-
-    def limit_assemble(linearity_step: str,
-                       value_steps: list[str]) -> str:
-        """Assemble a limit-linearity split from RECORDED piece values.
-
-        Args:
-            linearity_step: ledger id of the limit_linearity step.
-            value_steps: ordered ledger ids whose results are piece limits.
-        """
-        with session._lock:
-            steps = list(session.ledger.steps)
-        by_id = {step['id']: step for step in steps}
-        linearity = by_id.get(linearity_step)
-        if linearity is None or linearity.get('op') != 'limit_linearity':
-            return json.dumps({
-                'ok': False, 'op': 'limit_assemble',
-                'error': (f'{linearity_step!r} is not a recorded '
-                          'limit_linearity step'),
-            }, ensure_ascii=False)
-        if not isinstance(value_steps, list):
-            return json.dumps({
-                'ok': False, 'op': 'limit_assemble',
-                'error': 'value_steps must be an ordered list',
-            }, ensure_ascii=False)
-        values = []
-        for source_id in value_steps:
-            source = by_id.get(source_id)
-            if source is None or source.get('result') is None:
-                return json.dumps({
-                    'ok': False, 'op': 'limit_assemble',
-                    'error': f'unknown transforming step {source_id!r}',
-                }, ensure_ascii=False)
-            values.append(source['result'])
-        result = primitives.limit_assemble(linearity['input'], values)
-        if result.get('ok'):
-            result['sources'] = {
-                'linearity': linearity_step,
-                'values': list(value_steps),
-            }
-        return json.dumps(session.record(result), ensure_ascii=False,
-                          default=str)
-
-    def limit_squeeze(expr: str, lower: str, upper: str,
-                      lower_step: str, upper_step: str) -> str:
-        """Close a limit by the squeeze theorem from RECORDED bound limits.
-
-        First close the \\lim of the lower bound and the \\lim of the upper
-        bound as their own ledger steps (both must reach the same value),
-        then cite those step ids here. The ordering lower <= body <= upper
-        is spot-checked at approach samples and recorded as an assumption.
-
-        Args:
-            expr: the full \\lim expression to close.
-            lower: LaTeX lower-bound body, in the limit variable.
-            upper: LaTeX upper-bound body, in the limit variable.
-            lower_step: ledger id of the step closing the lower bound's
-                limit, e.g. "s2".
-            upper_step: ledger id of the step closing the upper bound's
-                limit.
-        """
-        with session._lock:
-            steps = list(session.ledger.steps)
-        by_id = {step['id']: step for step in steps}
-        resolved = []
-        for tag, bound, source_id in (('lower', lower, lower_step),
-                                      ('upper', upper, upper_step)):
-            source = by_id.get(source_id)
-            if source is None or source.get('result') is None:
-                return json.dumps({
-                    'ok': False, 'op': 'limit_squeeze',
-                    'error': f'unknown transforming step {source_id!r}',
-                }, ensure_ascii=False)
-            try:
-                expected = primitives.limit_with_body(expr, bound)
-            except primitives.PrimitiveError as e:
-                return json.dumps({
-                    'ok': False, 'op': 'limit_squeeze', 'error': str(e),
-                }, ensure_ascii=False)
-            if not primitives.same_expression(source.get('input') or '',
-                                              expected):
-                return json.dumps({
-                    'ok': False, 'op': 'limit_squeeze',
-                    'error': (f'{source_id!r} does not record the {tag} '
-                              f'bound limit {expected!r}'),
-                }, ensure_ascii=False)
-            resolved.append(source['result'])
-        low_value, up_value = resolved
-        if not primitives.same_expression(low_value, up_value):
-            eq = primitives.equal_exprs(low_value, up_value)
-            if not (eq.get('ok') and eq.get('verdict') == 'yes'):
-                return json.dumps({
-                    'ok': False, 'op': 'limit_squeeze',
-                    'error': ('the recorded bound limits are not the same '
-                              f'value: {low_value!r} vs {up_value!r}'),
-                }, ensure_ascii=False)
-        result = primitives.limit_squeeze(expr, lower, upper, low_value)
-        if result.get('ok'):
-            result['sources'] = {'lower': lower_step, 'upper': upper_step}
-        return json.dumps(session.record(result), ensure_ascii=False,
-                          default=str)
-
-    def sum_from_ellipsis(expr: str, sum_form: str) -> str:
-        """Interpret an ellipsis sum (t_1 + t_2 + \\ldots + t_n), optionally
-        inside a \\lim, as an explicit finite \\sum. Every displayed term is
-        mechanically checked against the proposed summand at its index; the
-        continuation of the pattern is recorded as an assumption.
-
-        Args:
-            expr: LaTeX ellipsis sum, or a \\lim whose body is one.
-            sum_form: the proposed bare \\sum_{k=a}^{b} summand form.
-        """
-        return _run(primitives.sum_from_ellipsis, expr, sum_form)
-
-    def prod_from_ellipsis(expr: str, prod_form: str) -> str:
-        """Interpret an ellipsis product (f_1 \\cdot f_2 \\ldots f_n),
-        optionally inside a \\lim, as an explicit finite \\prod. Every
-        displayed factor is mechanically checked against the proposed
-        factor at its index; the continuation of the pattern is recorded
-        as an assumption. Parenthesize a composite trailing factor
-        (write (2n) rather than 2n) so it stays one factor.
-
-        Args:
-            expr: LaTeX ellipsis product, or a \\lim whose body is one.
-            prod_form: the proposed bare \\prod_{k=a}^{b} factor form.
-        """
-        return _run(primitives.prod_from_ellipsis, expr, prod_form)
-
-    def sum_rewrite(expr: str, new_summand: str) -> str:
-        """Replace the summand of a finite \\sum (optionally inside a \\lim)
-        by a mechanically equal expression; equal? gates the proposal.
-
-        Args:
-            expr: LaTeX finite sum, or a \\lim whose body is one.
-            new_summand: proposed equal summand in the bound variable.
-        """
-        return _run(primitives.sum_rewrite, expr, new_summand)
-
-    def sum_telescope(expr: str, term: str) -> str:
-        """Collapse a telescoping sum \\sum_{k=a}^{b} (f(k) - f(k+1)) to
-        f(a) - f(b+1). equal? must confirm the summand equals
-        f(k) - f(k+1) for the proposed f, and a literal finite-sum
-        evaluation independently confirms the closed form.
-
-        Args:
-            expr: LaTeX finite sum (optionally inside a \\lim).
-            term: the telescoping f(k), written in the bound variable.
-        """
-        return _run(primitives.sum_telescope, expr, term)
-
-    def rewrite(expr: str, lemma: str, direction: str) -> str:
-        """Apply a registered equality lemma at the root or first matching
-        subterm.
-
-        Args:
-            expr: LaTeX expression.
-            lemma: lemma name from the lemmas tool, e.g. "diff_squares".
-            direction: "forward" (usual) or "backward".
-        """
-        return _run(primitives.rewrite, expr, lemma, direction)
-
-    def integrate_power_rule(expr: str, var: str) -> str:
-        """Term-by-term power-rule antiderivative; accepts \\int wrappers;
-        refuses the 1/x case (use integrate_table).
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression.
-            var: integration variable.
-        """
-        return _run(primitives.integrate_power_rule, expr, var)
-
-    def integrate_table(expr: str, var: str) -> str:
-        """Table antiderivatives (sin, cos, e^x, sinh, cosh, 1/x -> ln x);
-        closed under sums and constant factors.
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression.
-            var: integration variable.
-        """
-        return _run(primitives.integrate_table, expr, var)
-
-    def integrate_by_parts(expr: str, var: str, u: str, dv: str) -> str:
-        """One application of integration by parts; verifies u*dv equals
-        the integrand and returns u v - \\int v du plus a
-        remaining_integral for the next tactic.
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression.
-            var: integration variable.
-            u: the u part, LaTeX.
-            dv: the dv part, LaTeX.
-        """
-        return _run(primitives.integrate_by_parts, expr, var, u, dv)
-
-    def integrate_substitute(expr: str, var: str, u_expr: str, u_var: str,
-                             new_integrand: str) -> str:
-        """u-substitution: supply u and the integrand rewritten in the new
-        variable; toymath verifies f(u(x))*u'(x) equals the integrand.
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression.
-            var: original integration variable.
-            u_expr: substitution expression, e.g. "x^2".
-            u_var: new variable name, e.g. "u".
-            new_integrand: integrand rewritten in u_var, e.g. "\\cos(u)".
-        """
-        return _run(primitives.integrate_substitute, expr, var, u_expr,
-                    u_var, new_integrand)
-
-    def integrate_rewrite(expr: str, var: str, new_integrand: str) -> str:
-        """Replace the integrand with an expression YOU propose (e.g. a
-        partial-fraction decomposition); toymath verifies the two
-        integrands are mechanically equal before rewriting the integral.
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression.
-            var: integration variable.
-            new_integrand: equivalent integrand, LaTeX.
-        """
-        return _run(primitives.integrate_rewrite, expr, var, new_integrand)
-
-    def integrate_linearity(expr: str, var: str) -> str:
-        """Split the integral of a top-level sum into a signed sum of
-        integrals, one per term (exact sum rule); attack each resulting
-        integral separately, then use integrate_assemble.
-
-        Args:
-            expr: LaTeX integrand or \\int ... dx expression whose
-                integrand is a sum.
-            var: integration variable.
-        """
-        return _run(primitives.integrate_linearity, expr, var)
-
-    def integrate_assemble(linearity_step: str,
-                           antiderivative_steps: list[str]) -> str:
-        """Assemble a linearity split from RECORDED piece results. Supply
-        one ledger step id per term, in the exact order returned by
-        integrate_linearity. ToyMath retrieves those results, verifies each
-        derivative against its corresponding integrand, applies the signs,
-        and adds one fresh constant.
-
-        Args:
-            linearity_step: ledger id of the integrate_linearity step,
-                e.g. "s4".
-            antiderivative_steps: ordered ledger ids whose results are the
-                completed antiderivatives, e.g. ["s8", "s12", "s16"].
-        """
-        with session._lock:
-            steps = list(session.ledger.steps)
-        by_id = {step['id']: step for step in steps}
-        linearity = by_id.get(linearity_step)
-        if linearity is None:
-            return json.dumps({
-                'ok': False, 'op': 'integrate_assemble',
-                'error': f'unknown linearity step {linearity_step!r}',
-            }, ensure_ascii=False)
-        if linearity.get('op') != 'integrate_linearity':
-            return json.dumps({
-                'ok': False, 'op': 'integrate_assemble',
-                'error': (f'{linearity_step!r} is '
-                          f'{linearity.get("op")!r}, not '
-                          'integrate_linearity'),
-            }, ensure_ascii=False)
-        if not isinstance(antiderivative_steps, list):
-            return json.dumps({
-                'ok': False, 'op': 'integrate_assemble',
-                'error': 'antiderivative_steps must be an ordered list',
-            }, ensure_ascii=False)
-        values = []
-        for source_id in antiderivative_steps:
-            source = by_id.get(source_id)
-            if source is None or source.get('result') is None:
-                return json.dumps({
-                    'ok': False, 'op': 'integrate_assemble',
-                    'error': f'unknown transforming step {source_id!r}',
-                }, ensure_ascii=False)
-            values.append(source['result'])
-        result = primitives.integrate_assemble(
-            linearity['input'], linearity['args']['var'], values)
-        if result.get('ok'):
-            result['sources'] = {
-                'linearity': linearity_step,
-                'antiderivatives': list(antiderivative_steps),
-            }
-        return json.dumps(session.record(result), ensure_ascii=False,
-                          default=str)
+        result = tactic_registry.invoke_agent(tactic, arguments, session)
+        return json.dumps(result, ensure_ascii=False, default=str)
 
     def comment(text: str) -> str:
-        """Add a short narrative note to the ledger (strategy, which piece
-        you are working on, why you branch). Notes are unverified prose:
-        never a transforming step, never a final result.
+        """Add a short unverified strategy or branch note to the ledger.
 
         Args:
-            text: one or two SHORT plain-text sentences. No LaTeX/MathML
-                markup, no $ delimiters - notes are not rendered as math
-                (write x^2/(1-x^2)^3 style notation). Never scratch work:
-                reason silently, record only the decision.
+            text: one or two short plain-text sentences; no scratch work.
         """
         try:
             step = session.comment(text)
-        except ValueError as e:
+        except ValueError as exc:
             return json.dumps({'ok': False, 'op': 'comment',
-                               'error': str(e)}, ensure_ascii=False)
+                               'error': str(exc)}, ensure_ascii=False)
         reply = {'ok': True, 'op': 'comment', 'id': step['id']}
         if len(text) > 400:
-            reply['hint'] = ('note recorded, but comments should be one '
-                             'or two short sentences - reason silently '
-                             'instead of writing derivations here')
+            reply['hint'] = 'keep comments to one or two short sentences'
         return json.dumps(reply, ensure_ascii=False)
 
     def claim(statement: str, parent: str = '') -> str:
-        """Record and focus a parseable mathematical subclaim. In prove!
-        mode the root claim c1 already exists, so use this only when the
-        derivation genuinely needs a named subgoal.
+        """Record and focus a parseable mathematical subclaim.
 
         Args:
             statement: LaTeX statement of the subclaim.
-            parent: parent claim id such as c1; empty means no parent.
+            parent: parent claim id, or empty for none.
         """
         try:
-            rec = session.claim(statement, parent=parent or None)
-        except ValueError as e:
+            record = session.claim(statement, parent=parent or None)
+        except ValueError as exc:
             return json.dumps({'ok': False, 'op': 'claim',
-                               'error': str(e)}, ensure_ascii=False)
-        return json.dumps({'ok': True, 'op': 'claim', **rec},
+                               'error': str(exc)}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'claim', **record},
                           ensure_ascii=False)
 
     def conclude(claim_id: str, step_ids: list[str]) -> str:
@@ -757,71 +348,31 @@ def make_api(session):
             step_ids: ordered transforming step ids forming the closure.
         """
         try:
-            rec = session.conclude(claim_id, step_ids)
-        except ValueError as e:
+            record = session.conclude(claim_id, step_ids)
+        except ValueError as exc:
             return json.dumps({'ok': False, 'op': 'conclude',
-                               'claim': claim_id, 'error': str(e)},
+                               'claim': claim_id, 'error': str(exc)},
                               ensure_ascii=False)
-        return json.dumps({'ok': True, 'op': 'conclude', 'claim': rec},
+        return json.dumps({'ok': True, 'op': 'conclude', 'claim': record},
                           ensure_ascii=False)
 
-    def factor_gcd(expr: str) -> str:
-        """Pull common factors from a sum or applicable relation sides,
-        e.g. 6x^2+9x=3 -> 3x(2x+3)=3.
-
-        Args:
-            expr: LaTeX expression, equation, or inequality.
-        """
-        return _run(primitives.factor_gcd, expr)
-
-    def factor_quadratic(expr: str, var: str) -> str:
-        """Factor quadratics with rational roots in an expression or on
-        applicable relation sides; reports roots and refuses
-        irrational/complex cases.
-
-        Args:
-            expr: LaTeX quadratic expression, equation, or inequality.
-            var: the variable, e.g. "x".
-        """
-        return _run(primitives.factor_quadratic, expr, var)
-
-    def equal(expr1: str, expr2: str) -> str:
-        """Check whether two expressions are equal: verdict yes/no/unknown
-        (query only, not a ledger step).
-
-        Args:
-            expr1: LaTeX expression.
-            expr2: LaTeX expression.
-        """
-        return _run(primitives.equal_exprs, expr1, expr2)
-
-    def lemmas() -> str:
-        """List the registered rewrite lemmas (query only)."""
-        return _run(primitives.list_lemmas)
-
     def set_result(expr: str) -> str:
-        """Designate the cell's final value (what later cells reference as
-        [[n]]). Call once, right before your closing sentence, with the
-        expression or equation the derivation established. The value must
-        be mechanically equivalent to any result in the shared ledger; an
-        earlier result may be selected after later verification. A run with
-        no transforming steps may designate a query-only value, but it is
-        explicitly marked unverified. Not a ledger step - the steps above
-        are what justify it.
+        """Designate the established value that later notebook cells use.
 
         Args:
-            expr: LaTeX expression or relation, e.g. "x = 2".
+            expr: LaTeX expression or relation already established in the
+                shared ledger.
         """
         try:
             primitives.parse_latex(expr)
-        except primitives.PrimitiveError as e:
+        except primitives.PrimitiveError as exc:
             return json.dumps({'ok': False, 'op': 'set_result',
-                               'error': str(e)}, ensure_ascii=False)
+                               'error': str(exc)}, ensure_ascii=False)
         provenance = session.designate_result(expr)
         if provenance is None:
             if session.proof_claim_id is not None:
-                claim = session.ledger.get_claim(session.proof_claim_id)
-                if claim is None or claim.get('verdict') == 'open':
+                root = session.ledger.get_claim(session.proof_claim_id)
+                if root is None or root.get('verdict') == 'open':
                     error = ('root claim is still open; call conclude with '
                              'a mechanically checked closing chain first')
                 else:
@@ -829,59 +380,66 @@ def make_api(session):
                              f'root claim {session.proof_claim_id}')
             else:
                 error = ('value is not mechanically equivalent to any '
-                         'result in the shared ledger; use a primitive to '
+                         'result in the shared ledger; use a tactic to '
                          'establish it or select an earlier ledger result')
-            return json.dumps({
-                'ok': False, 'op': 'set_result',
-                'error': error,
-            }, ensure_ascii=False)
+            return json.dumps({'ok': False, 'op': 'set_result',
+                               'error': error}, ensure_ascii=False)
         session.result_override = expr
         session.result_provenance = provenance
         return json.dumps({'ok': True, 'op': 'set_result', 'result': expr,
                            'provenance': provenance}, ensure_ascii=False)
 
     def plot(code: str, caption: str) -> str:
-        """Render matplotlib/seaborn figures in an isolated sandbox; they
-        are shown to the user inline as unverified illustration (never a
-        ledger step).
+        """Render an unverified matplotlib/seaborn illustration.
 
         Args:
-            code: self-contained Python; import everything you use
-                (numpy/matplotlib/seaborn available), build the figure,
-                no plt.show() needed.
+            code: self-contained Python that builds a figure.
             caption: one-line description displayed under the figure.
         """
-        r = session.plot_backend.run_plot(code)
-        images = r.get('images') or []
+        result = session.plot_backend.run_plot(code)
+        images = result.get('images') or []
         if images and session.on_plot is not None:
             session.on_plot(caption, images)
-        reply = {'ok': bool(r.get('ok')) and bool(images),
+        reply = {'ok': bool(result.get('ok')) and bool(images),
                  'plots': len(images),
-                 'stdout': (r.get('stdout') or '')[-800:]}
+                 'stdout': (result.get('stdout') or '')[-800:]}
         if not reply['ok']:
-            reply['error'] = (r.get('error')
+            reply['error'] = (result.get('error')
                               or 'the code produced no figure')[-1200:]
         return json.dumps(reply, ensure_ascii=False)
 
-    fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
-           limit_rewrite, limit_substitute, limit_linearity, limit_table,
-           limit_lhopital, limit_assemble, limit_squeeze,
-           sum_from_ellipsis, sum_rewrite, sum_telescope,
-           prod_from_ellipsis,
-           integrate_power_rule, integrate_table, integrate_by_parts,
-           integrate_substitute, integrate_rewrite, integrate_linearity,
-           integrate_assemble,
-           factor_gcd, factor_quadratic, equal, lemmas, comment, claim,
-           conclude,
-           set_result]
+    api = {
+        'load_skill': load_skill,
+        'run_tactic': run_tactic,
+        'comment': comment,
+        'claim': claim,
+        'conclude': conclude,
+        'set_result': set_result,
+    }
     if session.plot_backend is not None:
-        fns.append(plot)
-    return {f.__name__: f for f in fns}
+        api['plot'] = plot
+
+    # Internal compatibility only: generated from the registry, never exposed
+    # as model tools. This keeps focused tests and embedders off private
+    # primitive functions while the public runtime has one stable dispatcher.
+    for spec in tactic_registry.TACTICS:
+        def legacy(*args, _spec=spec):
+            argv = tactic_registry.legacy_agent_arguments(_spec, args)
+            result = tactic_registry.invoke_agent(
+                _spec.name, argv, session, require_loaded=False)
+            return json.dumps(result, ensure_ascii=False, default=str)
+        api[spec.name] = legacy
+    return api
 
 
 def make_tools(session):
     from agents import function_tool
-    return [function_tool(f) for f in make_api(session).values()]
+    api = make_api(session)
+    names = ['load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
+             'set_result']
+    if session.plot_backend is not None:
+        names.append('plot')
+    return [function_tool(api[name]) for name in names]
 
 
 # ---------------------------------------------------------------------------

@@ -12,11 +12,11 @@ Jupyter kernel, a console app, and an agent-facing CLI.
 Two layers coexist:
 
 1. **Agent-scoped verified-derivation primitives** — the current focus
-   (branch `agentic-primitives`). The agent (or user) decides strategy;
-   each primitive executes one narrow, named, mechanically checked step; an
+   (developed on topic branches). The agent (or user) decides strategy; each
+   primitive executes one narrow, named, mechanically checked step; an
    independent numeric oracle spot-checks every transformation; the session
-   ledger is the replayable artifact. Read `docs/PRIMITIVES.md` before
-   touching this layer.
+   ledger is the replayable artifact. Read `docs/PRIMITIVES.md` and the
+   relevant domain `SKILL.md` before touching this layer.
 2. **Legacy fixed-point engine** — the original autonomous simplifier
    (`processor.py` + `cmd_*.py` rewrite commands). Still powers plain math
    cells in the kernel/console. Kept working, deliberately not extended
@@ -27,10 +27,12 @@ Two layers coexist:
 | File | Purpose |
 |------|---------|
 | `engine/primitives.py` | The primitives + `equal_exprs` checker + numeric oracle |
+| `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
+| `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
-| `engine/agent_do.py` | `do!` Jupyter endpoint: OpenRouter agent whose only way to do math is calling the primitives |
+| `engine/agent_do.py` | `do!` Jupyter endpoint: small stable tool surface (`load_skill`, `run_tactic`, ledger controls) over the tactic registry |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
 | `engine/plot_sandbox.py` | Sandboxed plotting for `do!` (Pyodide under Deno) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
@@ -63,6 +65,8 @@ Two layers coexist:
   the two independent trust legs are the design.
 - Never mutate an input notation; build results into fresh/cloned ones.
 - Say "mechanically checked", never "proved".
+- Skill Markdown guides tactic choice; it never grants execution authority.
+  Only the allowlisted registry can invoke code or admit replayable steps.
 - Core code is fair game: when a fix belongs in the parser grammar, lexer,
   writer, comparer, or replicator, make it there rather than layering
   workarounds. After grammar changes: regenerate the tables, check
@@ -82,6 +86,35 @@ Two layers coexist:
 Never give a `commands/*.md` file the same name as a registered `cmd_*`
 action (e.g. `mul`) — it would silently reroute every cell containing that
 command away from the fixed-point engine.
+
+## Extending the Verified Tactic Layer
+
+Do not add another function tool to `engine/agent_do.py`, another handwritten
+CLI dispatch branch, or another replay lambda. The model-facing tool set must
+stay constant as subject coverage grows.
+
+For a new tactic:
+
+1. Implement the narrow transformation in `engine/primitives.py`, with the
+   standard result record and an independent oracle check (or `exact`).
+2. Add one `TacticSpec` to `engine/tactic_registry.py`: stable public name,
+   stable ledger `op`, owning skill, ordered arguments, summary, and callable.
+   The registry automatically supplies CLI parsing/dispatch, transforming-op
+   classification, do! dispatch, discovery, and replay.
+3. If the tactic consumes earlier ledger results, add its session adapter and
+   replay provenance validator to that same registry entry. Persist source ids
+   in the result; provenance is load-bearing, not decorative.
+4. Put strategy, ordering, examples, and pitfalls in the owning domain file
+   under `.claude/skills/toymath/domains/*/SKILL.md`. Do not copy exact
+   signatures into Markdown: they are rendered from the registry. Create a
+   new domain skill only for a coherent subject workflow, not per tactic.
+5. Add primitive/oracle tests plus registry, CLI-compatibility, do! dispatcher,
+   skill-gating, and replay tests as applicable. Run the full offline suite.
+
+Keep `docs/OVERVIEW.md` as the system tour and `docs/PRIMITIVES.md` as the
+trust/extension contract. They link to skills and registry discovery rather
+than duplicating an exhaustive tactic manual. `python toymath_cli.py skills`,
+`tactics [--skill NAME]`, and `describe TACTIC` are the generated reference.
 
 ## Running
 

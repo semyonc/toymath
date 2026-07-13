@@ -61,7 +61,8 @@ engine = ["*.py"]
 [tool.pytest.ini_options]
 testpaths = ["engine"]
 python_files = ["unittests.py", "unittests_frac.py",
-                "unittests_primitives.py", "unittests_do.py"]
+                "unittests_primitives.py", "unittests_do.py",
+                "unittests_tactics.py"]
 addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",

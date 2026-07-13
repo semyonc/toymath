@@ -14,21 +14,9 @@ import json
 import os
 import hashlib
 
+from tactic_registry import TRANSFORMING_OPS
+
 LEDGER_VERSION = 2
-
-# primitives whose successful results become ledger steps (everything that
-# transforms an expression; equal/lemmas are queries, not steps)
-TRANSFORMING_OPS = frozenset({
-    'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
-    'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
-    'limit_rewrite', 'limit_substitute', 'limit_linearity', 'limit_table',
-    'limit_lhopital', 'limit_assemble', 'limit_squeeze',
-    'sum_from_ellipsis', 'sum_rewrite', 'sum_telescope',
-    'prod_from_ellipsis',
-    'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
-    'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
-    'integrate_assemble'})
-
 
 def _step_hash(op, input_latex, result_latex):
     h = hashlib.sha1(f'{op}|{input_latex}|{result_latex}'.encode('utf-8'))
@@ -354,58 +342,7 @@ class Ledger(object):
         """Re-run every step through its primitive and confirm the recorded
         result. Returns {'status': 'verified'|'failed', ...}."""
         import primitives
-        dispatch = {
-            'substitute': lambda a: primitives.substitute(
-                a['expr'], a['var'], a['value']),
-            'apply_both_sides': lambda a: primitives.apply_both_sides(
-                a['equation'], a['op'], a['arg']),
-            'expand': lambda a: primitives.expand(a['expr']),
-            'collect': lambda a: primitives.collect(a['expr'], a['var']),
-            'evaluate': lambda a: primitives.evaluate(a['expr']),
-            'differentiate': lambda a: primitives.differentiate(
-                a['expr'], a['var']),
-            'rewrite': lambda a: primitives.rewrite(
-                a['expr'], a['lemma'], a.get('direction', 'forward')),
-            'factor_gcd': lambda a: primitives.factor_gcd(a['expr']),
-            'factor_quadratic': lambda a: primitives.factor_quadratic(
-                a['expr'], a['var']),
-            'limit_rewrite': lambda a: primitives.limit_rewrite(
-                a['expr'], a['new_body']),
-            'limit_substitute': lambda a: primitives.limit_substitute(
-                a['expr']),
-            'limit_linearity': lambda a: primitives.limit_linearity(
-                a['expr']),
-            'limit_table': lambda a: primitives.limit_table(a['expr']),
-            'limit_lhopital': lambda a: primitives.limit_lhopital(a['expr']),
-            'limit_assemble': lambda a: primitives.limit_assemble(
-                a['expr'], a['values']),
-            'limit_squeeze': lambda a: primitives.limit_squeeze(
-                a['expr'], a['lower'], a['upper'], a['value']),
-            'sum_from_ellipsis': lambda a: primitives.sum_from_ellipsis(
-                a['expr'], a['sum_form']),
-            'prod_from_ellipsis': lambda a: primitives.prod_from_ellipsis(
-                a['expr'], a['prod_form']),
-            'sum_rewrite': lambda a: primitives.sum_rewrite(
-                a['expr'], a['new_summand']),
-            'sum_telescope': lambda a: primitives.sum_telescope(
-                a['expr'], a['term']),
-            'integrate_power_rule': lambda a: primitives.integrate_power_rule(
-                a['expr'], a['var']),
-            'integrate_table': lambda a: primitives.integrate_table(
-                a['expr'], a['var']),
-            'integrate_by_parts': lambda a: primitives.integrate_by_parts(
-                a['expr'], a['var'], a['u'], a['dv']),
-            'integrate_substitute':
-                lambda a: primitives.integrate_substitute(
-                    a['expr'], a['var'], a['u_expr'], a['u_var'],
-                    a['new_integrand']),
-            'integrate_rewrite': lambda a: primitives.integrate_rewrite(
-                a['expr'], a['var'], a['new_integrand']),
-            'integrate_linearity': lambda a: primitives.integrate_linearity(
-                a['expr'], a['var']),
-            'integrate_assemble': lambda a: primitives.integrate_assemble(
-                a['expr'], a['var'], a['antiderivatives']),
-        }
+        import tactic_registry
         seen = {}
         replayed_steps = []
         for step in self.steps:
@@ -413,83 +350,12 @@ class Ledger(object):
                 seen[step['id']] = step
                 replayed_steps.append(step)
                 continue
-            if step['op'] == 'integrate_assemble':
-                sources = step.get('sources') or {}
-                linearity = seen.get(sources.get('linearity'))
-                if linearity is None or linearity.get('op') != \
-                        'integrate_linearity':
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'missing linearity-step provenance'}
-                args = step.get('args', {})
-                if (linearity.get('input') != args.get('expr')
-                        or linearity.get('args', {}).get('var')
-                        != args.get('var')):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'linearity-step provenance mismatch'}
-                source_ids = sources.get('antiderivatives') or []
-                values = args.get('antiderivatives') or []
-                if len(source_ids) != len(values):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'antiderivative provenance mismatch'}
-                for source_id, value in zip(source_ids, values):
-                    source = seen.get(source_id)
-                    if source is None or source.get('result') != value:
-                        return {
-                            'status': 'failed', 'step': step['id'],
-                            'reason': ('antiderivative provenance mismatch '
-                                       f'at {source_id}')}
-            if step['op'] == 'limit_assemble':
-                sources = step.get('sources') or {}
-                linearity = seen.get(sources.get('linearity'))
-                if linearity is None or linearity.get('op') != \
-                        'limit_linearity':
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'missing limit-linearity provenance'}
-                args = step.get('args', {})
-                if linearity.get('input') != args.get('expr'):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'limit-linearity provenance mismatch'}
-                source_ids = sources.get('values') or []
-                values = args.get('values') or []
-                if len(source_ids) != len(values):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'limit-value provenance mismatch'}
-                for source_id, value in zip(source_ids, values):
-                    source = seen.get(source_id)
-                    if source is None or source.get('result') != value:
-                        return {
-                            'status': 'failed', 'step': step['id'],
-                            'reason': ('limit-value provenance mismatch at '
-                                       f'{source_id}')}
-            if step['op'] == 'limit_squeeze':
-                sources = step.get('sources') or {}
-                args = step.get('args', {})
-                for tag in ('lower', 'upper'):
-                    source = seen.get(sources.get(tag))
-                    if source is None or source.get('result') is None:
-                        return {'status': 'failed', 'step': step['id'],
-                                'reason': f'missing {tag}-bound provenance'}
-                    try:
-                        expected = primitives.limit_with_body(
-                            args.get('expr', ''), args.get(tag, ''))
-                    except primitives.PrimitiveError:
-                        return {'status': 'failed', 'step': step['id'],
-                                'reason': f'malformed {tag}-bound limit'}
-                    if not primitives.same_expression(
-                            source.get('input') or '', expected):
-                        return {'status': 'failed', 'step': step['id'],
-                                'reason': (f'{tag}-bound provenance '
-                                           'mismatch')}
-                    if not primitives.same_expression(
-                            source['result'], args.get('value', '')):
-                        return {'status': 'failed', 'step': step['id'],
-                                'reason': (f'{tag}-bound limit value '
-                                           'mismatch')}
-            fn = dispatch.get(step['op'])
-            if fn is None:
+            provenance_error = tactic_registry.validate_provenance(step,
+                                                                   seen)
+            if provenance_error:
                 return {'status': 'failed', 'step': step['id'],
-                        'reason': f'unknown op {step["op"]}'}
-            res = fn(step['args'])
+                        'reason': provenance_error}
+            res = tactic_registry.replay(step['op'], step['args'])
             if not res.get('ok'):
                 return {'status': 'failed', 'step': step['id'],
                         'reason': res.get('error')}

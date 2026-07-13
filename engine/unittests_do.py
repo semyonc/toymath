@@ -13,6 +13,7 @@ from unittest import mock
 
 import agent_do
 import plot_sandbox
+import tactic_registry
 from agent_do import DoSession, make_api, run_instruction
 from ledger import Ledger
 
@@ -44,6 +45,19 @@ class ScriptedModel(Model):
 
 
 def tool_call(name, args, cid):
+    if name in tactic_registry.BY_NAME:
+        spec = tactic_registry.BY_NAME[name]
+        ordered = []
+        for arg in spec.agent_args:
+            value = args.get(arg.name, arg.default)
+            if value is tactic_registry._MISSING:
+                raise AssertionError(f'missing scripted argument {arg.name}')
+            if arg.nargs in ('+', '*'):
+                ordered.extend(value)
+            else:
+                ordered.append(value)
+        name = 'run_tactic'
+        args = {'tactic': spec.name, 'arguments': ordered}
     return ResponseFunctionToolCall(type='function_call', name=name,
                                     arguments=json.dumps(args),
                                     call_id=cid, id=cid)
@@ -70,10 +84,13 @@ class TestPromptBuilder(unittest.TestCase):
         # frontmatter stripped, bash invocation replaced, rules appended
         self.assertFalse(p.startswith('---'))
         self.assertNotIn('python toymath_cli.py <command>', p)
-        self.assertIn('Jupyter notebook cell', p)
+        self.assertIn('Invocation inside do!', p)
         self.assertIn('## do! mode', p)
-        # the command table survives verbatim
+        # core signatures and the small domain catalog are present; detailed
+        # subject tactics are progressively loaded
         self.assertIn('factor_quadratic', p)
+        self.assertIn('`integration`', p)
+        self.assertNotIn('integrate_by_parts EXPR', p)
         self.assertIn('mechanically checked', p)
 
     def test_missing_skill_falls_back(self):
@@ -396,6 +413,7 @@ LIM_SUM_EXPR = ('\\lim _{n \\rightarrow \\infty}\\left['
                 '+\\ldots+\\frac{1}{n(n+1)}\\right]')
 
 LIM_SUM_SCRIPT = [
+    [tool_call('load_skill', {'skill': 'finite_operators'}, 'sk1')],
     [tool_call('sum_from_ellipsis',
                {'expr': LIM_SUM_EXPR,
                 'sum_form': '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}'}, 'c1')],
@@ -403,6 +421,7 @@ LIM_SUM_SCRIPT = [
                {'expr': ('\\lim_{n \\to \\infty} \\sum_{k=1}^{n} '
                          '\\frac{1}{k(k+1)}'),
                 'term': '\\frac{1}{k}'}, 'c2')],
+    [tool_call('load_skill', {'skill': 'limits'}, 'sk2')],
     [tool_call('limit_table',
                {'expr': '\\lim_{n \\to \\infty} \\frac{n}{n+1}'}, 'c3')],
     [message('Interpreted the ellipsis, telescoped, closed at 1.')],
@@ -492,6 +511,7 @@ class TestScriptedAgent(unittest.TestCase):
 
     def test_prove_mode_closes_root_claim(self):
         script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
             [tool_call('limit_table', {
                 'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
             [tool_call('conclude', {'claim_id': 'c1',
@@ -522,9 +542,11 @@ class TestScriptedAgent(unittest.TestCase):
         explicit = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} \\frac{2k-1}{2k}'
         upper = '\\frac{1}{\\sqrt{2n+1}}'
         script = [
+            [tool_call('load_skill', {'skill': 'finite_operators'}, 'sk1')],
             [tool_call('prod_from_ellipsis', {
                 'expr': expr,
                 'prod_form': '\\prod_{k=1}^{n} \\frac{2k-1}{2k}'}, 'c1')],
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk2')],
             [tool_call('limit_table', {
                 'expr': '\\lim_{n \\to \\infty} 0'}, 'c2')],
             [tool_call('limit_table', {
@@ -550,6 +572,7 @@ class TestScriptedAgent(unittest.TestCase):
 
     def test_prove_mode_leaves_failed_target_open(self):
         script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
             [tool_call('limit_table', {
                 'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
             [tool_call('set_result', {'expr': '0'}, 'c2')],
