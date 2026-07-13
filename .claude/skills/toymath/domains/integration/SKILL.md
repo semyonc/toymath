@@ -9,15 +9,16 @@ description: Tactic-shaped indefinite integration, substitutions, by-parts, line
 There is no autonomous integrate tactic. Pick one narrow move at a time and
 continue until no integral remains. Feed every returned `result` string
 verbatim into the next call: provenance linkage is structural, and retyping
-a result (even dropping a harmless `+(0)`) disconnects the checked chain
-that lets the cell accept your final value.
+a result (even a harmless-looking reformatting) disconnects the checked
+chain that lets the cell accept your final value.
 
 ## Order of attack
 
-1. Try `integrate_power_rule` for integer-exponent powers, or
-   `integrate_table` for basic functions of the bare variable (sin, cos,
-   e^x, sinh, cosh), constant multiples, and `1/x` (gives `\ln x`,
-   records `x > 0`).
+1. Try `integrate_power_rule` for powers with integer or rational
+   literal exponents (`x^{1/2}` works directly; a fractional exponent
+   records `x > 0`), or `integrate_table` for basic functions of the
+   bare variable (sin, cos, e^x, sinh, cosh), constant multiples, and
+   `1/x` (gives `\ln x`, records `x > 0`).
 2. Use `integrate_substitute` when you can propose `u`, a new variable, and
    the rewritten integrand. ToyMath checks `f(u(x))u'(x)` against the
    original. The new integrand is an expression in the new variable ONLY -
@@ -34,11 +35,12 @@ that lets the cell accept your final value.
    per-piece step ids (the C := 0 results), in the exact piece order the
    linearity step returned.
 
-## Fractional powers of the variable
+## Roots of the variable inside a fraction
 
-`integrate_power_rule` refuses `x^{1/2}` and the table has no rule for it.
-The standard move is the root substitution `u = x^{1/n}` with `n` the least
-common multiple of the exponent denominators. Worked shape (mixed roots):
+Pure power terms like `x^{1/2}` integrate directly with
+`integrate_power_rule`. When roots appear inside a fraction the standard
+move is the root substitution `u = x^{1/n}` with `n` the least common
+multiple of the exponent denominators. Worked shape (mixed roots):
 
 - `\int \frac{dx}{x^{1/2}+x^{1/3}}`: substitute `u = x^{1/6}` proposing the
   new integrand `\frac{6u^3}{u+1}`; divide out with `integrate_rewrite`

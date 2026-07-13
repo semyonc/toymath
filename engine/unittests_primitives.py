@@ -2227,6 +2227,18 @@ class TestGoalCoverage(unittest.TestCase):
         self.assertTrue(P.covers_goal(canon, parens))
         self.assertTrue(P.covers_goal(braces, canon))
 
+    def test_covers_goal_bare_integrand_of_textbook_goal(self):
+        # agents legitimately restate a textbook-form goal by its bare
+        # integrand (integrate_rewrite accepts one); the phantom dx in
+        # the goal's fraction must not break the body comparison
+        goal = '\\int\\frac {x^2 dx} {(1-x^2)^3}'
+        self.assertTrue(P.covers_goal(
+            '\\frac{x^{2}}{(1-x^{2})^{3}}', goal))
+        self.assertTrue(P.covers_goal(
+            goal, '\\frac{x^{2}}{(1-x^{2})^{3}}'))
+        self.assertFalse(P.covers_goal(
+            '\\frac{x^{3}}{(1-x^{2})^{3}}', goal))
+
     def test_covers_goal_integral_negatives(self):
         goal = '\\int\\frac{dx}{x^{1/2}+x^{1/3}}'
         self.assertFalse(P.covers_goal(
@@ -2262,8 +2274,34 @@ class TestFracArgumentWriting(unittest.TestCase):
 
 
 class TestFractionalPowerSteering(unittest.TestCase):
-    def test_power_rule_steers_to_substitution(self):
+    def test_power_rule_closes_rational_exponent(self):
         rec = P.integrate_power_rule('\\int x^{1/2} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('\\frac{2}{3}x^{\\frac{3}{2}}', rec['result'])
+        self.assertEqual([a['text'] for a in rec['assumptions']], ['x > 0'])
+
+    def test_power_rule_closes_root_sum_termwise(self):
+        rec = P.integrate_power_rule(
+            '\\int (x^{\\frac 1 2} + x^{\\frac 1 3}) \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('x^{\\frac{3}{2}}', rec['result'])
+        self.assertIn('x^{\\frac{4}{3}}', rec['result'])
+
+    def test_power_rule_negative_rational_exponent(self):
+        rec = P.integrate_power_rule('\\int x^{-1/2} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('2x^{\\frac{1}{2}}', rec['result'])
+
+    def test_power_rule_still_refuses_log_case(self):
+        rec = P.integrate_power_rule('\\int \\frac{1}{x} \\, d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('logarithm', rec['error'])
+
+    def test_mixed_root_fraction_steers_to_substitution(self):
+        rec = P.integrate_power_rule(
+            '\\int \\frac{1}{x^{1/2}+x^{1/3}} \\, d x', 'x')
         self.assertFalse(rec['ok'])
         self.assertIn('u = x^{1/n}', rec['error'])
         self.assertNotRegex(rec['error'], r'_n\d')
@@ -2271,13 +2309,33 @@ class TestFractionalPowerSteering(unittest.TestCase):
     def test_table_refusal_names_the_real_moves(self):
         rec = P.integrate_table('\\int x^{1/2} \\, d x', 'x')
         self.assertFalse(rec['ok'])
-        self.assertIn('integer exponents', rec['error'])
-        self.assertIn('u = x^{1/n}', rec['error'])
+        # steering must be truthful: the power rule really does handle this
+        self.assertIn('rational literal exponents', rec['error'])
 
     def test_symbolic_exponent_keeps_its_name(self):
         rec = P.integrate_power_rule('\\int x^{n} \\, d x', 'x')
         self.assertFalse(rec['ok'])
         self.assertIn('non-integer exponent n', rec['error'])
+
+
+class TestSubstituteZeroFolding(unittest.TestCase):
+    def test_pinned_constant_leaves_no_zero_residue(self):
+        for expr, want in (('2u^3 + C', '2u^{3}'),
+                           ('C + x^2', 'x^{2}'),
+                           ('x - C', 'x'),
+                           ('x + C - y', 'x-y')):
+            rec = P.substitute(expr, 'C', '0')
+            self.assertTrue(rec['ok'], rec.get('error'))
+            self.assertEqual(rec['result'], want)
+            self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_whole_expression_zero_and_total_collapse(self):
+        self.assertEqual(P.substitute('C', 'C', '0')['result'], '(0)')
+        self.assertEqual(P.substitute('C + C', 'C', '0')['result'], '0')
+
+    def test_nonzero_values_keep_parens(self):
+        rec = P.substitute('x + x_{1}', 'x', '2')
+        self.assertEqual(rec['result'], '(2)+x_{1}')
 
 
 if __name__ == '__main__':

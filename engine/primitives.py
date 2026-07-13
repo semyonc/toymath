@@ -203,6 +203,11 @@ def same_expression(latex1, latex2):
 def _operator_body_latex(latex):
     """The body of a top-level big-operator expression (``\\lim``, ``\\int``
     without its differential, ``\\sum``), or None."""
+    parts = _integral_parts_latex(latex)
+    if parts is not None:
+        # the true integrand: the textbook differential-in-numerator form
+        # must not leak its phantom `dx` into the body comparison
+        return parts[1]
     try:
         sym, notation = parse_latex(latex, allow_ellipsis=True)
     except PrimitiveError:
@@ -1384,8 +1389,61 @@ def _checked(rec, assumptions=None):
 # primitive: substitute
 # ---------------------------------------------------------------------------
 
+def _is_zero_term(term, notation):
+    """True when an additive term is literally zero after unwrapping
+    +/- and transparent group layers (exact zeros only; `|0|` and
+    anything needing arithmetic stay untouched)."""
+    guard = 0
+    while guard < 64:
+        guard += 1
+        if isinstance(term, IntegerValue):
+            return term.val == 0
+        if isinstance(term, FracValue):
+            return term.num == 0 and term.denom != 0
+        if not isinstance(term, Symbol):
+            return False
+        f = notation.get(term)
+        if f is None:
+            return False
+        if f.sym in (Notation.PLUS, Notation.MINUS):
+            term = f.args[0]
+            continue
+        if f.sym in (Notation.GROUP, Notation.V_GROUP):
+            if f.props.get('br') == '||':
+                return False
+            term = f.args[0]
+            continue
+        return False
+    return False
+
+
+class _ZeroTermDropper(Replicator):
+    """Drop additive terms that are literally zero. Substitution pinning
+    (C := 0) must not leave `+(0)` residue: live agents hand-clean it,
+    and retyping a result breaks provenance linkage. Exact zeros only —
+    every other simplification stays in expand/evaluate."""
+
+    def enter_slist(self, sym, f):
+        kept = [t for t in f.args if not _is_zero_term(t, self.notation)]
+        if len(kept) == len(f.args):
+            return super(_ZeroTermDropper, self).enter_slist(sym, f)
+        if not kept:
+            return self.enter_raw_term(IntegerValue(0))
+        head = kept[0]
+        hf = self.notation.getf(head, Notation.PLUS)
+        if hf is not None:
+            head = hf.args[0]  # a surviving tail term promoted to front
+        if len(kept) == 1:
+            return self.enter_additive_expr(head)
+        args = tuple([self.enter_additive_expr(head)]
+                     + [self.enter_additive_expr(t) for t in kept[1:]])
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.S_LIST, args))
+
+
 def substitute(expr, var, value):
-    """Replace every free occurrence of `var` in `expr` by `value`."""
+    """Replace every free occurrence of `var` in `expr` by `value`.
+    Additive terms that become literally zero are dropped."""
     args = {'expr': expr, 'var': var, 'value': value}
     try:
         sym, notation = parse_latex(expr)
@@ -1412,7 +1470,9 @@ def substitute(expr, var, value):
             notation, out_n, {var_symbol: (vsym, vnotation)})(sym)
     except PrimitiveError as e:
         return _error('substitute', args, str(e))
-    result = write_latex(out_s, out_n)
+    clean_n = Notation()
+    out_s = _ZeroTermDropper(out_n, clean_n)(out_s)
+    result = write_latex(out_s, clean_n)
     rec = _result('substitute', args, expr, result)
     # check: substituting into the input must equal evaluating the output
     # at the same points; do it by fixing var := value inside the oracle
@@ -4924,9 +4984,7 @@ def _table_integrate(sym, notation, var, assumptions):
             return f'e^{{{var}}}'
         raise PrimitiveError(
             'no table rule for this power; integrate_power_rule handles '
-            'integer exponents, a fractional power of the variable wants '
-            'integrate_substitute with u = x^{1/n}, or use '
-            'integrate_by_parts')
+            'rational literal exponents, or use integrate_by_parts')
     if op == Notation.FUNC:
         fname, arg = f.args[0], f.args[1]
         if isinstance(fname, Symbol) and fname.name in _ANTIDERIV_TABLE \
@@ -4973,9 +5031,156 @@ def _finish_integration(op, args, expr, integrand_latex, body, var,
     return rec
 
 
+def _rational_literal(sym, notation):
+    """Fraction value of a rational-literal subtree (IntegerValue,
+    FracValue, \\frac/SLASH of literals, +/-/group wrappers); None when
+    the subtree is not an exact rational literal."""
+    sign = 1
+    guard = 0
+    while guard < 64:
+        guard += 1
+        if isinstance(sym, IntegerValue):
+            return Fraction(sign * sym.val)
+        if isinstance(sym, FracValue):
+            if sym.denom == 0:
+                return None
+            return Fraction(sign * sym.num, sym.denom)
+        if not isinstance(sym, Symbol):
+            return None
+        f = notation.get(sym)
+        if f is None:
+            return None
+        if f.sym == Notation.MINUS:
+            sign, sym = -sign, f.args[0]
+            continue
+        if f.sym == Notation.PLUS:
+            sym = f.args[0]
+            continue
+        if f.sym in (Notation.GROUP, Notation.V_GROUP):
+            if f.props.get('br') == '||':
+                return None
+            sym = f.args[0]
+            continue
+        if f.sym == Notation.SLASH or f.sym.name in FRAC_NAMES:
+            a = _rational_literal(f.args[0], notation)
+            b = _rational_literal(f.args[1], notation)
+            if a is None or b is None or b == 0:
+                return None
+            return sign * a / b
+        return None
+    return None
+
+
+_MONOMIAL_MSG = ('integrate_power_rule integrates terms of the form '
+                 'c x^{r} with rational literal c and r; for roots of the '
+                 'variable inside a fraction substitute u = x^{1/n} via '
+                 'integrate_substitute, otherwise use integrate_table or '
+                 'integrate_by_parts')
+
+
+def _monomial_parts(sym, notation, var):
+    """(coeff, exponent) Fractions for a rational-literal monomial
+    ``c * var^r``; raises PrimitiveError for anything else."""
+    lit = _rational_literal(sym, notation)
+    if lit is not None:
+        return lit, Fraction(0)
+    if isinstance(sym, Symbol):
+        f = notation.get(sym)
+        if f is None:
+            if sym.name == var:
+                return Fraction(1), Fraction(1)
+            raise PrimitiveError(_MONOMIAL_MSG)
+        if f.sym == Notation.MINUS:
+            c, r = _monomial_parts(f.args[0], notation, var)
+            return -c, r
+        if f.sym == Notation.PLUS:
+            return _monomial_parts(f.args[0], notation, var)
+        if f.sym in (Notation.GROUP, Notation.V_GROUP) \
+                and f.props.get('br') != '||':
+            return _monomial_parts(f.args[0], notation, var)
+        if f.sym == Notation.INDEX:
+            sub, sup_l, power, sup_r = f.args[1]
+            base = _peel_groups(f.args[0], notation)
+            if (sub is None and sup_l is None and sup_r is None
+                    and power is not None and isinstance(base, Symbol)
+                    and notation.get(base) is None and base.name == var):
+                r = _rational_literal(power, notation)
+                if r is None:
+                    raise PrimitiveError(_MONOMIAL_MSG)
+                return Fraction(1), r
+            raise PrimitiveError(_MONOMIAL_MSG)
+        if f.sym == Notation.SLASH or f.sym.name in FRAC_NAMES:
+            cn, rn = _monomial_parts(f.args[0], notation, var)
+            cd, rd = _monomial_parts(f.args[1], notation, var)
+            if cd == 0:
+                raise PrimitiveError('division by zero')
+            return cn / cd, rn - rd
+        if f.sym == Notation.P_LIST:
+            c, r = Fraction(1), Fraction(0)
+            for a in f.args:
+                if isinstance(a, Symbol) and notation.get(a) is None \
+                        and a.name in Notation.styles:
+                    continue
+                ca, ra = _monomial_parts(a, notation, var)
+                c, r = c * ca, r + ra
+            return c, r
+    raise PrimitiveError(_MONOMIAL_MSG)
+
+
+def _frac_latex(q):
+    """Non-negative Fraction as a LaTeX literal."""
+    if q.denominator == 1:
+        return str(q.numerator)
+    return f'\\frac{{{q.numerator}}}{{{q.denominator}}}'
+
+
+def _rational_power_integrate(sym, notation, var, assumptions):
+    """Antiderivative latex (no constant) for a sum of rational-literal
+    monomials with at least one non-integer exponent. Records var > 0
+    (fractional powers live on the positive axis). Raises PrimitiveError
+    when a term is not such a monomial or integrates to a logarithm."""
+    inner = _peel_groups(sym, notation)
+    f = notation.getf(inner, Notation.S_LIST)
+    terms = list(f.args) if f is not None else [inner]
+    monos = []
+    fractional = False
+    for t in terms:
+        c, r = _monomial_parts(t, notation, var)
+        if r == -1:
+            raise PrimitiveError(
+                'a term integrates to a logarithm (exponent -1); '
+                'use integrate_table for it')
+        if r.denominator != 1:
+            fractional = True
+        if c != 0:
+            monos.append((c / (r + 1), r + 1))
+    if not fractional:
+        raise PrimitiveError(_MONOMIAL_MSG)
+    parts = []
+    for c2, e in monos:
+        neg = c2 < 0
+        mag = -c2 if neg else c2
+        if e > 0:
+            pw = var if e == 1 else f'{var}^{{{_frac_latex(e)}}}'
+            term = pw if mag == 1 else f'{_frac_latex(mag)}{pw}'
+        else:
+            pe = -e
+            pw = var if pe == 1 else f'{var}^{{{_frac_latex(pe)}}}'
+            term = f'\\frac{{{_frac_latex(mag)}}}{{{pw}}}'
+        parts.append(('-' if neg else '+', term))
+    if not parts:
+        return '0'
+    out = ('-' if parts[0][0] == '-' else '') + parts[0][1]
+    for s, t in parts[1:]:
+        out += f' {s} {t}'
+    assumptions.append({'text': f'{var} > 0', 'nonzero': var})
+    return out
+
+
 def integrate_power_rule(expr, var):
     """Term-by-term power rule for polynomials and rational expressions
-    with a constant or single-power denominator. Refuses the exponent -1
+    with a constant or single-power denominator, plus rational-literal
+    exponents (``x^{1/2}``; records var > 0). Refuses the exponent -1
     case (that is integrate_table's logarithm rule)."""
     args = {'expr': expr, 'var': var}
     try:
@@ -4986,12 +5191,21 @@ def integrate_power_rule(expr, var):
     except ZeroDivisionError:
         return _error('integrate_power_rule', args, 'division by zero')
     except NotInFragment as e:
+        if 'non-integer exponent' in str(e):
+            # rational-literal exponents: direct power rule with var > 0
+            assumptions = []
+            try:
+                body = _rational_power_integrate(sym, notation, var,
+                                                 assumptions)
+            except PrimitiveError as e2:
+                return _error('integrate_power_rule', args,
+                              f'outside the rational fragment: {e}; {e2}')
+            return _finish_integration('integrate_power_rule', args, expr,
+                                       integrand_latex, body, var,
+                                       assumptions)
         return _error('integrate_power_rule', args,
                       f'outside the rational fragment: {e}; '
-                      'integrate_power_rule handles integer exponents - '
-                      'for a fractional power of the variable substitute '
-                      'u = x^{1/n} via integrate_substitute, otherwise use '
-                      'integrate_table or integrate_by_parts')
+                      'use integrate_table or integrate_by_parts')
     assumptions = []
     try:
         body = _power_integrate_ratfunc(rf, var, assumptions,
