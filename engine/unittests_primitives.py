@@ -2008,6 +2008,184 @@ class TestSumRewriteTelescope(unittest.TestCase):
         self.assertEqual(ledger.replay()['status'], 'verified')
 
 
+WALLIS_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left(\\frac{1}{2} \\cdot '
+                '\\frac{3}{4} \\ldots \\frac{2 n-1}{2 n}\\right)')
+WALLIS_PROD_FORM = '\\prod_{k=1}^{n} \\frac{2k-1}{2k}'
+WALLIS_EXPLICIT = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} \\frac{2k-1}{2k}'
+WALLIS_UPPER = '\\frac{1}{\\sqrt{2n+1}}'
+
+
+class TestProdOracle(unittest.TestCase):
+    def test_finite_product_evaluates_numerically(self):
+        self.assertEqual(
+            P.equal_exprs('\\prod_{k=1}^{4} k', '24')['verdict'], 'yes')
+
+    def test_empty_product_convention(self):
+        self.assertEqual(
+            P.equal_exprs('\\prod_{k=3}^{2} k', '1')['verdict'], 'yes')
+
+    def test_product_with_constant_factor(self):
+        self.assertEqual(
+            P.equal_exprs('2 \\prod_{k=1}^{3} k', '12')['verdict'], 'yes')
+
+
+class TestProdFromEllipsis(unittest.TestCase):
+    def test_interprets_inside_limit_binder(self):
+        rec = P.prod_from_ellipsis(WALLIS_LIMIT, WALLIS_PROD_FORM)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim', rec['result'])
+        self.assertIn('\\prod', rec['result'])
+        self.assertEqual(rec['check']['status'], 'exact')
+        self.assertEqual(len(rec['assumptions']), 1)
+        self.assertIn('continues the pattern',
+                      rec['assumptions'][0]['display'])
+
+    def test_interprets_bare_ellipsis_product(self):
+        rec = P.prod_from_ellipsis(
+            '\\frac{1}{2} \\cdot \\frac{3}{4} \\ldots \\frac{2n-1}{2n}',
+            WALLIS_PROD_FORM)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertNotIn('\\lim', rec['result'])
+
+    def test_wrong_factor_rejected(self):
+        rec = P.prod_from_ellipsis(WALLIS_LIMIT,
+                                   '\\prod_{k=1}^{n} \\frac{k}{k+1}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not match', rec['error'])
+
+    def test_single_leading_factor_rejected(self):
+        rec = P.prod_from_ellipsis(
+            '\\frac{1}{2} \\ldots \\frac{2n-1}{2n}', WALLIS_PROD_FORM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('two displayed leading factors', rec['error'])
+
+    def test_sum_body_rejected(self):
+        rec = P.prod_from_ellipsis(
+            '\\frac{1}{2}+\\frac{3}{4}+\\ldots+\\frac{2n-1}{2n}',
+            WALLIS_PROD_FORM)
+        self.assertFalse(rec['ok'])
+
+    def test_stray_variable_rejected(self):
+        rec = P.prod_from_ellipsis(
+            WALLIS_LIMIT, '\\prod_{k=1}^{m} \\frac{2k-1}{2k}')
+        self.assertFalse(rec['ok'])
+
+    def test_infinite_bounds_refused(self):
+        rec = P.prod_from_ellipsis(
+            '\\frac{1}{2} \\cdot \\frac{3}{4} \\ldots \\frac{2n-1}{2n}',
+            '\\prod_{k=1}^{\\infty} \\frac{2k-1}{2k}')
+        self.assertFalse(rec['ok'])
+
+    def test_gate_error_names_both_doors(self):
+        rec = P.expand(
+            '\\frac{1}{2} \\cdot \\frac{3}{4} \\ldots \\frac{2n-1}{2n}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('prod_from_ellipsis', rec['error'])
+        self.assertIn('sum_from_ellipsis', rec['error'])
+
+
+class TestRootPowerDecay(unittest.TestCase):
+    def test_inverse_sqrt_closes(self):
+        rec = P.limit_table('\\lim_{n \\to \\infty} ' + WALLIS_UPPER)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['rule'], 'root-power decay at infinity')
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_rational_powers_and_roots(self):
+        for latex in ('\\lim_{n \\to \\infty} \\frac{1}{n^{3/2}}',
+                      '\\lim_{n \\to \\infty} \\frac{c}{\\sqrt[3]{n^2+1}}',
+                      '\\lim_{n \\to \\infty} \\frac{5}{2\\sqrt{n+3}}'):
+            rec = P.limit_table(latex)
+            self.assertTrue(rec['ok'], (latex, rec.get('error')))
+            self.assertEqual(rec['result'], '0', latex)
+            self.assertEqual(rec['rule'], 'root-power decay at infinity')
+
+    def test_stays_narrow(self):
+        for latex in (
+                # growth, not decay
+                '\\lim_{n \\to \\infty} \\sqrt{n}',
+                # variable-bearing numerator
+                '\\lim_{n \\to \\infty} \\frac{n}{\\sqrt{n}}',
+                # negative leading coefficient (base heads to -infinity)
+                '\\lim_{n \\to \\infty} \\frac{1}{\\sqrt{1-n}}',
+                # negative exponent grows
+                '\\lim_{n \\to \\infty} \\frac{1}{n^{-2}}',
+                # only +infinity
+                '\\lim_{n \\to -\\infty} \\frac{1}{\\sqrt{2n+1}}'):
+            rec = P.limit_table(latex)
+            self.assertFalse(rec['ok'], latex)
+
+
+class TestLimitSqueeze(unittest.TestCase):
+    def test_closes_bounded_product(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, '0', WALLIS_UPPER, '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(len(rec['assumptions']), 1)
+        self.assertIn('\\le', rec['assumptions'][0]['text'])
+
+    def test_closes_oscillating_decay(self):
+        rec = P.limit_squeeze('\\lim_{n \\to \\infty} \\frac{\\sin n}{n}',
+                              '-\\frac{1}{n}', '\\frac{1}{n}', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+
+    def test_vacuous_bound_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, WALLIS_PROD_FORM,
+                              WALLIS_UPPER, '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('vacuous', rec['error'])
+
+    def test_equal_bounds_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, '\\frac{1}{n}',
+                              '\\frac{1}{n}', '0')
+        self.assertFalse(rec['ok'])
+
+    def test_bad_ordering_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, WALLIS_UPPER,
+                              '\\frac{1}{n}', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('ordering', rec['error'])
+
+    def test_unconfirmed_bound_limit_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, '0', '\\frac{n}{n+1}', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not confirmed', rec['error'])
+
+    def test_stray_variable_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, '0',
+                              '\\frac{c}{\\sqrt{n}}', '0')
+        self.assertFalse(rec['ok'])
+
+    def test_value_with_bound_variable_refused(self):
+        rec = P.limit_squeeze(WALLIS_EXPLICIT, '0', WALLIS_UPPER, 'n')
+        self.assertFalse(rec['ok'])
+
+
+class TestEllipsisClaim(unittest.TestCase):
+    def test_ellipsis_claim_records_and_closes_conditionally(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(WALLIS_LIMIT + ' = 0')
+        self.assertEqual(claim['verdict'], 'open')
+        first = P.prod_from_ellipsis(WALLIS_LIMIT, WALLIS_PROD_FORM)
+        s1 = ledger.record(first, goal=claim['id'])
+        squeeze = P.limit_squeeze(first['result'], '0', WALLIS_UPPER, '0')
+        s2 = ledger.record(squeeze, goal=claim['id'])
+        closed = ledger.conclude(claim['id'], [s1['id'], s2['id']])
+        self.assertEqual(closed['verdict'], 'conditional')
+        self.assertEqual(closed['conclusion']['closure'], 'left-to-right')
+        # both the reading of the ellipsis and the ordering are recorded
+        self.assertEqual(len(closed['conclusion']['assumptions']), 2)
+
+    def test_non_relation_claim_still_rejected(self):
+        ledger = Ledger()
+        with self.assertRaises(ValueError):
+            ledger.record_claim(
+                '\\frac{1}{2} \\cdot \\frac{3}{4} \\ldots \\frac{2n-1}{2n}')
+
+
 class TestGoalCoverage(unittest.TestCase):
     def test_same_expression_ignores_grouping(self):
         self.assertTrue(P.same_expression('x^{2}', 'x^2'))

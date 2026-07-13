@@ -22,8 +22,9 @@ TRANSFORMING_OPS = frozenset({
     'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
     'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
     'limit_rewrite', 'limit_substitute', 'limit_linearity', 'limit_table',
-    'limit_lhopital', 'limit_assemble',
+    'limit_lhopital', 'limit_assemble', 'limit_squeeze',
     'sum_from_ellipsis', 'sum_rewrite', 'sum_telescope',
+    'prod_from_ellipsis',
     'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
     'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
     'integrate_assemble'})
@@ -61,8 +62,15 @@ def _presentation_free(conclusion):
 
 
 def _eq_yes(left, right):
-    """Semantic equality used only for ledger connectivity/closure."""
+    """Semantic equality used only for ledger connectivity/closure.
+    Structural identity (which tolerates ellipsis spellings) is decided
+    first; equal_exprs does math and therefore refuses ellipsis input."""
     import primitives
+    try:
+        if primitives.same_expression(left, right):
+            return True
+    except Exception:
+        pass
     try:
         rec = primitives.equal_exprs(left, right)
     except Exception:
@@ -71,10 +79,13 @@ def _eq_yes(left, right):
 
 
 def _relation_parts(statement):
-    """Return (lhs, rhs, relation) for a parsed relation, else None."""
+    """Return (lhs, rhs, relation) for a parsed relation, else None.
+    Parses with allow_ellipsis: this only splits a statement into sides
+    (comparison class, no math); an ellipsis claim is pinned down by the
+    *_from_ellipsis step whose recorded assumption interprets it."""
     import primitives
     from notation import Notation
-    sym, notation = primitives.parse_latex(statement)
+    sym, notation = primitives.parse_latex(statement, allow_ellipsis=True)
     comp = notation.getf(sym, Notation.COMP)
     if comp is None:
         return None
@@ -143,13 +154,18 @@ class Ledger(object):
         return next((c for c in self.claims if c['id'] == claim_id), None)
 
     def record_claim(self, statement, parent=None):
-        """Record a parseable root claim or subclaim, initially open."""
+        """Record a parseable root claim or subclaim, initially open.
+
+        Ellipsis statements are accepted: recording only validates the
+        relation shape, and a claim containing an ellipsis can only ever
+        close through a *_from_ellipsis step whose recorded assumption
+        pins down the reading."""
         import primitives
         statement = (statement or '').strip()
         if not statement:
             raise ValueError('empty claim')
         try:
-            primitives.parse_latex(statement)
+            primitives.parse_latex(statement, allow_ellipsis=True)
         except primitives.PrimitiveError as e:
             raise ValueError(str(e))
         if _relation_parts(statement) is None:
@@ -363,8 +379,12 @@ class Ledger(object):
             'limit_lhopital': lambda a: primitives.limit_lhopital(a['expr']),
             'limit_assemble': lambda a: primitives.limit_assemble(
                 a['expr'], a['values']),
+            'limit_squeeze': lambda a: primitives.limit_squeeze(
+                a['expr'], a['lower'], a['upper'], a['value']),
             'sum_from_ellipsis': lambda a: primitives.sum_from_ellipsis(
                 a['expr'], a['sum_form']),
+            'prod_from_ellipsis': lambda a: primitives.prod_from_ellipsis(
+                a['expr'], a['prod_form']),
             'sum_rewrite': lambda a: primitives.sum_rewrite(
                 a['expr'], a['new_summand']),
             'sum_telescope': lambda a: primitives.sum_telescope(
@@ -441,6 +461,30 @@ class Ledger(object):
                             'status': 'failed', 'step': step['id'],
                             'reason': ('limit-value provenance mismatch at '
                                        f'{source_id}')}
+            if step['op'] == 'limit_squeeze':
+                sources = step.get('sources') or {}
+                args = step.get('args', {})
+                for tag in ('lower', 'upper'):
+                    source = seen.get(sources.get(tag))
+                    if source is None or source.get('result') is None:
+                        return {'status': 'failed', 'step': step['id'],
+                                'reason': f'missing {tag}-bound provenance'}
+                    try:
+                        expected = primitives.limit_with_body(
+                            args.get('expr', ''), args.get(tag, ''))
+                    except primitives.PrimitiveError:
+                        return {'status': 'failed', 'step': step['id'],
+                                'reason': f'malformed {tag}-bound limit'}
+                    if not primitives.same_expression(
+                            source.get('input') or '', expected):
+                        return {'status': 'failed', 'step': step['id'],
+                                'reason': (f'{tag}-bound provenance '
+                                           'mismatch')}
+                    if not primitives.same_expression(
+                            source['result'], args.get('value', '')):
+                        return {'status': 'failed', 'step': step['id'],
+                                'reason': (f'{tag}-bound limit value '
+                                           'mismatch')}
             fn = dispatch.get(step['op'])
             if fn is None:
                 return {'status': 'failed', 'step': step['id'],

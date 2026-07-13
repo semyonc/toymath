@@ -120,23 +120,39 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    propose partial fractions, split, solve each piece, then assemble the
    recorded results.
 11. **limit_rewrite / limit_substitute / limit_linearity / limit_table /
-   limit_lhopital / limit_assemble** — tactic-shaped limits in place of an
-   autonomous evaluator. `limit_rewrite` carries the binder only after
-   `equal?` verifies the proposed body. `limit_substitute` records continuity
-   and requires an independent approach-sampling oracle to converge.
-   `limit_table` handles constants, six standard zero limits, finite
-   rational leading-coefficient limits at infinity, and geometric decay
+   limit_lhopital / limit_assemble / limit_squeeze** — tactic-shaped limits
+   in place of an autonomous evaluator. `limit_rewrite` carries the binder
+   only after `equal?` verifies the proposed body. `limit_substitute`
+   records continuity and requires an independent approach-sampling oracle
+   to converge. `limit_table` handles constants, six standard zero limits,
+   finite rational leading-coefficient limits at infinity, geometric decay
    at `+\infty` (`r^n` for numeric `0 < r < 1`, or division by `s^n`
-   with numeric `s > 1`, times constant factors). `limit_lhopital` performs
+   with numeric `s > 1`, times constant factors), and root-power decay at
+   `+\infty` (a var-free numerator over denominator factors `p(n)^q` —
+   `\sqrt{p}`, `\sqrt[m]{p}`, or a positive rational literal exponent —
+   with `p` a polynomial with positive leading coefficient, e.g.
+   `1/\sqrt{2n+1}`). `limit_lhopital` performs
    one step only after numeric probes observe `0/0` or `infinity/infinity`;
    it records differentiability/nonzero-derivative/existence premises and
    checks both derivatives plus the original/transformed approach values.
    One-sided binders (`a^+`, `a^-`) are parsed and sampled directionally.
    `limit_linearity` records existence assumptions for every piece, and
    `limit_assemble` retrieves/checks the ordered piece values so a retyped
-   wrong sum cannot enter the ledger.
-12. **sum_from_ellipsis / sum_rewrite / sum_telescope** — tactic-shaped
-   finite sums (each accepts either a bare `\sum_{k=a}^{b}` or a `\lim`
+   wrong sum cannot enter the ledger. `limit_squeeze(expr, lower, upper,
+   value)` closes a limit by the squeeze theorem: both bound limits must
+   already be established (in `do!` they are resolved from recorded ledger
+   steps and cited as replay-checked provenance), the ordering
+   `lower ≤ body ≤ upper` is spot-checked at approach samples and recorded
+   as an assumption, and bounds identical to the body (or to each other)
+   are refused — the squeeze cannot launder a direct numeric claim.
+   Approach sampling at infinity combines Richardson with Aitken/Shanks
+   extrapolation over log-spaced ladders, so power-law decay
+   (`n^{-1/2}`-style profiles) is confirmed honestly, not only `O(1/x)`
+   error terms.
+12. **sum_from_ellipsis / sum_rewrite / sum_telescope /
+   prod_from_ellipsis** — tactic-shaped
+   finite sums and products (each accepts either a bare `\sum_{k=a}^{b}` /
+   `\prod_{k=a}^{b}` or a `\lim`
    whose body is one, and carries the binder through). Ellipsis commands
    (`\ldots` and friends) parse as opaque symbols with no mechanical
    semantics, so **every other primitive rejects them at the door** with a
@@ -144,14 +160,17 @@ independent numeric spot-check (`agree` / `disagree` / `skipped`).
    term against the proposed summand at its index (at least two leading
    terms anchor the pattern; trailing terms are matched at `b`, `b-1`, …)
    and records the pattern continuation as an assumption — the one honest
-   reading of "…". `sum_rewrite` replaces the summand only after `equal?`
+   reading of "…". `prod_from_ellipsis(expr, prod_form)` is the product
+   door with the same anchoring and matching rules over
+   `\cdot`/juxtaposition factors. `sum_rewrite` replaces the summand only
+   after `equal?`
    verifies the proposal (exact in the rational fragment — partial
    fractions live here). `sum_telescope(expr, f)` collapses
    `\sum_{k=a}^{b} (f(k) − f(k+1))` to `f(a) − f(b+1)`: `equal?` gates
    the summand-difference identity, and the independent oracle leg
    literally evaluates the finite sum for several integer upper bounds
-   against the closed form (`numeric_eval` performs real summation loops,
-   sharing nothing with the symbolic path).
+   against the closed form (`numeric_eval` performs real summation — and
+   product — loops, sharing nothing with the symbolic path).
 
 **equal?** additionally compares canonically over *shared opaque atoms*
 when both sides leave the fragment: syntactic atom equality is conclusive
@@ -293,7 +312,11 @@ do! solve [[3]] for x, recording every assumption
   records a closing checked chain. If the claim remains open, no last-step
   fallback becomes a chainable value. The final agent prose is capped and
   explicitly labelled unverified so it cannot visually substitute for the
-  ledger artifact.
+  ledger artifact. A claim containing an ellipsis is recordable (only its
+  relation shape is validated); it can close only through a
+  `sum_from_ellipsis`/`prod_from_ellipsis` first step whose recorded
+  assumption pins down the reading, so the verdict is conditional on that
+  interpretation.
 - All `do!` cells in a notebook share one session ledger; each cell
   renders only the steps it added, and a replay verifies the whole
   notebook's derivation chain.

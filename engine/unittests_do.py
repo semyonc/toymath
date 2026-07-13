@@ -266,6 +266,61 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(replay['status'], 'failed')
         self.assertIn('provenance mismatch', replay['reason'])
 
+    WALLIS_EXPLICIT = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} ' \
+                      '\\frac{2k-1}{2k}'
+    WALLIS_UPPER = '\\frac{1}{\\sqrt{2n+1}}'
+
+    def _squeeze_setup(self, api):
+        upper = json.loads(api['limit_table'](
+            '\\lim_{n \\to \\infty} ' + self.WALLIS_UPPER))
+        lower = json.loads(api['limit_table']('\\lim_{n \\to \\infty} 0'))
+        return lower['step']['id'], upper['step']['id']
+
+    def test_limit_squeeze_uses_recorded_bound_limits(self):
+        session = DoSession()
+        api = make_api(session)
+        lower_id, upper_id = self._squeeze_setup(api)
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower_id, upper_id))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['sources'],
+                         {'lower': lower_id, 'upper': upper_id})
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_squeeze_rejects_unknown_bound_step(self):
+        session = DoSession()
+        api = make_api(session)
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER, 's7', 's8'))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_limit_squeeze_rejects_mismatched_bound_step(self):
+        session = DoSession()
+        api = make_api(session)
+        other = json.loads(api['limit_table'](
+            '\\lim_{n \\to \\infty} \\frac{1}{n}'))
+        lower = json.loads(api['limit_table']('\\lim_{n \\to \\infty} 0'))
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower['step']['id'], other['step']['id']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not record', rec['error'])
+
+    def test_replay_rejects_tampered_squeeze_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        lower_id, upper_id = self._squeeze_setup(api)
+        json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower_id, upper_id))
+        session.ledger.steps[-1]['sources']['upper'] = lower_id
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance', replay['reason'])
+
     def test_integrate_assemble_rejects_wrong_source_order(self):
         session = DoSession()
         api = make_api(session)
@@ -455,6 +510,43 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_provenance']['source'], 'claim')
         self.assertTrue(res['summary_unverified'])
         self.assertIn('narrative truncated', res['summary'])
+
+    def test_prove_mode_closes_ellipsis_product_claim(self):
+        # the reported cell: prove! \lim (1/2 * 3/4 ... (2n-1)/2n) = 0.
+        # The ellipsis claim records, the product door interprets it, the
+        # bound limits close by table rules, and the squeeze concludes.
+        goal = ('\\lim _{n \\rightarrow \\infty}\\left(\\frac{1}{2} \\cdot '
+                '\\frac{3}{4} \\ldots \\frac{2 n-1}{2 n}\\right) = 0')
+        expr = ('\\lim _{n \\rightarrow \\infty}\\left(\\frac{1}{2} \\cdot '
+                '\\frac{3}{4} \\ldots \\frac{2 n-1}{2 n}\\right)')
+        explicit = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} \\frac{2k-1}{2k}'
+        upper = '\\frac{1}{\\sqrt{2n+1}}'
+        script = [
+            [tool_call('prod_from_ellipsis', {
+                'expr': expr,
+                'prod_form': '\\prod_{k=1}^{n} \\frac{2k-1}{2k}'}, 'c1')],
+            [tool_call('limit_table', {
+                'expr': '\\lim_{n \\to \\infty} 0'}, 'c2')],
+            [tool_call('limit_table', {
+                'expr': '\\lim_{n \\to \\infty} ' + upper}, 'c3')],
+            [tool_call('limit_squeeze', {
+                'expr': explicit, 'lower': '0', 'upper': upper,
+                'lower_step': 's2', 'upper_step': 's3'}, 'c4')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s1', 's4']}, 'c5')],
+            [tool_call('set_result', {'expr': '0'}, 'c6')],
+            [message('Interpreted the product, squeezed it to 0.')],
+        ]
+        res = run_instruction('prove the product limit',
+                              model=ScriptedModel(script), proof_goal=goal)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['prod_from_ellipsis', 'limit_table',
+                          'limit_table', 'limit_squeeze'])
+        # conditional: the ellipsis reading and the ordering are assumptions
+        self.assertEqual(res['claims'][0]['verdict'], 'conditional')
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(res['final_provenance']['source'], 'claim')
 
     def test_prove_mode_leaves_failed_target_open(self):
         script = [

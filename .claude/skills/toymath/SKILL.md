@@ -33,11 +33,13 @@ it appends each verified step to a replayable ledger.
 | `rewrite EXPR LEMMA [--direction backward]` | `rewrite "x^2-y^2" diff_squares` | apply a registered identity at the root, or at the first matching subterm (reported as `at`). Power terms also match perfect-power constants and monomials: `x^2-4` → `(x+2)(x-2)`, `4x^2-9` → `(2x+3)(2x-3)`, `x^3-8` via `diff_cubes` (binding reported as `numeric`) |
 | `limit_rewrite EXPR NEW_BODY` | `limit_rewrite "\lim_{x \to 1} \frac{x^2-1}{x-1}" "x+1"` | replace the body only after `equal` verifies the proposal |
 | `limit_substitute EXPR` | `limit_substitute "\lim_{x \to 2}(x^2+1)"` | continuity substitution at a finite point; records continuity and requires converged approach samples |
-| `limit_table EXPR` | `limit_table "\lim_{x \to 0}\frac{\sin x}{x}"` | standard zero-limit/constant rules, finite rational leading-coefficient limits at infinity, and geometric decay at `+\infty` (`r^n` with numeric `0<r<1`, or division by `s^n` with numeric `s>1`, times constants — rewrite `e^{-cn}` into that form first) |
+| `limit_table EXPR` | `limit_table "\lim_{x \to 0}\frac{\sin x}{x}"` | standard zero-limit/constant rules, finite rational leading-coefficient limits at infinity, geometric decay at `+\infty` (`r^n` with numeric `0<r<1`, or division by `s^n` with numeric `s>1`, times constants — rewrite `e^{-cn}` into that form first), and root-power decay at `+\infty` (a var-free numerator over `p(n)^q` factors with `q>0` rational and positive leading coefficient, e.g. `\frac{1}{\sqrt{2n+1}}`) |
 | `limit_lhopital EXPR` | `limit_lhopital "\lim_{x \to 0}\frac{e^x-1}{x}"` | one conditional l'Hopital step after the oracle observes `0/0` or `infinity/infinity`; records theorem premises |
 | `limit_linearity EXPR` | `limit_linearity "\lim_{x \to 0}(\frac{\sin x}{x}+x^2)"` | split a top-level sum and record that every piece limit exists |
 | `limit_assemble EXPR VALUES...` | `limit_assemble "<original limit>" 1 0` | CLI form: independently check ordered piece values and signed assembly; in do! pass the linearity step id and value-step ids so provenance is replayable |
+| `limit_squeeze EXPR LOWER UPPER VALUE` | `limit_squeeze "\lim_{n \to \infty} \prod_{k=1}^{n} \frac{2k-1}{2k}" "0" "\frac{1}{\sqrt{2n+1}}" "0"` | squeeze theorem: the ordering `lower <= body <= upper` is spot-checked at approach samples and recorded as an assumption; both bound limits must be confirmed to reach VALUE. In do! close each bound's `\lim` as its own step first and pass the two step ids so provenance is replayable |
 | `sum_from_ellipsis EXPR SUM_FORM` | `sum_from_ellipsis "\frac{1}{1 \cdot 2}+\frac{1}{2 \cdot 3}+\ldots+\frac{1}{n(n+1)}" "\sum_{k=1}^{n} \frac{1}{k(k+1)}"` | interpret an ellipsis sum (optionally inside a `\lim`) as an explicit finite `\sum`: every displayed term is checked against the proposed summand at its index (≥ 2 leading terms required); the pattern continuation is recorded as an assumption |
+| `prod_from_ellipsis EXPR PROD_FORM` | `prod_from_ellipsis "\frac{1}{2} \cdot \frac{3}{4} \ldots \frac{2n-1}{2n}" "\prod_{k=1}^{n} \frac{2k-1}{2k}"` | interpret an ellipsis product (optionally inside a `\lim`) as an explicit finite `\prod`: every displayed factor is checked against the proposed factor at its index (≥ 2 leading factors required); the pattern continuation is recorded as an assumption; parenthesize a composite trailing factor (`(2n)`, not `2n`) |
 | `sum_rewrite EXPR NEW_SUMMAND` | `sum_rewrite "\sum_{k=1}^{n} \frac{1}{k(k+1)}" "\frac{1}{k} - \frac{1}{k+1}"` | replace the summand (optionally inside a `\lim`) only after `equal` verifies the proposal |
 | `sum_telescope EXPR TERM` | `sum_telescope "\sum_{k=1}^{n} \frac{1}{k(k+1)}" "\frac{1}{k}"` | collapse `\sum_{k=a}^{b} (f(k)-f(k+1))` to `f(a)-f(b+1)` for your proposed `f`; `equal` gates the summand and a literal finite-sum evaluation independently confirms the closed form |
 | `integrate_power_rule EXPR VAR` | `integrate_power_rule "3x^2+2x" x` | term-by-term power rule; accepts `\int ... dx` wrappers; refuses the `1/x` case (that is the table's log rule) |
@@ -130,16 +132,21 @@ step. One-sided `a^+`/`a^-` and infinite approach points are supported. For a
 sum, call `limit_linearity`, solve each returned limit, and in do! finish with
 `limit_assemble(linearity_step, value_steps)`. Do not type the final sum into
 `expand`: that would verify only the typed arithmetic, not which branch values
-were used. Approach sampling uses Richardson extrapolation; non-convergence is
-oracle ignorance and must never be presented as a counterexample.
+were used. When no direct tactic closes the limit but the body is bounded by
+simpler sequences, close each bound's `\lim` first and finish with
+`limit_squeeze` (in do! cite the two bound step ids as provenance). Approach
+sampling uses Richardson/Aitken extrapolation; non-convergence is oracle
+ignorance and must never be presented as a counterexample.
 
-## Ellipsis sums and telescoping (series limits)
+## Ellipsis sums, products, and telescoping (series limits)
 
 An ellipsis (`\ldots`) has no mechanical semantics — every primitive rejects
-it except `sum_from_ellipsis`, which turns the displayed pattern into an
-explicit finite `\sum` (recording the continuation as an assumption). Never
-split an ellipsis sum with `limit_linearity`: the number of terms depends on
-the variable. The chain for `\lim_{n \to \infty} (t_1 + t_2 + \ldots + t_n)`:
+it except the two doors: `sum_from_ellipsis` for `t_1 + t_2 + \ldots + t_n`
+and `prod_from_ellipsis` for `f_1 \cdot f_2 \ldots f_n`, which turn the
+displayed pattern into an explicit finite `\sum`/`\prod` (recording the
+continuation as an assumption). Never split an ellipsis sum with
+`limit_linearity`: the number of terms depends on the variable. The chain
+for `\lim_{n \to \infty} (t_1 + t_2 + \ldots + t_n)`:
 
 ```bash
 python toymath_cli.py sum_from_ellipsis "\lim_{n \to \infty}\left[\frac{1}{1 \cdot 2}+\frac{1}{2 \cdot 3}+\ldots+\frac{1}{n(n+1)}\right]" "\sum_{k=1}^{n} \frac{1}{k(k+1)}"
@@ -149,6 +156,19 @@ python toymath_cli.py limit_table "\lim_{n \to \infty} \frac{n}{n+1}"   # -> 1
 
 `sum_rewrite` reshapes a summand in place (e.g. explicit partial fractions)
 when the telescoping `f` is not immediately visible.
+
+The chain for a bounded ellipsis product (the Wallis-type
+`\lim_{n \to \infty} (\frac{1}{2} \cdot \frac{3}{4} \ldots \frac{2n-1}{2n})`):
+
+```bash
+python toymath_cli.py prod_from_ellipsis "\lim_{n \to \infty}\left(\frac{1}{2} \cdot \frac{3}{4} \ldots \frac{2n-1}{2n}\right)" "\prod_{k=1}^{n} \frac{2k-1}{2k}"
+python toymath_cli.py limit_table "\lim_{n \to \infty} \frac{1}{\sqrt{2n+1}}"   # upper bound -> 0 (root-power decay)
+python toymath_cli.py limit_table "\lim_{n \to \infty} 0"                       # lower bound -> 0 (constant)
+python toymath_cli.py limit_squeeze "\lim_{n \to \infty} \prod_{k=1}^{n} \frac{2k-1}{2k}" "0" "\frac{1}{\sqrt{2n+1}}" "0"
+```
+
+The oracle evaluates finite `\sum`/`\prod` bodies by literal accumulation
+loops, so squeeze orderings over products are spot-checked for real.
 
 ## Matrices and vectors (literal, phase 1)
 

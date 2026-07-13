@@ -26,14 +26,24 @@ themselves (one-sided `a^+`/`a^-` binders included). Order of attack:
    the piece step ids in the returned order — never retype the
    assembled sum. Never split an ellipsis sum this way: its length
    depends on the variable.
-6. An ellipsis sum (`t_1 + t_2 + \ldots + t_n`) must be interpreted
-   first: propose the explicit form with
-   sum_from_ellipsis(expr, "\sum_{k=a}^{b} ...") — pass the whole \lim
-   expression; the displayed terms are checked, the continuation is a
-   recorded assumption. Then collapse the sum with
+6. An ellipsis expression must be interpreted first — it has no
+   mechanical meaning. For a sum (`t_1 + t_2 + \ldots + t_n`) propose
+   the explicit form with sum_from_ellipsis(expr, "\sum_{k=a}^{b} ...");
+   for a product (`f_1 \cdot f_2 \ldots f_n`) use
+   prod_from_ellipsis(expr, "\prod_{k=a}^{b} ...") — pass the whole
+   \lim expression; the displayed terms/factors are checked, the
+   continuation is a recorded assumption. Then collapse a sum with
    sum_telescope(expr, f) (propose the telescoping f(k); use
    sum_rewrite for the partial-fraction reshape when f is not obvious)
    and finish with the limit tactics on the closed form.
+7. limit_squeeze — when no direct tactic closes the limit but the body
+   is bounded by simpler sequences: close the \lim of the lower bound
+   and the \lim of the upper bound as their own recorded steps (both
+   must reach the same value), then call limit_squeeze(expr, lower,
+   upper, lower_step, upper_step). The ordering lower <= body <= upper
+   is spot-checked at approach samples and recorded as an assumption.
+   The table's root-power decay rule closes bounds like
+   `1/\sqrt{2n+1}` at +infinity directly.
 
 The table is intentionally narrow. If no tactic chain closes the limit,
 report the last verified form and what move is missing, then stop —

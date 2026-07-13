@@ -153,10 +153,24 @@ def main(argv=None):
     p.add_argument('expr')
     p.add_argument('values', nargs='+')
 
+    p = add_parser('limit_squeeze',
+                   help='close a limit between two bounds sharing a '
+                        'confirmed limit value')
+    p.add_argument('expr')
+    p.add_argument('lower')
+    p.add_argument('upper')
+    p.add_argument('value')
+
     p = add_parser('sum_from_ellipsis',
                    help='interpret an ellipsis sum as an explicit finite sum')
     p.add_argument('expr')
     p.add_argument('sum_form')
+
+    p = add_parser('prod_from_ellipsis',
+                   help='interpret an ellipsis product as an explicit '
+                        'finite product')
+    p.add_argument('expr')
+    p.add_argument('prod_form')
 
     p = add_parser('sum_rewrite',
                    help='replace a summand by a verified-equal one')
@@ -235,8 +249,13 @@ def main(argv=None):
         res = primitives.limit_lhopital(args.expr)
     elif args.cmd == 'limit_assemble':
         res = primitives.limit_assemble(args.expr, args.values)
+    elif args.cmd == 'limit_squeeze':
+        res = primitives.limit_squeeze(args.expr, args.lower, args.upper,
+                                       args.value)
     elif args.cmd == 'sum_from_ellipsis':
         res = primitives.sum_from_ellipsis(args.expr, args.sum_form)
+    elif args.cmd == 'prod_from_ellipsis':
+        res = primitives.prod_from_ellipsis(args.expr, args.prod_form)
     elif args.cmd == 'sum_rewrite':
         res = primitives.sum_rewrite(args.expr, args.new_summand)
     elif args.cmd == 'sum_telescope':

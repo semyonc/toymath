@@ -100,6 +100,15 @@ _DO_RULES = """
   with `limit_linearity`, solve every returned piece, then call
   `limit_assemble` with the linearity step id and ordered value-step ids.
   Never type the final sum into `expand`; provenance must stay explicit.
+- For a bounded-by-sequence limit no direct tactic closes: propose lower
+  and upper bounds, close the \\lim of EACH bound as its own recorded step
+  (both must reach the same value), then call `limit_squeeze` citing those
+  step ids. The ordering lower <= body <= upper is spot-checked and
+  recorded as an assumption.
+- An ellipsis (`\\ldots`) has no mechanical meaning: interpret it FIRST via
+  `sum_from_ellipsis` (`t_1 + t_2 + \\ldots + t_n`) or `prod_from_ellipsis`
+  (`f_1 \\cdot f_2 \\ldots f_n`) by proposing the explicit \\sum / \\prod
+  form, then drive the ordinary tactics on the result.
 """
 
 _PLOT_RULES = """
@@ -456,6 +465,65 @@ def make_api(session):
         return json.dumps(session.record(result), ensure_ascii=False,
                           default=str)
 
+    def limit_squeeze(expr: str, lower: str, upper: str,
+                      lower_step: str, upper_step: str) -> str:
+        """Close a limit by the squeeze theorem from RECORDED bound limits.
+
+        First close the \\lim of the lower bound and the \\lim of the upper
+        bound as their own ledger steps (both must reach the same value),
+        then cite those step ids here. The ordering lower <= body <= upper
+        is spot-checked at approach samples and recorded as an assumption.
+
+        Args:
+            expr: the full \\lim expression to close.
+            lower: LaTeX lower-bound body, in the limit variable.
+            upper: LaTeX upper-bound body, in the limit variable.
+            lower_step: ledger id of the step closing the lower bound's
+                limit, e.g. "s2".
+            upper_step: ledger id of the step closing the upper bound's
+                limit.
+        """
+        with session._lock:
+            steps = list(session.ledger.steps)
+        by_id = {step['id']: step for step in steps}
+        resolved = []
+        for tag, bound, source_id in (('lower', lower, lower_step),
+                                      ('upper', upper, upper_step)):
+            source = by_id.get(source_id)
+            if source is None or source.get('result') is None:
+                return json.dumps({
+                    'ok': False, 'op': 'limit_squeeze',
+                    'error': f'unknown transforming step {source_id!r}',
+                }, ensure_ascii=False)
+            try:
+                expected = primitives.limit_with_body(expr, bound)
+            except primitives.PrimitiveError as e:
+                return json.dumps({
+                    'ok': False, 'op': 'limit_squeeze', 'error': str(e),
+                }, ensure_ascii=False)
+            if not primitives.same_expression(source.get('input') or '',
+                                              expected):
+                return json.dumps({
+                    'ok': False, 'op': 'limit_squeeze',
+                    'error': (f'{source_id!r} does not record the {tag} '
+                              f'bound limit {expected!r}'),
+                }, ensure_ascii=False)
+            resolved.append(source['result'])
+        low_value, up_value = resolved
+        if not primitives.same_expression(low_value, up_value):
+            eq = primitives.equal_exprs(low_value, up_value)
+            if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+                return json.dumps({
+                    'ok': False, 'op': 'limit_squeeze',
+                    'error': ('the recorded bound limits are not the same '
+                              f'value: {low_value!r} vs {up_value!r}'),
+                }, ensure_ascii=False)
+        result = primitives.limit_squeeze(expr, lower, upper, low_value)
+        if result.get('ok'):
+            result['sources'] = {'lower': lower_step, 'upper': upper_step}
+        return json.dumps(session.record(result), ensure_ascii=False,
+                          default=str)
+
     def sum_from_ellipsis(expr: str, sum_form: str) -> str:
         """Interpret an ellipsis sum (t_1 + t_2 + \\ldots + t_n), optionally
         inside a \\lim, as an explicit finite \\sum. Every displayed term is
@@ -467,6 +535,20 @@ def make_api(session):
             sum_form: the proposed bare \\sum_{k=a}^{b} summand form.
         """
         return _run(primitives.sum_from_ellipsis, expr, sum_form)
+
+    def prod_from_ellipsis(expr: str, prod_form: str) -> str:
+        """Interpret an ellipsis product (f_1 \\cdot f_2 \\ldots f_n),
+        optionally inside a \\lim, as an explicit finite \\prod. Every
+        displayed factor is mechanically checked against the proposed
+        factor at its index; the continuation of the pattern is recorded
+        as an assumption. Parenthesize a composite trailing factor
+        (write (2n) rather than 2n) so it stays one factor.
+
+        Args:
+            expr: LaTeX ellipsis product, or a \\lim whose body is one.
+            prod_form: the proposed bare \\prod_{k=a}^{b} factor form.
+        """
+        return _run(primitives.prod_from_ellipsis, expr, prod_form)
 
     def sum_rewrite(expr: str, new_summand: str) -> str:
         """Replace the summand of a finite \\sum (optionally inside a \\lim)
@@ -783,8 +865,9 @@ def make_api(session):
 
     fns = [apply, expand, collect, substitute, evaluate, diff, rewrite,
            limit_rewrite, limit_substitute, limit_linearity, limit_table,
-           limit_lhopital, limit_assemble,
+           limit_lhopital, limit_assemble, limit_squeeze,
            sum_from_ellipsis, sum_rewrite, sum_telescope,
+           prod_from_ellipsis,
            integrate_power_rule, integrate_table, integrate_by_parts,
            integrate_substitute, integrate_rewrite, integrate_linearity,
            integrate_assemble,

@@ -74,7 +74,8 @@ def _normalize_matrix_envs(latex):
 
 # Ellipsis commands parse as opaque symbols with no mechanical semantics
 # ("continue the pattern" is a human reading), so every primitive rejects
-# them at the door except sum_from_ellipsis, which interprets them.
+# them at the door except the sum_from_ellipsis / prod_from_ellipsis
+# doors, which interpret them.
 _ELLIPSIS_NAMES = frozenset({
     '\\ldots', '\\cdots', '\\dots', '\\vdots', '\\ddots', '\\hdots',
     '\\dotsb', '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'})
@@ -86,8 +87,10 @@ def parse_latex(latex, allow_ellipsis=False):
     if not allow_ellipsis and _ELLIPSIS_RE.search(latex):
         raise PrimitiveError(
             'the ellipsis in the expression has no mechanical semantics; '
-            'interpret it first with sum_from_ellipsis by proposing the '
-            'explicit \\sum_{k=a}^{b} form it abbreviates')
+            'interpret it first with sum_from_ellipsis (terms joined by +) '
+            'or prod_from_ellipsis (factors joined by \\cdot or '
+            'juxtaposition) by proposing the explicit \\sum_{k=a}^{b} / '
+            '\\prod_{k=a}^{b} form it abbreviates')
     normalized = _normalize_matrix_envs(latex)
     normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
@@ -786,31 +789,33 @@ def _func_arg_span(args, i, notation, is_head):
 _SUM_EVAL_CAP = 100000
 
 
-def _eval_finite_sum(info, notation, env):
-    """The oracle's independent leg for finite ``\\sum``: a literal
-    summation loop over integer bound values, sharing nothing with the
-    symbolic sum tactics."""
+def _eval_finite_bigop(info, notation, env, op):
+    """The oracle's independent leg for finite ``\\sum``/``\\prod``: a
+    literal accumulation loop over integer bound values, sharing nothing
+    with the symbolic sum/product tactics."""
+    word = 'sum' if op == '\\sum' else 'product'
     if info is None or info['bound'] is None or len(info['parameters']) != 2:
-        raise EvalError('sum without an explicit k=a..b binder')
+        raise EvalError(f'{word} without an explicit k=a..b binder')
     if not info['body']:
-        raise EvalError('sum without a summand')
+        raise EvalError(f'{word} without a {word} body')
     lo = numeric_eval(info['parameters'][0], notation, env)
     hi = numeric_eval(info['parameters'][1], notation, env)
     if isinstance(lo, list) or isinstance(hi, list):
-        raise EvalError('matrix-valued sum bound')
+        raise EvalError(f'matrix-valued {word} bound')
     if abs(lo - round(lo)) > 1e-9 or abs(hi - round(hi)) > 1e-9:
-        raise EvalError('non-integer sum bound')
+        raise EvalError(f'non-integer {word} bound')
     lo, hi = int(round(lo)), int(round(hi))
     if hi - lo + 1 > _SUM_EVAL_CAP:
-        raise EvalError('sum too long to evaluate')
-    total = 0.0
+        raise EvalError(f'{word} too long to evaluate')
+    # empty-range conventions: sum -> 0, product -> 1
+    total = 0.0 if op == '\\sum' else 1.0
     e = dict(env)
     for k in range(lo, hi + 1):
         e[info['bound']] = float(k)
         v = _eval_plist(info['body'], notation, e)
         if isinstance(v, list):
-            raise EvalError('matrix-valued summand')
-        total += v
+            raise EvalError(f'matrix-valued {word} term')
+        total = total + v if op == '\\sum' else total * v
     return total
 
 
@@ -826,11 +831,12 @@ def _eval_plist(args, notation, env):
 
     while i < len(args):
         a = args[i]
-        if _big_operator_name(a, notation) == '\\sum':
-            # the sum binds every remaining factor as its summand
+        big = _big_operator_name(a, notation)
+        if big in ('\\sum', '\\prod'):
+            # the operator binds every remaining factor as its body
             info = _binder_info(a, notation, args[i + 1:])
             return _num_mul(result,
-                            _eval_finite_sum(info, notation, env))
+                            _eval_finite_bigop(info, notation, env, big))
         fname, power = (a.name, None) if _is_func_name(a, notation) else (
             _func_power(a, notation) or (None, None))
         if fname is not None:
@@ -3273,24 +3279,44 @@ def _approach_estimate(body, notation, var, point, point_notation,
     """Independent numeric limit estimate plus a convergence-error bound."""
     inf = _infinity_sign(point, point_notation)
     if inf is not None:
-        # fixed ladder: fall back to nearer approach points only when the
-        # farther ones overflow (e.g. 2^{10^4} in a decaying denominator)
-        for x1, x2 in ((inf * 1e3, inf * 1e4), (inf * 1e2, inf * 1e3),
-                       (inf * 30.0, inf * 300.0)):
+        # fixed ladders: fall back to shorter/nearer ones only when a point
+        # fails (e.g. 2^{10^4} overflows in a decaying denominator, or a
+        # root is undefined at the small end)
+        def aitken(a, b, c):
+            d = (c - b) - (b - a)
+            if abs(d) < 1e-15 * max(abs(a), abs(b), abs(c), 1e-300):
+                return None
+            return c - (c - b) ** 2 / d
+
+        for ladder in ((1e2, 1e3, 1e4, 1e5), (1e3, 1e4, 1e5),
+                       (10.0, 1e2, 1e3, 1e4), (10.0, 1e2, 1e3),
+                       (3.0, 30.0, 300.0)):
             vals = []
             try:
-                for x in (x1, x2):
+                for x in ladder:
                     e = dict(env)
-                    e[var] = x
+                    e[var] = inf * x
                     vals.append(numeric_eval(body, notation, e))
-            except OverflowError:
+            except (OverflowError, ValueError, ZeroDivisionError,
+                    EvalError):
                 continue
             if any(isinstance(v, list) for v in vals):
                 raise EvalError('matrix-valued limit')
-            v1, v2 = vals
             # Richardson for a leading O(1/x) error term.
-            return (10 * v2 - v1) / 9, abs(v1 - v2) / 9
-        raise EvalError('approach samples overflowed')
+            rich = (10 * vals[-1] - vals[-2]) / 9
+            rich_err = abs(vals[-2] - vals[-1]) / 9
+            # Aitken/Shanks over log-spaced triples additionally captures
+            # power-law decay c*x^{-alpha} (any alpha > 0), which the
+            # O(1/x) model extrapolates poorly. A second window (4-point
+            # ladders) gives a self-consistency error estimate.
+            second = aitken(*vals[-3:])
+            if second is None:
+                return rich, rich_err
+            first = aitken(*vals[-4:-1]) if len(vals) == 4 else None
+            if first is None:
+                return second, max(abs(second - rich), rich_err)
+            return second, max(abs(second - first), rich_err)
+        raise EvalError('approach samples failed to evaluate')
 
     a = numeric_eval(point, point_notation, env)
     if isinstance(a, list):
@@ -3350,7 +3376,8 @@ def _limit_check(body_latex, var, point_latex, direction, expected_latex,
         return {'status': 'skipped',
                 'reason': 'approach samples did not converge'}
     return {'status': 'agree', 'samples': agreed,
-            'method': 'approach-sampling with Richardson extrapolation'}
+            'method': 'approach-sampling with Richardson/Aitken '
+                      'extrapolation'}
 
 
 def _limit_equivalence_check(parts, new_body, samples=6):
@@ -3384,7 +3411,8 @@ def _limit_equivalence_check(parts, new_body, samples=6):
         return {'status': 'skipped',
                 'reason': 'approach samples did not converge'}
     return {'status': 'agree', 'samples': agreed,
-            'method': 'paired approach-sampling with Richardson extrapolation'}
+            'method': 'paired approach-sampling with Richardson/Aitken '
+                      'extrapolation'}
 
 
 def _limit_fraction(sym, notation):
@@ -3648,6 +3676,25 @@ def _plain_var_power_base(sym, notation, var):
     return _rational_const(base, notation)
 
 
+def _peel_signs(sym, notation):
+    """Strip transparent grouping and PLUS/MINUS wrappers (sign is
+    irrelevant when deciding decay to zero)."""
+    while True:
+        inner = _transparent_inner(sym, notation)
+        signed = notation.vgetf(inner, [Notation.MINUS, Notation.PLUS])
+        if signed is None:
+            return inner
+        sym = signed.args[0]
+
+
+def _peeled_factors(sym, notation):
+    """Sign-peeled factor list of a (possibly single-factor) product."""
+    sym = _peel_signs(sym, notation)
+    f = notation.getf(sym, Notation.P_LIST)
+    return ([_peel_signs(a, notation) for a in f.args]
+            if f is not None else [sym])
+
+
 def _geometric_decay_zero(body, notation, var):
     """True when ``body`` is a (signed) product/quotient whose var-bearing
     factors are all numeric-base powers ``r^var`` that decay as
@@ -3655,17 +3702,10 @@ def _geometric_decay_zero(body, notation, var):
     and every other factor is a finite constant — the geometric-decay
     standard limit ``r^n → 0``."""
     def peel(sym):
-        while True:
-            inner = _transparent_inner(sym, notation)
-            signed = notation.vgetf(inner, [Notation.MINUS, Notation.PLUS])
-            if signed is None:
-                return inner
-            sym = signed.args[0]
+        return _peel_signs(sym, notation)
 
     def factor_list(sym):
-        sym = peel(sym)
-        f = notation.getf(sym, Notation.P_LIST)
-        return [peel(a) for a in f.args] if f is not None else [sym]
+        return _peeled_factors(sym, notation)
 
     sym = peel(body)
     frac = _limit_fraction(sym, notation)
@@ -3689,6 +3729,73 @@ def _geometric_decay_zero(body, notation, var):
             elif base >= 1:
                 return False
             decaying += 1
+    return decaying > 0
+
+
+def _power_decay_root(sym, notation, var):
+    """Positive rational exponent q when ``sym`` is ``p(var)^q`` for a
+    polynomial p with positive leading coefficient (so sym → +infinity as
+    var → +infinity): ``\\sqrt{p}`` / ``\\sqrt[m]{p}`` (q = 1/m), an INDEX
+    power with a positive rational literal exponent, or p itself (q = 1).
+    None otherwise."""
+    def poly_to_infinity(s):
+        try:
+            rf = to_ratfunc(s, notation)
+        except (NotInFragment, ZeroDivisionError):
+            return False
+        if rf.variables() - {var}:
+            return False
+        if rf.num.degree(var) < 1 or rf.den.degree(var) != 0:
+            return False
+        return rf.num.leading_coeff() / rf.den.leading_coeff() > 0
+
+    f = notation.get(sym)
+    if f is not None and getattr(f.sym, 'name', None) == '\\sqrt':
+        if len(f.args) == 1:
+            m = 2
+        else:
+            m = _int_literal(f.args[1], notation)
+            if m is None or m < 2:
+                return None
+        return Fraction(1, m) if poly_to_infinity(f.args[0]) else None
+    idx = notation.getf(sym, Notation.INDEX)
+    if idx is not None:
+        sub_l, sup_l, power, sub_r = idx.args[1]
+        if (sub_l is not None or sup_l is not None or sub_r is not None
+                or power is None):
+            return None
+        q = _rational_const(power, notation)
+        if q is None or q <= 0:
+            return None
+        return q if poly_to_infinity(idx.args[0]) else None
+    return Fraction(1) if poly_to_infinity(sym) else None
+
+
+def _power_decay_zero(body, notation, var):
+    """True when ``body`` is a (signed) quotient whose numerator is
+    var-free and whose denominator's var-bearing factors are all growing
+    root-powers ``p(var)^q`` (q > 0 rational, p a polynomial with positive
+    leading coefficient) with every other factor a finite constant — the
+    root/power-decay standard limit ``1/n^q → 0`` at +infinity."""
+    sym = _peel_signs(body, notation)
+    frac = _limit_fraction(sym, notation)
+    if frac is None:
+        return False
+    numerator, denominator = frac
+    for factor in _peeled_factors(numerator, notation):
+        if var in free_symbols(factor, notation):
+            return False
+        if _contains_free_infinity(factor, notation):
+            return False
+    decaying = 0
+    for factor in _peeled_factors(denominator, notation):
+        if var not in free_symbols(factor, notation):
+            if _contains_free_infinity(factor, notation):
+                return False
+            continue
+        if _power_decay_root(factor, notation, var) is None:
+            return False
+        decaying += 1
     return decaying > 0
 
 
@@ -3722,6 +3829,9 @@ def limit_table(expr):
         if (result is None and _infinity_sign(point, pn) > 0
                 and _geometric_decay_zero(body, bn, parts['var'])):
             result, rule = '0', 'geometric decay at infinity'
+        if (result is None and _infinity_sign(point, pn) > 0
+                and _power_decay_zero(body, bn, parts['var'])):
+            result, rule = '0', 'root-power decay at infinity'
     else:
         zero = equal_exprs(parts['point_latex'], '0')
         if zero.get('ok') and zero.get('verdict') == 'yes':
@@ -3811,6 +3921,162 @@ def limit_lhopital(expr):
                           'denominator_derivative': dd['result']})
 
 
+def limit_with_body(expr, body_latex):
+    """The ``\\lim`` expression sharing ``expr``'s binder with a new body.
+    Used by callers that must name a bound's own limit expression."""
+    parts = _limit_parts(expr)
+    return _limit_latex(parts['var'], parts['point_latex'],
+                        parts['direction'], body_latex)
+
+
+def _squeeze_bound_check(lower_latex, body_latex, upper_latex, var,
+                         point_latex, direction, samples=6):
+    """Spot-check ``lower <= body <= upper`` at approach sample points —
+    the numeric leg behind a squeeze step's ordering assumption."""
+    try:
+        lo, lo_n = parse_latex(lower_latex)
+        bo, bo_n = parse_latex(body_latex)
+        up, up_n = parse_latex(upper_latex)
+        point, pn = parse_latex(point_latex)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    envs = _limit_sample_envs(
+        [(lo, lo_n), (bo, bo_n), (up, up_n), (point, pn)], var, samples)
+    inf = _infinity_sign(point, pn)
+    agreed = 0
+    for env in envs:
+        if inf is not None:
+            offsets = [inf * x for x in (10.0, 30.0, 1e2, 1e3, 1e4)]
+        else:
+            try:
+                a = numeric_eval(point, pn, env)
+            except (EvalError, ZeroDivisionError, ValueError,
+                    OverflowError):
+                continue
+            if isinstance(a, list):
+                continue
+            steps = (1e-1, 1e-2, 1e-3)
+            scale = max(1.0, abs(a))
+            if direction == 'right':
+                offsets = [a + h * scale for h in steps]
+            elif direction == 'left':
+                offsets = [a - h * scale for h in steps]
+            else:
+                offsets = [a + s * h * scale
+                           for h in steps for s in (1, -1)]
+        for x in offsets:
+            e = dict(env)
+            e[var] = x
+            try:
+                low = numeric_eval(lo, lo_n, e)
+                mid = numeric_eval(bo, bo_n, e)
+                high = numeric_eval(up, up_n, e)
+            except (EvalError, ZeroDivisionError, ValueError,
+                    OverflowError):
+                continue
+            if any(isinstance(v, list) for v in (low, mid, high)):
+                continue
+            tol = 1e-9 * max(1.0, abs(low), abs(mid), abs(high))
+            if low - mid > tol or mid - high > tol:
+                return {'status': 'disagree', 'point': e,
+                        'lower': low, 'body': mid, 'upper': high}
+            agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'no evaluable ordering sample points'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'ordering spot-checked at approach samples'}
+
+
+def limit_squeeze(expr, lower, upper, value):
+    """Close a limit by the squeeze theorem.
+
+    ``lower`` and ``upper`` are agent-proposed bound bodies whose limits —
+    the shared ``value`` — must already be mechanically established; in
+    do! they are resolved from recorded ledger steps and cited as
+    provenance. The ordering ``lower <= body <= upper`` near the approach
+    point is spot-checked numerically and recorded as an assumption; each
+    bound's limit is re-confirmed by the independent approach oracle."""
+    args = {'expr': expr, 'lower': lower, 'upper': upper, 'value': value}
+    for tag, text in (('lower bound', lower), ('upper bound', upper),
+                      ('value', value)):
+        if not isinstance(text, str) or not text.strip():
+            return _error('limit_squeeze', args, f'missing {tag}')
+    try:
+        parts = _limit_parts(expr)
+        lo_sym, lo_n = parse_latex(lower)
+        up_sym, up_n = parse_latex(upper)
+        val_sym, val_n = parse_latex(value)
+    except PrimitiveError as e:
+        return _error('limit_squeeze', args, str(e))
+    var = parts['var']
+    if var in free_symbols(val_sym, val_n):
+        return _error('limit_squeeze', args,
+                      'the limit value must not contain the bound variable')
+    allowed = free_symbols(parts['body'], parts['notation']) | {var}
+    stray = ((free_symbols(lo_sym, lo_n) | free_symbols(up_sym, up_n))
+             - allowed)
+    if stray:
+        return _error('limit_squeeze', args,
+                      'bounds introduce new free variable(s): '
+                      + ', '.join(sorted(stray)))
+    lower_latex = write_latex(lo_sym, lo_n)
+    upper_latex = write_latex(up_sym, up_n)
+    if (same_expression(lower_latex, parts['body_latex'])
+            or same_expression(upper_latex, parts['body_latex'])):
+        return _error('limit_squeeze', args,
+                      'a bound identical to the limit body makes the '
+                      'squeeze vacuous; close the limit directly')
+    if same_expression(lower_latex, upper_latex):
+        return _error('limit_squeeze', args,
+                      'equal bounds assert the body equals them '
+                      'everywhere; use limit_rewrite instead')
+    sandwich = _squeeze_bound_check(lower_latex, parts['body_latex'],
+                                    upper_latex, var, parts['point_latex'],
+                                    parts['direction'])
+    if sandwich.get('status') != 'agree':
+        reason = (sandwich.get('reason')
+                  if sandwich.get('status') == 'skipped'
+                  else f'witness point {sandwich.get("point")}')
+        return _error('limit_squeeze', args,
+                      'the ordering lower <= body <= upper could not be '
+                      f'confirmed: {reason}')
+    check = sandwich
+    for tag, bound in (('lower', lower_latex), ('upper', upper_latex)):
+        bound_check = _limit_check(bound, var, parts['point_latex'],
+                                   parts['direction'], value)
+        if bound_check.get('status') != 'agree':
+            return _error('limit_squeeze', args,
+                          f'the {tag} bound is not confirmed to approach '
+                          f'{value!r}')
+        check = _merge_checks(check, bound_check)
+    whole = _limit_check(parts['body_latex'], var, parts['point_latex'],
+                         parts['direction'], value)
+    if whole.get('status') == 'disagree':
+        return _error('limit_squeeze', args,
+                      'the approach oracle contradicts the squeezed value')
+    if whole.get('status') == 'agree':
+        check = _merge_checks(check, whole)
+    if check.get('status') == 'agree':
+        check['method'] = ('bound ordering spot-checked; both bound '
+                           'limits confirmed by approach sampling')
+    assumption = {
+        'text': (f'{lower_latex} \\le {parts["body_latex"]} '
+                 f'\\le {upper_latex}'),
+        'display': (f'the squeeze ordering ${lower_latex} \\le '
+                    f'{parts["body_latex"]} \\le {upper_latex}$ holds for '
+                    f'${var}$ near ${parts["point_latex"]}$ (spot-checked '
+                    'at approach samples, assumed throughout the '
+                    'approach)'),
+    }
+    return _result('limit_squeeze', args, expr, value,
+                   assumptions=[assumption], check=check,
+                   extra={'lower': lower_latex, 'upper': upper_latex,
+                          'body': parts['body_latex'], 'var': var,
+                          'point': parts['point_latex'],
+                          'direction': parts['direction']})
+
+
 # ---------------------------------------------------------------------------
 # finite-sum tactics (no autonomous series evaluation: the agent proposes
 # the reading/reshape/telescope, toymath mechanically checks it)
@@ -3855,38 +4121,43 @@ def _strip_limit_maybe(sym, notation):
                   'direction': direction}
 
 
-def _sum_parts(expr, allow_ellipsis=False):
-    """Parse ``\\sum_{k=a}^{b} summand`` — optionally inside a ``\\lim``
-    binder — into its pieces; raises PrimitiveError otherwise."""
+def _bigop_parts(expr, op, allow_ellipsis=False):
+    """Parse ``\\sum_{k=a}^{b} body`` / ``\\prod_{k=a}^{b} body`` —
+    optionally inside a ``\\lim`` binder — into its pieces; raises
+    PrimitiveError otherwise."""
+    word = 'sum' if op == '\\sum' else 'product'
+    shape = f'{op}_{{k=a}}^{{b}}'
     sym, notation = parse_latex(expr, allow_ellipsis=allow_ellipsis)
     body, limit = _strip_limit_maybe(sym, notation)
     body = _peel_groups(body, notation)
     f = notation.getf(body, Notation.P_LIST)
     if f is None:
-        raise PrimitiveError('expected a \\sum_{k=a}^{b} expression')
+        raise PrimitiveError(f'expected a {shape} expression')
     items = [a for a in f.args if not (isinstance(a, Symbol)
                                        and notation.get(a) is None
                                        and a.name in Notation.styles)]
-    if not items or _big_operator_name(items[0], notation) != '\\sum':
-        raise PrimitiveError('expected a \\sum_{k=a}^{b} expression')
+    if not items or _big_operator_name(items[0], notation) != op:
+        raise PrimitiveError(f'expected a {shape} expression')
     info = _binder_info(items[0], notation, items[1:])
     if info['bound'] is None or len(info['parameters']) != 2:
-        raise PrimitiveError('sum binder must have the form \\sum_{k=a}^{b}')
+        raise PrimitiveError(f'{word} binder must have the form {shape}')
     if not info['body']:
-        raise PrimitiveError('sum has no summand')
+        raise PrimitiveError(f'{word} has no {word} body')
     summand = (info['body'][0] if len(info['body']) == 1 else
                notation.setf(Notation.P_LIST, tuple(info['body'])))
     lower, upper = info['parameters']
     bound = info['bound']
     if bound in (free_symbols(lower, notation)
                  | free_symbols(upper, notation)):
-        raise PrimitiveError('sum bounds must not contain the bound variable')
+        raise PrimitiveError(
+            f'{word} bounds must not contain the bound variable')
     if (_infinity_sign(lower, notation) is not None
             or _infinity_sign(upper, notation) is not None):
         raise PrimitiveError(
-            'infinite sum bounds are not supported; rewrite the series as '
-            'the limit of its partial sums (\\lim_{n \\to \\infty} '
-            '\\sum_{k=a}^{n} ...) and drive the sum and limit tactics')
+            f'infinite {word} bounds are not supported; rewrite the series '
+            'as the limit of its partial '
+            f'{word}s (\\lim_{{n \\to \\infty}} '
+            f'{op}_{{k=a}}^{{n}} ...) and drive the {word} and limit tactics')
     if isinstance(lower, Symbol):
         lower = _peel_groups(lower, notation)
     if isinstance(upper, Symbol):
@@ -3902,11 +4173,20 @@ def _sum_parts(expr, allow_ellipsis=False):
     }
 
 
-def _sum_latex(bound, lower_latex, upper_latex, summand_latex):
+def _sum_parts(expr, allow_ellipsis=False):
+    return _bigop_parts(expr, '\\sum', allow_ellipsis=allow_ellipsis)
+
+
+def _bigop_latex(op, bound, lower_latex, upper_latex, summand_latex):
     body = summand_latex.strip()
     if _is_sum_str(body) or body.startswith('-'):
         body = _paren(body)
-    return f'\\sum_{{{bound}={lower_latex}}}^{{{upper_latex}}} {body}'
+    return f'{op}_{{{bound}={lower_latex}}}^{{{upper_latex}}} {body}'
+
+
+def _sum_latex(bound, lower_latex, upper_latex, summand_latex):
+    return _bigop_latex('\\sum', bound, lower_latex, upper_latex,
+                        summand_latex)
 
 
 def _rewrap_limit(limit, body_latex):
@@ -4062,6 +4342,115 @@ def sum_from_ellipsis(expr, sum_form):
                                      'continuation is recorded as an '
                                      'assumption')},
                    extra={'sum': canonical, 'matched': matched})
+
+
+def prod_from_ellipsis(expr, prod_form):
+    """Interpret an ellipsis product as an explicit finite ``\\prod``.
+
+    Every displayed factor is mechanically checked against the proposed
+    factor at its index; the continuation of the pattern under the
+    ellipsis is recorded as an assumption, not proved."""
+    args = {'expr': expr, 'prod_form': prod_form}
+    try:
+        sym, notation = parse_latex(expr, allow_ellipsis=True)
+    except PrimitiveError as e:
+        return _error('prod_from_ellipsis', args, str(e))
+    body, limit = _strip_limit_maybe(sym, notation)
+    body = _peel_groups(body, notation)
+    body_latex = write_latex(body, notation)
+    f = notation.getf(body, Notation.P_LIST)
+    if f is None:
+        return _error('prod_from_ellipsis', args,
+                      'expected a product of factors containing an ellipsis')
+    factors = []
+    ellipsis_at = None
+    idx = -1
+    for t in f.args:
+        if (isinstance(t, Symbol) and notation.get(t) is None
+                and t.name in Notation.styles):
+            continue
+        idx += 1
+        peeled = _peel_groups(t, notation)
+        if (isinstance(peeled, Symbol) and notation.get(peeled) is None
+                and peeled.name in _ELLIPSIS_NAMES):
+            if ellipsis_at is not None:
+                return _error('prod_from_ellipsis', args,
+                              'more than one ellipsis in the product')
+            ellipsis_at = idx
+            continue
+        factors.append((idx, write_latex(t, notation)))
+    if ellipsis_at is None:
+        return _error('prod_from_ellipsis', args,
+                      'no ellipsis found; the product is already explicit')
+    prefix = [t for t in factors if t[0] < ellipsis_at]
+    suffix = [t for t in factors if t[0] > ellipsis_at]
+    if len(prefix) < 2:
+        return _error('prod_from_ellipsis', args,
+                      'need at least two displayed leading factors to '
+                      'anchor the pattern')
+    if not suffix:
+        return _error('prod_from_ellipsis', args,
+                      'the ellipsis must be followed by the final factor(s)')
+    try:
+        parts = _bigop_parts(prod_form, '\\prod')
+    except PrimitiveError as e:
+        return _error('prod_from_ellipsis', args, f'prod_form: {e}')
+    if parts['limit'] is not None:
+        return _error('prod_from_ellipsis', args,
+                      'prod_form must be a bare \\prod, without the \\lim')
+    body_free = free_symbols(body, notation) - _ELLIPSIS_NAMES
+    form_sym, form_notation = parse_latex(prod_form)
+    stray = free_symbols(form_sym, form_notation) - body_free
+    if stray:
+        return _error('prod_from_ellipsis', args,
+                      'prod_form introduces new free variable(s): '
+                      + ', '.join(sorted(stray)))
+    k = parts['bound']
+    lo = _int_literal(parts['lower'], parts['notation'])
+    if lo is None:
+        return _error('prod_from_ellipsis', args,
+                      'product lower bound must be an integer literal')
+    matched = []
+    todo = ([(term, str(lo + i)) for i, (_, term) in enumerate(prefix)]
+            + [(term, parts['upper_latex'] if j == len(suffix) - 1 else
+                f'{parts["upper_latex"]}-{len(suffix) - 1 - j}')
+               for j, (_, term) in enumerate(suffix)])
+    for term_latex, k_value in todo:
+        sub = substitute(parts['summand_latex'], k, k_value)
+        if not sub.get('ok'):
+            return _error('prod_from_ellipsis', args,
+                          f'cannot instantiate the factor at {k}={k_value}: '
+                          + sub.get('error', 'unknown error'))
+        eq = equal_exprs(sub['result'], term_latex)
+        if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+            return _error('prod_from_ellipsis', args,
+                          f'displayed factor {term_latex!r} does not match '
+                          f'the proposed factor at {k}={k_value} (verdict: '
+                          f'{eq.get("verdict", "error")})')
+        matched.append({'k': k_value, 'factor': term_latex,
+                        'method': eq.get('method')})
+    canonical = _bigop_latex('\\prod', k, parts['lower_latex'],
+                             parts['upper_latex'], parts['summand_latex'])
+    result = _rewrap_limit(limit, canonical)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('prod_from_ellipsis', args,
+                      f'internal: unparseable result: {e}')
+    assumption = {
+        'text': f'{body_latex} = {canonical}',
+        'display': (f'the ellipsis in ${body_latex}$ continues the pattern '
+                    f'of ${parts["summand_latex"]}$: the product is read as '
+                    f'${canonical}$'),
+    }
+    return _result('prod_from_ellipsis', args, expr, result,
+                   assumptions=[assumption],
+                   check={'status': 'exact',
+                          'method': (f'all {len(matched)} displayed factors '
+                                     'match the proposed factor at their '
+                                     'index; the continuation is recorded '
+                                     'as an assumption')},
+                   extra={'prod': canonical, 'matched': matched})
 
 
 def sum_rewrite(expr, new_summand):
