@@ -15,6 +15,31 @@ SKILL_ROOT = os.path.join(
     '.claude', 'skills', 'toymath')
 
 
+# Bounded natural subject vocabulary for the virtual loader.  Executable
+# authority remains the static TacticSpec registry; aliases only choose which
+# committed strategy document to reveal.
+SUBJECT_ALIASES = {
+    'algebra': 'core',
+    'derivative': 'differentiation',
+    'derivatives': 'differentiation',
+    'differentiate': 'differentiation',
+    'equation': 'equations',
+    'equation_solving': 'equations',
+    'root': 'equations',
+    'roots': 'equations',
+    'root_finding': 'equations',
+    'integral': 'integration',
+    'integrals': 'integration',
+    'integrate': 'integration',
+    'limit': 'limits',
+    'sum': 'finite_operators',
+    'sums': 'finite_operators',
+    'series': 'finite_operators',
+    'product': 'finite_operators',
+    'products': 'finite_operators',
+}
+
+
 @dataclass(frozen=True)
 class Skill:
     name: str
@@ -55,6 +80,37 @@ def discover(root=SKILL_ROOT):
     return skills
 
 
+def _subject_key(value):
+    return '_'.join(str(value or '').strip().lower().replace('-', ' ').split())
+
+
+def resolve(requested, root=SKILL_ROOT):
+    """Resolve a subject key, bounded alias, or tactic name to one skill.
+
+    The tactic-name path is derived from the static registry, so a model that
+    asks to load ``quadratic_roots`` still receives only its owning equations
+    strategy and gains no authority beyond the registry entry.
+    """
+    skills = discover(root)
+    raw = str(requested or '').strip()
+    if raw in skills:
+        return raw
+    key = _subject_key(raw)
+    normalized_skills = {_subject_key(name): name for name in skills}
+    if key in normalized_skills:
+        return normalized_skills[key]
+    target = SUBJECT_ALIASES.get(key)
+    if target in skills:
+        return target
+    spec = tactic_registry.BY_NAME.get(raw) or tactic_registry.BY_NAME.get(key)
+    if spec is not None and spec.skill in skills:
+        return spec.skill
+    available = ', '.join(sorted(skills)) or '(none)'
+    raise ValueError(
+        f'unknown skill or tactic {requested!r}; available subjects: '
+        f'{available}')
+
+
 def catalog_records(root=SKILL_ROOT):
     skills = discover(root)
     return [
@@ -77,8 +133,9 @@ def catalog_markdown(root=SKILL_ROOT, include_core=False):
         lines.append(f"- `{record['name']}` — {record['description']}")
     lines.extend([
         '',
-        'Call `load_skill` before using a tactic from one of these domains. '
-        'Load another skill later if the derivation crosses domains.',
+        'Call `load_skill` with the exact backticked subject before using a '
+        'tactic from that domain. Load another subject later when the '
+        'derivation crosses domains.',
     ])
     return '\n'.join(lines)
 

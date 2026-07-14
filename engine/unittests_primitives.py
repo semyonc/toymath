@@ -13,6 +13,7 @@ from polyrat import (Poly, RatFunc, NotInFragment, to_ratfunc,
 import primitives as P
 from tactics import core as Core
 from tactics import differentiation as Differentiation
+from tactics import equations as Equations
 from tactics import finite_operators as FiniteOperators
 from tactics import integration as Integration
 from tactics import limits as Limits
@@ -661,6 +662,60 @@ class TestFactor(unittest.TestCase):
         self.assertIn('neither side', r['error'])
 
 
+class TestQuadraticRoots(unittest.TestCase):
+    def test_expression_returns_complete_ordered_solution(self):
+        r = Equations.quadratic_roots('3x^2-3', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], r'x=-1 \lor x=1')
+        self.assertEqual(r['solutions'], ['-1', '1'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('Vieta', r['check']['method'])
+
+    def test_equality_moves_sides_before_finding_roots(self):
+        r = Equations.quadratic_roots('2x^2+5x=3', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['solutions'], ['-3', r'\frac{1}{2}'])
+
+    def test_repeated_root_is_one_solution(self):
+        r = Equations.quadratic_roots('x^2-6x+9', 'x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x=3')
+        self.assertEqual(r['solutions'], ['3'])
+
+    def test_unsupported_root_classes_refuse(self):
+        irrational = Equations.quadratic_roots('x^2-2', 'x')
+        self.assertFalse(irrational['ok'])
+        self.assertIn('not rational', irrational['error'])
+        complex_roots = Equations.quadratic_roots('x^2+x+1', 'x')
+        self.assertFalse(complex_roots['ok'])
+        self.assertIn('no real roots', complex_roots['error'])
+        linear = Equations.quadratic_roots('2x+1', 'x')
+        self.assertFalse(linear['ok'])
+        self.assertIn('not quadratic', linear['error'])
+
+    def test_coefficients_must_be_constant_and_relation_equality(self):
+        symbolic = Equations.quadratic_roots('ax^2+x+1', 'x')
+        self.assertFalse(symbolic['ok'])
+        self.assertIn('coefficients must be constants', symbolic['error'])
+        inequality = Equations.quadratic_roots('x^2-1 \\lt 0', 'x')
+        self.assertFalse(inequality['ok'])
+        self.assertIn('requires an equality', inequality['error'])
+
+    def test_independent_check_catches_bad_candidate(self):
+        check = Equations._quadratic_roots_check(
+            'x^2-1', 'x', ['-1', '2'])
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_solution_metadata_is_replay_checked(self):
+        ledger = Ledger()
+        ledger.record(Equations.quadratic_roots('x^2-1', 'x'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        ledger.steps[0]['solutions'][1] = '2'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('solution metadata', replay['reason'])
+
+
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = Core.expand('2 \\cdot x \\cdot (x+1)')
@@ -1183,6 +1238,13 @@ class TestGoalAwareLedger(unittest.TestCase):
         ledger = Ledger()
         with self.assertRaisesRegex(ValueError, 'top-level relation'):
             ledger.record_claim('x^2 + 1')
+
+    def test_equivalent_open_claim_is_reused(self):
+        ledger = Ledger()
+        first = ledger.record_claim('3x^{2}-3=0')
+        again = ledger.record_claim('3x^2-3=0')
+        self.assertEqual(again['id'], first['id'])
+        self.assertEqual(len(ledger.claims), 1)
 
     def test_goal_ownership_and_connectivity_are_enforced(self):
         ledger = Ledger()

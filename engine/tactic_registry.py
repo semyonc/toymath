@@ -12,6 +12,7 @@ from typing import Any, Callable
 import primitives
 from tactics import core
 from tactics import differentiation
+from tactics import equations
 from tactics import finite_operators
 from tactics import integration
 from tactics import limits
@@ -298,6 +299,10 @@ TACTICS = (
     TacticSpec('diff', 'differentiate', 'differentiation',
                'differentiate with respect to a variable',
                differentiation.differentiate, (E, V)),
+
+    TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',
+               'find every rational root of a quadratic expression or '
+               'equality', equations.quadratic_roots, (E, V)),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',

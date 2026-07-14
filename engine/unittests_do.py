@@ -92,7 +92,9 @@ class TestPromptBuilder(unittest.TestCase):
         # subject tactics are progressively loaded
         self.assertIn('factor_quadratic', p)
         self.assertIn('`integration`', p)
+        self.assertIn('`equations`', p)
         self.assertNotIn('integrate_by_parts EXPR', p)
+        self.assertIn('never for\n  an equation whose solutions', p)
         self.assertIn('mechanically checked', p)
 
     def test_missing_skill_falls_back(self):
@@ -188,6 +190,25 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertTrue(rec['ok'])
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertEqual(session.new_steps(), [])
+
+    def test_plain_do_claim_does_not_become_governing_proof(self):
+        session = DoSession()
+        claim = session.claim('x^2-1=0')
+        self.assertIsNone(session.proof_claim_id)
+        step = json.loads(make_api(session)['expand']('x^2-1'))
+        selected = json.loads(make_api(session)['set_result'](
+            step['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], 's1')
+        self.assertEqual(session.ledger.get_claim(claim['id'])['verdict'],
+                         'open')
+
+    def test_plain_do_reuses_equivalent_open_claim(self):
+        session = DoSession()
+        first = session.claim('3x^{2}-3=0')
+        again = session.claim('3x^2-3=0')
+        self.assertEqual(again['id'], first['id'])
+        self.assertEqual(len(session.ledger.claims), 1)
 
     def test_open_proof_rejects_unrelated_verified_value(self):
         session = DoSession()
@@ -431,6 +452,45 @@ LIM_SUM_SCRIPT = [
 
 
 class TestScriptedAgent(unittest.TestCase):
+    def test_derivative_roots_and_plot_finishes_with_solution_result(self):
+        shown = []
+        script = [
+            [tool_call('load_skill', {'skill': 'differentiation'}, 'sk1')],
+            [tool_call('diff', {'expr': 'x^3-3x', 'var': 'x'}, 'd1')],
+            [tool_call('load_skill', {'skill': 'roots'}, 'sk2')],
+            [tool_call('quadratic_roots', {
+                'expr': '3x^{2}-3', 'var': 'x'}, 'r1')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '-1'}, 'p1')],
+            [tool_call('evaluate', {
+                'expr': '(-1)^3-3(-1)'}, 'p2')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '1'}, 'p3')],
+            [tool_call('evaluate', {'expr': '(1)^3-3(1)'}, 'p4')],
+            [tool_call('plot', {
+                'code': 'import matplotlib.pyplot as plt; plt.plot([0])',
+                'caption': 'stationary points'}, 'plot1')],
+            [tool_call('set_result', {
+                'expr': r'x=-1 \lor x=1'}, 'done')],
+            [message('Mechanically checked the derivative and roots.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction(
+            'differentiate x^3-3x, find where the derivative is zero, '
+            'plot with those points marked',
+            model=ScriptedModel(script), ledger=ledger,
+            plot_backend=FakePlotBackend(),
+            on_plot=lambda caption, images: shown.append(caption))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_result'], r'x=-1 \lor x=1')
+        self.assertEqual(res['final_provenance']['step'], 's2')
+        self.assertEqual([step['op'] for step in res['steps']], [
+            'differentiate', 'quadratic_roots', 'substitute', 'evaluate',
+            'substitute', 'evaluate'])
+        self.assertTrue(res['steps'][1]['continues'])
+        self.assertEqual(shown, ['stationary points'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
     def test_ellipsis_series_limit_closes_via_sum_tactics(self):
         res = run_instruction('evaluate ' + LIM_SUM_EXPR,
                               model=ScriptedModel(LIM_SUM_SCRIPT))

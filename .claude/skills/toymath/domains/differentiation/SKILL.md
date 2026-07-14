@@ -17,3 +17,8 @@ treated as constants.
 For a derivative-only goal, call `diff`, inspect its check, then designate the
 returned result. For an identity involving a derivative, use core `equal` or a
 closed relation through `evaluate` as appropriate.
+
+If the task asks where the derivative vanishes, load the `equations` skill
+after `diff` and feed the derivative result verbatim to `quadratic_roots` when
+it is quadratic. Check graph-point coordinates through core substitution and
+evaluation before drawing an unverified plot.

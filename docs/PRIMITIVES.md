@@ -60,6 +60,7 @@ algebra/checking tactics. Subject workflows are separate:
 |---|---|
 | core | [main ToyMath skill](../.claude/skills/toymath/SKILL.md) |
 | differentiation | [differentiation](../.claude/skills/toymath/domains/differentiation/SKILL.md) |
+| equations | [equations and roots](../.claude/skills/toymath/domains/equations/SKILL.md) |
 | integration | [integration](../.claude/skills/toymath/domains/integration/SKILL.md) |
 | limits | [limits](../.claude/skills/toymath/domains/limits/SKILL.md) |
 | finite_operators | [finite sums/products](../.claude/skills/toymath/domains/finite_operators/SKILL.md) |
@@ -171,6 +172,8 @@ writer, comparer, and replicator landmines.
   intentionally narrow; floor and ceiling are not modeled.
 - Literal matrices have oracle support and scalar-linear algebra, but no
   general matrix multiplication/determinant tactic.
+- Quadratic root finding returns complete rational roots; irrational and
+  complex roots remain outside the executable equation tactics.
 - Infinite sums/products must be expressed through partial operators and
   limits; ellipsis and infinite bounds never become sampled ring variables.
 - Numeric oracle `skipped` means the checker lacks evidence. It must never be

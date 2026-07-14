@@ -65,11 +65,13 @@ It has a stable small surface:
 - `comment`, `claim`, `conclude`, and `set_result` manage the ledger/result;
 - `plot` appears only when the optional sandbox is available.
 
-Core algebra/checking guidance is always present. Differentiation,
+Core algebra/checking guidance is always present. Differentiation, equations,
 integration, limits, and finite-operator workflows are loaded only when the
-problem needs them. A derivation may load another skill when it crosses a
-subject boundary. This keeps the prompt and tool schemas bounded while the
-tactic library grows.
+problem needs them. The virtual loader accepts canonical subjects, bounded
+subject aliases, or an exact tactic name and resolves all of them through the
+static registry. A derivation may load another skill when it crosses a subject
+boundary. This keeps the prompt and tool schemas bounded while the tactic
+library grows.
 
 Each successful call streams a checked step such as:
 

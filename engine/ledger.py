@@ -160,6 +160,19 @@ class Ledger(object):
             raise ValueError('claim must be a top-level relation')
         if parent is not None and self.get_claim(parent) is None:
             raise ValueError(f'unknown parent claim {parent!r}')
+        # Repeating a formatting variant of the same open claim should focus
+        # the existing goal, not mint another notebook-global claim id.
+        for claim in self.claims:
+            if (claim.get('parent') == parent
+                    and claim.get('verdict') == 'open'):
+                try:
+                    same = (claim.get('statement') == statement
+                            or primitives.same_expression(
+                                claim.get('statement', ''), statement))
+                except (primitives.PrimitiveError, ValueError):
+                    same = False
+                if same:
+                    return claim
         claim = {
             'id': f'c{len(self.claims) + 1}',
             'hash': _claim_hash(statement, parent),
@@ -209,6 +222,8 @@ class Ledger(object):
             step['terms'] = result['terms']
         if result.get('sources'):
             step['sources'] = result['sources']
+        if result.get('solutions') is not None:
+            step['solutions'] = list(result['solutions'])
         if goal is not None:
             step['goal'] = goal
         self.steps.append(step)
@@ -368,6 +383,10 @@ class Ledger(object):
                             'reason': 'result mismatch',
                             'recorded': step['result'],
                             'replayed': res.get('result')}
+            if ('solutions' in step
+                    and res.get('solutions') != step['solutions']):
+                return {'status': 'failed', 'step': step['id'],
+                        'reason': 'solution metadata mismatch'}
             if res.get('check', {}).get('status') == 'disagree':
                 return {'status': 'failed', 'step': step['id'],
                         'reason': 'numeric oracle disagrees on replay'}

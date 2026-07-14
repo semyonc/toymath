@@ -72,6 +72,9 @@ _DO_RULES = """
 - If a tactic refuses or its check disagrees, change strategy. Never present
   an unverified result as the answer.
 - Confirm equation candidates with substitute plus evaluate when cheap.
+- Use `claim` only for a relation you intend to establish as true, never for
+  an equation whose solutions you are seeking. Ordinary calculations and
+  root-finding should stay as tactic steps followed by `set_result`.
 - Use comment only for short strategy/branch annotations in plain text. Notes
   are unverified prose, never steps or results; do not put scratch work there.
 """
@@ -193,7 +196,10 @@ class DoSession(object):
         with self._lock:
             claim = self.ledger.record_claim(statement, parent=parent)
             self.current_goal = claim['id']
-            if root or (parent is None and self.proof_claim_id is None):
+            # Only the harness-created prove! claim governs final output.
+            # A plain do! subclaim may remain open without converting the
+            # whole calculation into prove mode.
+            if root:
                 self.proof_claim_id = claim['id']
         return claim
 
@@ -289,16 +295,20 @@ def make_api(session):
         """Load one subject tactic skill before using its tactics.
 
         Args:
-            skill: skill name from the available-skills catalog.
+            skill: catalog subject, common subject alias, or exact tactic
+                name whose owning subject should be loaded.
         """
-        if skill in session.loaded_skills:
-            return f'Skill {skill!r} is already loaded.'
         try:
-            content = tactic_skills.render(skill)
+            subject = tactic_skills.resolve(skill)
+            content = tactic_skills.render(subject)
         except ValueError as exc:
             return f'Cannot load skill: {exc}'
-        session.loaded_skills.add(skill)
-        return f'Loaded skill {skill!r}.\n\n{content}'
+        if subject in session.loaded_skills:
+            return f'Skill {subject!r} is already loaded.'
+        session.loaded_skills.add(subject)
+        routed = ('' if subject == skill
+                  else f' (resolved from {skill!r})')
+        return f'Loaded skill {subject!r}{routed}.\n\n{content}'
 
     def run_tactic(tactic: str, arguments: list[str]) -> str:
         """Run one tactic from a loaded skill and return its checked record.
@@ -327,10 +337,10 @@ def make_api(session):
         return json.dumps(reply, ensure_ascii=False)
 
     def claim(statement: str, parent: str = '') -> str:
-        """Record and focus a parseable mathematical subclaim.
+        """Record and focus a relation that will be established as true.
 
         Args:
-            statement: LaTeX statement of the subclaim.
+            statement: LaTeX proposition, not an equation merely to solve.
             parent: parent claim id, or empty for none.
         """
         try:

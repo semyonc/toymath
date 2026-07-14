@@ -36,6 +36,8 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
 - Use `substitute` plus `evaluate` to check candidate solutions.
 - Use `rewrite` only with a registered lemma; use `lemmas` to discover names.
 - Use the two named factoring tactics instead of asking for a general factor.
+- Load the `equations` skill when a workflow needs a complete rational root
+  result for a quadratic; candidate checks alone are not a solution record.
 - Use `equal` for a query; `unknown` is not verification.
 - There is deliberately no `solve`, `simplify`, or general `factor` tactic.
 

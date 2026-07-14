@@ -17,6 +17,7 @@ class TestTacticRegistry(unittest.TestCase):
         expected = {
             'core': 'tactics.core',
             'differentiation': 'tactics.differentiation',
+            'equations': 'tactics.equations',
             'integration': 'tactics.integration',
             'limits': 'tactics.limits',
             'finite_operators': 'tactics.finite_operators',
@@ -59,6 +60,28 @@ class TestTacticRegistry(unittest.TestCase):
             'limit_table', [r'\lim_{n \to \infty} \frac{1}{n}'], session)
         self.assertTrue(accepted['ok'], accepted.get('error'))
 
+    def test_virtual_loader_resolves_subject_alias_and_tactic_owner(self):
+        session = agent_do.DoSession()
+        api = agent_do.make_api(session)
+        by_subject = api['load_skill']('roots')
+        self.assertIn("Loaded skill 'equations'", by_subject)
+        self.assertIn("resolved from 'roots'", by_subject)
+        self.assertIn('quadratic_roots EXPR VAR', by_subject)
+        self.assertIn('equations', session.loaded_skills)
+
+        another = agent_do.DoSession()
+        by_tactic = agent_do.make_api(another)['load_skill'](
+            'quadratic_roots')
+        self.assertIn("Loaded skill 'equations'", by_tactic)
+        self.assertIn('equations', another.loaded_skills)
+
+    def test_virtual_loader_unknown_subject_lists_canonical_choices(self):
+        reply = agent_do.make_api(agent_do.DoSession())['load_skill'](
+            'mystery mathematics')
+        self.assertIn('Cannot load skill', reply)
+        self.assertIn('available subjects', reply)
+        self.assertIn('equations', reply)
+
     def test_runtime_tool_surface_is_constant_and_small(self):
         tools = agent_do.make_tools(agent_do.DoSession())
         self.assertEqual([tool.name for tool in tools], [
@@ -79,6 +102,9 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('limit_squeeze EXPR LOWER UPPER LOWER_STEP UPPER_STEP',
                       limits)
         self.assertNotIn('integrate_by_parts EXPR', limits)
+        equations = tactic_skills.render('equations')
+        self.assertIn('quadratic_roots EXPR VAR', equations)
+        self.assertNotIn('diff EXPR VAR', equations)
 
     def test_existing_cli_shapes_are_preserved(self):
         parser = toymath_cli.build_parser()
@@ -92,6 +118,9 @@ class TestTacticRegistry(unittest.TestCase):
         assemble = parser.parse_args([
             'limit_assemble', 'L', '1', '0'])
         self.assertEqual(assemble.values, ['1', '0'])
+        roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
+        self.assertEqual((roots.cmd, roots.expr, roots.var),
+                         ('quadratic_roots', 'x^2-1', 'x'))
 
 
 if __name__ == '__main__':

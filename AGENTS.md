@@ -27,7 +27,7 @@ Two layers coexist:
 | File | Purpose |
 |------|---------|
 | `engine/primitives.py` | Shared parse/write, binder/substitution, result-record, and independent numeric-oracle infrastructure |
-| `engine/tactics/*.py` | Static tactic implementations grouped by owning skill (`core`, differentiation, integration, limits, finite operators) |
+| `engine/tactics/*.py` | Static tactic implementations grouped by owning skill (`core`, differentiation, equations, integration, limits, finite operators) |
 | `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
 | `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
