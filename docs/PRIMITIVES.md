@@ -38,7 +38,8 @@ graphs, then render a new LaTeX result.
 
 | Module | Responsibility |
 |---|---|
-| `engine/primitives.py` | Symbolic implementations, parsing/writing helpers, equality checker, and independent numeric oracle |
+| `engine/primitives.py` | Shared parsing/writing, binder/substitution, result-record, and independent numeric-oracle infrastructure |
+| `engine/tactics/*.py` | Static tactic implementations grouped by the same core/subject ownership used by the registry and skills |
 | `engine/tactic_registry.py` | Single allowlist for public names, ledger operations, ordered arguments, skill ownership, CLI generation, agent invocation, replay, and source-provenance validation |
 | `engine/tactic_skills.py` | Discovers committed domain skills and appends exact registry-generated tactic interfaces when loaded |
 | `engine/ledger.py` | Persists steps/claims, checks chain continuity, renders, and delegates replay to the registry |
@@ -179,8 +180,9 @@ writer, comparer, and replicator landmines.
 
 The extension workflow is intentionally centralized:
 
-1. Implement the narrow primitive and its independent check in
-   `engine/primitives.py`.
+1. Implement the narrow tactic and its independent check in the owning
+   module under `engine/tactics/`. Put only genuinely cross-domain
+   infrastructure in `engine/primitives.py`.
 2. Add one `TacticSpec` in `engine/tactic_registry.py` with public name,
    stable ledger `op`, owning skill, arguments, summary, callable, and whether
    it transforms.

@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import primitives
+from tactics import core
+from tactics import differentiation
+from tactics import finite_operators
+from tactics import integration
+from tactics import limits
 
 
 _MISSING = object()
@@ -104,7 +109,7 @@ def _integrate_assemble_from_steps(context, args):
             return _error('integrate_assemble',
                           f'unknown transforming step {source_id!r}')
         values.append(source['result'])
-    result = primitives.integrate_assemble(
+    result = integration.integrate_assemble(
         linearity['input'], linearity['args']['var'], values)
     if result.get('ok'):
         result['sources'] = {
@@ -133,7 +138,7 @@ def _limit_assemble_from_steps(context, args):
             return _error('limit_assemble',
                           f'unknown transforming step {source_id!r}')
         values.append(source['result'])
-    result = primitives.limit_assemble(linearity['input'], values)
+    result = limits.limit_assemble(linearity['input'], values)
     if result.get('ok'):
         result['sources'] = {
             'linearity': linearity_id,
@@ -156,7 +161,7 @@ def _limit_squeeze_from_steps(context, args):
             return _error('limit_squeeze',
                           f'unknown transforming step {source_id!r}')
         try:
-            expected = primitives.limit_with_body(args['expr'], bound)
+            expected = limits.limit_with_body(args['expr'], bound)
         except primitives.PrimitiveError as exc:
             return _error('limit_squeeze', str(exc))
         if not primitives.same_expression(source.get('input') or '',
@@ -168,13 +173,13 @@ def _limit_squeeze_from_steps(context, args):
         resolved.append(source['result'])
     low_value, up_value = resolved
     if not primitives.same_expression(low_value, up_value):
-        equal = primitives.equal_exprs(low_value, up_value)
+        equal = core.equal_exprs(low_value, up_value)
         if not (equal.get('ok') and equal.get('verdict') == 'yes'):
             return _error(
                 'limit_squeeze',
                 'the recorded bound limits are not the same value: '
                 f'{low_value!r} vs {up_value!r}')
-    result = primitives.limit_squeeze(
+    result = limits.limit_squeeze(
         args['expr'], args['lower'], args['upper'], low_value)
     if result.get('ok'):
         result['sources'] = {
@@ -231,7 +236,7 @@ def _validate_limit_squeeze(step, seen):
         if source is None or source.get('result') is None:
             return f'missing {tag}-bound provenance'
         try:
-            expected = primitives.limit_with_body(
+            expected = limits.limit_with_body(
                 args.get('expr', ''), args.get(tag, ''))
         except primitives.PrimitiveError:
             return f'malformed {tag}-bound limit'
@@ -251,79 +256,79 @@ V = _arg('var', 'VAR', 'variable name')
 TACTICS = (
     TacticSpec('substitute', 'substitute', 'core',
                'replace a free variable with a LaTeX value',
-               primitives.substitute,
+               core.substitute,
                (E, V, _arg('value', 'VALUE', 'replacement value'))),
     TacticSpec('apply', 'apply_both_sides', 'core',
                'apply +, -, *, /, or ^ to both sides of a relation',
-               primitives.apply_both_sides,
+               core.apply_both_sides,
                (_arg('equation', 'EQUATION', 'LaTeX relation'),
                 _arg('op', 'OP', 'operation',
                      choices=('+', '-', '*', '/', '^')),
                 _arg('arg', 'ARG', 'operand'))),
     TacticSpec('expand', 'expand', 'core',
                'canonicalize rational algebra and combine opaque atoms',
-               primitives.expand, (E,)),
+               core.expand, (E,)),
     TacticSpec('collect', 'collect', 'core',
                'group an expression by powers of a variable',
-               primitives.collect, (E, V)),
+               core.collect, (E, V)),
     TacticSpec('evaluate', 'evaluate', 'core',
                'evaluate closed arithmetic or a closed relation',
-               primitives.evaluate, (E,)),
+               core.evaluate, (E,)),
     TacticSpec('rewrite', 'rewrite', 'core',
-               'apply a registered equality lemma', primitives.rewrite,
+               'apply a registered equality lemma', core.rewrite,
                (E, _arg('lemma', 'LEMMA', 'registered lemma name'),
                 _arg('direction', 'DIRECTION', 'rewrite direction',
                      choices=('forward', 'backward'), default='forward',
                      option='--direction'))),
     TacticSpec('factor_gcd', 'factor_gcd', 'core',
-               'pull out a common factor', primitives.factor_gcd, (E,)),
+               'pull out a common factor', core.factor_gcd, (E,)),
     TacticSpec('factor_quadratic', 'factor_quadratic', 'core',
                'factor a quadratic with rational roots',
-               primitives.factor_quadratic, (E, V)),
+               core.factor_quadratic, (E, V)),
     TacticSpec('equal', 'equal', 'core',
                'check whether two expressions are equal',
-               primitives.equal_exprs,
+               core.equal_exprs,
                (_arg('expr1', 'EXPR1', 'first expression'),
                 _arg('expr2', 'EXPR2', 'second expression')),
                transforming=False),
     TacticSpec('lemmas', 'lemmas', 'core',
-               'list registered rewrite lemmas', primitives.list_lemmas,
+               'list registered rewrite lemmas', core.list_lemmas,
                transforming=False),
 
     TacticSpec('diff', 'differentiate', 'differentiation',
                'differentiate with respect to a variable',
-               primitives.differentiate, (E, V)),
+               differentiation.differentiate, (E, V)),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',
-               primitives.integrate_power_rule, (E, V)),
+               integration.integrate_power_rule, (E, V)),
     TacticSpec('integrate_table', 'integrate_table', 'integration',
                'apply a basic antiderivative table rule',
-               primitives.integrate_table, (E, V)),
+               integration.integrate_table, (E, V)),
     TacticSpec('integrate_by_parts', 'integrate_by_parts', 'integration',
                'apply one checked integration-by-parts split',
-               primitives.integrate_by_parts,
+               integration.integrate_by_parts,
                (E, V, _arg('u', 'U', 'chosen u'),
                 _arg('dv', 'DV', 'chosen dv'))),
     TacticSpec('integrate_substitute', 'integrate_substitute',
                'integration', 'apply a checked u-substitution',
-               primitives.integrate_substitute,
+               integration.integrate_substitute,
                (E, V, _arg('u_expr', 'U_EXPR', 'u as an expression'),
                 _arg('u_var', 'U_VAR', 'new variable name'),
                 _arg('new_integrand', 'NEW_INTEGRAND',
                      'integrand expressed in the new variable'))),
     TacticSpec('integrate_rewrite', 'integrate_rewrite', 'integration',
                'replace an integrand by a mechanically equal proposal',
-               primitives.integrate_rewrite,
+               integration.integrate_rewrite,
                (E, V, _arg('new_integrand', 'NEW_INTEGRAND',
                            'proposed equal integrand'))),
     TacticSpec('integrate_linearity', 'integrate_linearity', 'integration',
                'split an integral over a top-level sum',
-               primitives.integrate_linearity, (E, V)),
+               integration.integrate_linearity, (E, V)),
     TacticSpec(
         'integrate_assemble', 'integrate_assemble', 'integration',
         'assemble recorded antiderivative pieces with provenance',
-        primitives.integrate_assemble,
+        integration.integrate_assemble,
         (E, V, _arg('antiderivatives', 'ANTIDERIVATIVES',
                     'recorded antiderivative values', nargs='+')),
         agent_arguments=(
@@ -342,24 +347,24 @@ TACTICS = (
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',
-               primitives.limit_rewrite,
+               limits.limit_rewrite,
                (E, _arg('new_body', 'NEW_BODY', 'proposed equal body'))),
     TacticSpec('limit_substitute', 'limit_substitute', 'limits',
                'evaluate a finite limit by continuity substitution',
-               primitives.limit_substitute, (E,)),
+               limits.limit_substitute, (E,)),
     TacticSpec('limit_linearity', 'limit_linearity', 'limits',
                'split a limit over a top-level sum',
-               primitives.limit_linearity, (E,)),
+               limits.limit_linearity, (E,)),
     TacticSpec('limit_table', 'limit_table', 'limits',
-               'apply a named standard limit rule', primitives.limit_table,
+               'apply a named standard limit rule', limits.limit_table,
                (E,)),
     TacticSpec('limit_lhopital', 'limit_lhopital', 'limits',
                "apply one checked l'Hopital step",
-               primitives.limit_lhopital, (E,)),
+               limits.limit_lhopital, (E,)),
     TacticSpec(
         'limit_assemble', 'limit_assemble', 'limits',
         'assemble recorded limit pieces with provenance',
-        primitives.limit_assemble,
+        limits.limit_assemble,
         (E, _arg('values', 'VALUE', 'ordered piece values', nargs='+')),
         agent_arguments=(
             _arg('linearity_step', 'LINEARITY_STEP',
@@ -370,7 +375,7 @@ TACTICS = (
     TacticSpec(
         'limit_squeeze', 'limit_squeeze', 'limits',
         'close a limit between two recorded bounds with one value',
-        primitives.limit_squeeze,
+        limits.limit_squeeze,
         (E, _arg('lower', 'LOWER', 'lower-bound body'),
          _arg('upper', 'UPPER', 'upper-bound body'),
          _arg('value', 'VALUE', 'common bound-limit value')),
@@ -385,22 +390,22 @@ TACTICS = (
     TacticSpec('sum_from_ellipsis', 'sum_from_ellipsis',
                'finite_operators',
                'interpret an ellipsis sum as an explicit finite sum',
-               primitives.sum_from_ellipsis,
+               finite_operators.sum_from_ellipsis,
                (E, _arg('sum_form', 'SUM_FORM', 'proposed finite sum'))),
     TacticSpec('prod_from_ellipsis', 'prod_from_ellipsis',
                'finite_operators',
                'interpret an ellipsis product as an explicit finite product',
-               primitives.prod_from_ellipsis,
+               finite_operators.prod_from_ellipsis,
                (E, _arg('prod_form', 'PROD_FORM',
                         'proposed finite product'))),
     TacticSpec('sum_rewrite', 'sum_rewrite', 'finite_operators',
                'replace a summand by a mechanically equal proposal',
-               primitives.sum_rewrite,
+               finite_operators.sum_rewrite,
                (E, _arg('new_summand', 'NEW_SUMMAND',
                         'proposed equal summand'))),
     TacticSpec('sum_telescope', 'sum_telescope', 'finite_operators',
                'collapse a checked telescoping finite sum',
-               primitives.sum_telescope,
+               finite_operators.sum_telescope,
                (E, _arg('term', 'TERM', 'proposed telescoping f(k)'))),
 )
 

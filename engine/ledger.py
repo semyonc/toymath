@@ -15,6 +15,7 @@ import os
 import hashlib
 
 from tactic_registry import TRANSFORMING_OPS
+from tactics import core as core_tactics
 
 LEDGER_VERSION = 2
 
@@ -60,7 +61,7 @@ def _eq_yes(left, right):
     except Exception:
         pass
     try:
-        rec = primitives.equal_exprs(left, right)
+        rec = core_tactics.equal_exprs(left, right)
     except Exception:
         return False
     return rec.get('ok') and rec.get('verdict') == 'yes'
@@ -84,14 +85,13 @@ def _relation_parts(statement):
 
 def _relation_holds(statement):
     """Mechanically decide a relation endpoint when possible."""
-    import primitives
     parts = _relation_parts(statement)
     if parts is None:
         return False
     lhs, rhs, relation = parts
     if relation == '=':
         return _eq_yes(lhs, rhs)
-    rec = primitives.evaluate(statement)
+    rec = core_tactics.evaluate(statement)
     return rec.get('ok') and rec.get('holds') is True
 
 
@@ -185,8 +185,7 @@ class Ledger(object):
             if prev == cur:
                 continues = True
             else:
-                import primitives
-                eq = primitives.equal_exprs(prev, cur)
+                eq = core_tactics.equal_exprs(prev, cur)
                 continues = (eq.get('verdict') == 'yes'
                              if eq.get('ok') else None)
         step = {
@@ -362,8 +361,8 @@ class Ledger(object):
             if res.get('result') != step['result']:
                 # tolerate formatting drift between versions, but only if
                 # the results are semantically equal
-                eq = primitives.equal_exprs(res.get('result'),
-                                            step['result'])
+                eq = core_tactics.equal_exprs(res.get('result'),
+                                              step['result'])
                 if not (eq.get('ok') and eq.get('verdict') == 'yes'):
                     return {'status': 'failed', 'step': step['id'],
                             'reason': 'result mismatch',

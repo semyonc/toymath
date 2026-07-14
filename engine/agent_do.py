@@ -21,6 +21,7 @@ import threading
 import primitives
 import tactic_registry
 import tactic_skills
+from tactics import core as core_tactics
 from ledger import Ledger, TRANSFORMING_OPS
 
 try:
@@ -251,7 +252,7 @@ class DoSession(object):
                     'step': step['id'], 'method': 'exact-result',
                 }
             try:
-                eq = primitives.equal_exprs(expr, established)
+                eq = core_tactics.equal_exprs(expr, established)
             except Exception:
                 continue
             if eq.get('ok') and eq.get('verdict') == 'yes':
@@ -270,7 +271,7 @@ class DoSession(object):
 
 def _equivalent(left, right):
     try:
-        rec = primitives.equal_exprs(left, right)
+        rec = core_tactics.equal_exprs(left, right)
     except Exception:
         return False
     return rec.get('ok') and rec.get('verdict') == 'yes'

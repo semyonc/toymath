@@ -5,6 +5,7 @@ import json
 import unittest
 
 import agent_do
+import primitives
 import tactic_registry
 import tactic_skills
 import toymath_cli
@@ -12,6 +13,18 @@ from ledger import TRANSFORMING_OPS
 
 
 class TestTacticRegistry(unittest.TestCase):
+    def test_tactics_live_in_their_static_subject_modules(self):
+        expected = {
+            'core': 'tactics.core',
+            'differentiation': 'tactics.differentiation',
+            'integration': 'tactics.integration',
+            'limits': 'tactics.limits',
+            'finite_operators': 'tactics.finite_operators',
+        }
+        for spec in tactic_registry.TACTICS:
+            self.assertEqual(spec.function.__module__, expected[spec.skill])
+            self.assertFalse(hasattr(primitives, spec.function.__name__))
+
     def test_registry_is_unique_and_every_skill_exists(self):
         self.assertEqual(len(tactic_registry.BY_NAME),
                          len(tactic_registry.TACTICS))

@@ -14,6 +14,8 @@ from unittest import mock
 import agent_do
 import plot_sandbox
 import tactic_registry
+from tactics import core as core_tactics
+from tactics import integration as integration_tactics
 from agent_do import DoSession, make_api, run_instruction
 from ledger import Ledger
 
@@ -1092,9 +1094,8 @@ class TestExprComposite(unittest.TestCase):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
         self.assertEqual(len(calls), 1)          # int! only; diff! is direct
         self.assertTrue(calls[0].startswith('Apply symbolic integration'))
-        import primitives
         chained = self.shell.resolve_backrefs('[[1]]')
-        self.assertEqual(primitives.equal_exprs(chained, 'x^3')['verdict'],
+        self.assertEqual(core_tactics.equal_exprs(chained, 'x^3')['verdict'],
                          'yes')
         # ledger: the direct differentiate step + the oracle-checked glue
         ops = [s['op'] for s in self.shell.ledger.steps]
@@ -1202,9 +1203,8 @@ class TestExprComposite(unittest.TestCase):
         # and the whole cell costs zero agent calls
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('{diff! [[1]]}', 2, add_to_history=True)
-        import primitives
         chained = self.shell.resolve_backrefs('[[2]]')
-        self.assertEqual(primitives.equal_exprs(chained, '3x^2')['verdict'],
+        self.assertEqual(core_tactics.equal_exprs(chained, '3x^2')['verdict'],
                          'yes')
 
     def test_agent_failure_surfaces(self):
@@ -1281,8 +1281,7 @@ class TestExprComposite(unittest.TestCase):
         self.assertEqual(ops, ['sum_from_ellipsis', 'sum_telescope',
                                'limit_table', 'expand'])
         chained = self.shell.resolve_backrefs('[[1]]')
-        import primitives
-        self.assertEqual(primitives.equal_exprs(chained, '1')['verdict'],
+        self.assertEqual(core_tactics.equal_exprs(chained, '1')['verdict'],
                          'yes')
         # the pattern-continuation assumption is surfaced on the cell
         self.assertIn('continues the pattern', html)
@@ -1400,8 +1399,8 @@ class TestDirectCommands(unittest.TestCase):
     def test_ledger_constant_breaks_inference_tie(self):
         # an antiderivative chained via [[n]] carries its minted C into a
         # later cell; the ledger's constant provenance disambiguates
-        import primitives
-        self.shell.ledger.record(primitives.integrate_power_rule('x^2', 'x'))
+        self.shell.ledger.record(
+            integration_tactics.integrate_power_rule('x^2', 'x'))
         self.assertEqual(self.shell.ledger.steps[0].get('constant'), 'C')
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('diff! \\frac{x^{3}}{3} + C', 2,
@@ -1465,7 +1464,7 @@ class TestDirectCommands(unittest.TestCase):
                                        _never)
         root = r(sym)
         from LatexWriter import LaTexWriter
-        rec = primitives.expand(LaTexWriter(out)(root))
+        rec = core_tactics.expand(LaTexWriter(out)(root))
         self.assertEqual(rec['result'].replace(' ', ''), '1025')
 
     def test_unknown_direct_primitive_rejected_at_parse(self):

@@ -26,7 +26,8 @@ Two layers coexist:
 
 | File | Purpose |
 |------|---------|
-| `engine/primitives.py` | The primitives + `equal_exprs` checker + numeric oracle |
+| `engine/primitives.py` | Shared parse/write, binder/substitution, result-record, and independent numeric-oracle infrastructure |
+| `engine/tactics/*.py` | Static tactic implementations grouped by owning skill (`core`, differentiation, integration, limits, finite operators) |
 | `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
 | `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
@@ -95,8 +96,10 @@ stay constant as subject coverage grows.
 
 For a new tactic:
 
-1. Implement the narrow transformation in `engine/primitives.py`, with the
-   standard result record and an independent oracle check (or `exact`).
+1. Implement the narrow transformation in its owning module under
+   `engine/tactics/`, with the standard result record and an independent
+   oracle check (or `exact`). Put only genuinely cross-domain infrastructure
+   in `engine/primitives.py`.
 2. Add one `TacticSpec` to `engine/tactic_registry.py`: stable public name,
    stable ledger `op`, owning skill, ordered arguments, summary, and callable.
    The registry automatically supplies CLI parsing/dispatch, transforming-op

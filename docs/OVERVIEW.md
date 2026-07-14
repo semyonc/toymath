@@ -196,7 +196,8 @@ TOYMATH_PLOT_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 ## Repository map
 
 ```text
-engine/primitives.py       symbolic transformations and numeric oracle
+engine/primitives.py       shared notation infrastructure and numeric oracle
+engine/tactics/*.py        static tactic implementations by subject skill
 engine/tactic_registry.py  authoritative tactic schemas and dispatch
 engine/tactic_skills.py    progressive SKILL.md discovery/rendering
 engine/ledger.py           record, render, claim closure, and replay

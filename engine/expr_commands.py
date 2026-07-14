@@ -31,6 +31,7 @@ whole-cell derivation (solve!).
 from LatexWriter import LaTexWriter
 from notation import Notation, Symbol
 from replicator import Replicator
+import tactic_registry
 
 
 class ExprCommandError(Exception):
@@ -38,13 +39,12 @@ class ExprCommandError(Exception):
     failed/empty agent sub-run. Surfaced to the cell as a do! error."""
 
 
-def _direct(primitive, needs_var=False):
+def _direct(tactic, needs_var=False):
     """Adapter for one primitive as a direct command. `needs_var` primitives
     take (expr, var); the variable is inferred by the resolver (single plain
     free variable, minted constants excluded), never guessed."""
     def run(arg_latex, var):
-        import primitives
-        fn = getattr(primitives, primitive)
+        fn = tactic_registry.describe(tactic).function
         if needs_var:
             return fn(arg_latex, var)
         return fn(arg_latex)
@@ -58,7 +58,7 @@ def _direct(primitive, needs_var=False):
 DIRECT_PRIMITIVES = {
     'expand': _direct('expand'),
     'collect': _direct('collect', needs_var=True),
-    'differentiate': _direct('differentiate', needs_var=True),
+    'differentiate': _direct('diff', needs_var=True),
     'factor_gcd': _direct('factor_gcd'),
     'factor_quadratic': _direct('factor_quadratic', needs_var=True),
     'evaluate': _direct('evaluate'),

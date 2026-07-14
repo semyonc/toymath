@@ -374,7 +374,8 @@ class MathShell(object):
 
         composite = LaTexWriter(resolver.output_notation)(root)
         # verified glue: the numeric oracle proves the composition
-        rec = primitives.expand(composite)
+        from tactics import core as core_tactics
+        rec = core_tactics.expand(composite)
         assumptions = []
         for run in resolver.subruns:
             for a in run.get('assumptions', []):
