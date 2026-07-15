@@ -697,15 +697,32 @@ class TestScriptedAgent(unittest.TestCase):
 FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
 
 
+FAKE_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>'
+
+
 class FakePlotBackend(object):
     name = 'fake'
 
     def __init__(self, result=None):
         self.calls = []
+        # the default deliberately speaks the older images-only dialect,
+        # so the typed-figure fallback stays covered
         self.result = result or {'ok': True, 'stdout': 'drew it\n',
                                  'stderr': '', 'images': [FAKE_PNG_B64]}
 
     def run_plot(self, code, timeout=None):
+        self.calls.append(code)
+        return dict(self.result)
+
+
+class FakeTikzBackend(object):
+    name = 'fake-tikz'
+
+    def __init__(self, result=None):
+        self.calls = []
+        self.result = result or {'ok': True, 'svg': FAKE_SVG}
+
+    def render(self, code, timeout=None):
         self.calls.append(code)
         return dict(self.result)
 
@@ -724,19 +741,37 @@ class TestPlotTool(unittest.TestCase):
         shown = []
         backend = FakePlotBackend()
         session = DoSession(plot_backend=backend,
-                            on_plot=lambda cap, imgs: shown.append(
-                                (cap, imgs)))
+                            on_plot=lambda cap, figs: shown.append(
+                                (cap, figs)))
         api = make_api(session)
         reply = json.loads(api['plot']('plt.plot([1])', 'a parabola'))
         # the model sees counts and stdout, never image bytes
         self.assertTrue(reply['ok'])
         self.assertEqual(reply['plots'], 1)
         self.assertNotIn(FAKE_PNG_B64[:24], json.dumps(reply))
-        # the user sees the figure with its caption
+        # the user sees the figure with its caption; an images-only
+        # backend is adapted up into the typed shape
         self.assertEqual(shown[0][0], 'a parabola')
-        self.assertEqual(shown[0][1], [FAKE_PNG_B64])
+        self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
+
+    def test_plot_streams_typed_figures(self):
+        shown = []
+        backend = FakePlotBackend({
+            'ok': True, 'stdout': '', 'stderr': '',
+            'figures': [{'kind': 'html', 'data': '<html>fig</html>',
+                         'height': 400}]})
+        session = DoSession(plot_backend=backend,
+                            on_plot=lambda cap, figs: shown.append(figs))
+        reply = json.loads(make_api(session)['plot']('fig = go.Figure()',
+                                                     'interactive'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['plots'], 1)
+        self.assertEqual(shown[0][0]['kind'], 'html')
+        self.assertEqual(shown[0][0]['height'], 400)
+        # figure bytes never reach the model
+        self.assertNotIn('<html>', json.dumps(reply))
 
     def test_plot_failure_reported_in_band(self):
         backend = FakePlotBackend({'ok': False, 'images': [],
@@ -773,6 +808,7 @@ class TestPlotTool(unittest.TestCase):
     def test_get_backend_off(self):
         with mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'off'}):
             self.assertIsNone(plot_sandbox.get_backend())
+            self.assertIsNone(plot_sandbox.get_tikz_backend())
 
     def test_parse_runner_output(self):
         good = plot_sandbox._parse_runner_output(
@@ -781,6 +817,53 @@ class TestPlotTool(unittest.TestCase):
         bad = plot_sandbox._parse_runner_output('garbage only', 'boom')
         self.assertFalse(bad['ok'])
         self.assertIn('boom', bad['stderr'])
+
+    def test_child_env_scrubs_secrets(self):
+        with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-secret',
+                                          'AWS_SECRET_ACCESS_KEY': 'nope',
+                                          'PATH': '/usr/bin'}):
+            env = plot_sandbox._child_env()
+        self.assertNotIn('OPEN_ROUTER', env)
+        self.assertNotIn('AWS_SECRET_ACCESS_KEY', env)
+        self.assertEqual(env['PATH'], '/usr/bin')
+
+
+class TestTikzTool(unittest.TestCase):
+    def test_registered_only_with_backend(self):
+        self.assertNotIn('tikz', make_api(DoSession()))
+        session = DoSession(tikz_backend=FakeTikzBackend())
+        self.assertIn('tikz', make_api(session))
+
+    def test_prompt_mentions_tikz_only_when_available(self):
+        self.assertNotIn('## TikZ', agent_do.build_prompt())
+        self.assertIn('## TikZ', agent_do.build_prompt(tikz=True))
+
+    def test_tikz_streams_svg_not_tokens(self):
+        shown = []
+        session = DoSession(tikz_backend=FakeTikzBackend(),
+                            on_plot=lambda cap, figs: shown.append(
+                                (cap, figs)))
+        reply = json.loads(make_api(session)['tikz'](
+            r'\begin{document}\end{document}', 'a diagram'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['plots'], 1)
+        self.assertNotIn('<svg', json.dumps(reply))
+        self.assertEqual(shown[0][0], 'a diagram')
+        self.assertEqual(shown[0][1], [{'kind': 'svg', 'data': FAKE_SVG}])
+        # illustrations are never evidence
+        self.assertEqual(session.new_steps(), [])
+
+    def test_tikz_failure_returns_tex_log(self):
+        backend = FakeTikzBackend({
+            'ok': False,
+            'error': 'TikZ render failed: TeX engine render failed.\n'
+                     'TeX log:\n! Undefined control sequence.\n'
+                     'l.4 \\draw (0,0) circle (\\nosuchmacro)'})
+        session = DoSession(tikz_backend=backend)
+        reply = json.loads(make_api(session)['tikz']('bad', 'cap'))
+        self.assertFalse(reply['ok'])
+        # the agent can only fix its source if the TeX error survives
+        self.assertIn('Undefined control sequence', reply['error'])
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_PLOT_TESTS') == '1',
@@ -807,6 +890,97 @@ class TestLivePlotSandbox(unittest.TestCase):
             self.assertFalse(r['ok'])
             self.assertTrue('NotCapable' in (r.get('error') or '')
                             or 'PermissionDenied' in (r.get('error') or ''))
+
+    def test_submodule_import_of_uninstalled_package(self):
+        """find_imports reports 'seaborn.objects' alongside 'seaborn', and
+        find_spec raises on the dotted name while the parent is absent.
+        That used to kill the sandbox before the user code ever ran."""
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'import seaborn.objects as so\nimport matplotlib.pyplot as plt\n'
+            'plt.plot([1, 2])\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual([f['kind'] for f in r['figures']], ['png'])
+
+    def test_bundled_submodule_still_resolves(self):
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'from scipy.integrate import quad\n'
+            'import matplotlib.pyplot as plt\n'
+            'v, _ = quad(lambda t: t**2, 0, 3)\nprint(round(v, 6))\n'
+            'plt.plot([0, v])\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('9.0', r['stdout'])
+
+    def test_plotly_figure_becomes_html(self):
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'import plotly.graph_objects as go\n'
+            'fig = go.Figure(data=[go.Scatter(x=[1, 2], y=[1, 4])])\n'
+            'fig.update_layout(height=400)\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual([f['kind'] for f in r['figures']], ['html'])
+        self.assertEqual(r['images'], [])  # plotly cannot rasterise here
+        self.assertEqual(r['figures'][0]['height'], 440)
+
+
+@unittest.skipUnless(os.environ.get('TOYMATH_PLOT_TESTS') == '1',
+                     'set TOYMATH_PLOT_TESTS=1 for a live deno/tikzjax '
+                     'test')
+class TestLiveTikzSandbox(unittest.TestCase):
+    def test_tikz_renders_self_contained_svg(self):
+        backend = plot_sandbox.get_tikz_backend()
+        self.assertIsNotNone(backend, 'deno not available')
+        r = backend.render(
+            r'\usepackage{pgfplots}'
+            '\n\\begin{document}\n\\begin{tikzpicture}\n'
+            r'\begin{axis}[width=6cm]\addplot[domain=-2:2]{x^2};\end{axis}'
+            '\n\\end{tikzpicture}\n\\end{document}')
+        self.assertTrue(r['ok'], r.get('error'))
+        svg = r['svg']
+        self.assertTrue(svg.lstrip().startswith('<svg'))
+        # fonts are inlined, so the figure still renders with no network
+        self.assertIn('@font-face', svg)
+        self.assertIn('data:font/ttf;base64', svg)
+        self.assertNotIn('<script', svg.lower())
+
+    def test_tikz_error_carries_the_tex_log(self):
+        backend = plot_sandbox.get_tikz_backend()
+        r = backend.render(r'\begin{document}\begin{tikzpicture}'
+                           r'\draw (0,0) circle (\nosuchmacro);'
+                           r'\end{tikzpicture}\end{document}')
+        self.assertFalse(r['ok'])
+        self.assertIn('Undefined control sequence', r['error'])
+
+
+class TestFigureHtml(unittest.TestCase):
+    def setUp(self):
+        from mathShell import MathShell
+        self.render = MathShell._figure_html
+
+    def test_png_inlined_as_data_uri(self):
+        html = self.render({'kind': 'png', 'data': FAKE_PNG_B64})
+        self.assertIn(f'src="data:image/png;base64,{FAKE_PNG_B64}"', html)
+
+    def test_svg_dropped_in_and_hidden_from_mathjax(self):
+        html = self.render({'kind': 'svg', 'data': FAKE_SVG})
+        self.assertIn(FAKE_SVG, html)       # inert markup, no iframe needed
+        self.assertIn('tex2jax_ignore', html)
+
+    def test_html_iframed_and_escaped(self):
+        # JupyterLab strips <script> from cell output, so plotly only runs
+        # inside an iframe - and srcdoc must be attribute-escaped or the
+        # figure's own quotes break out of it
+        html = self.render({'kind': 'html', 'height': 400,
+                            'data': '<p class="x">hi</p>'})
+        self.assertIn('<iframe', html)
+        self.assertIn('height:400px', html)
+        self.assertIn('sandbox="allow-scripts"', html)
+        self.assertIn('&lt;p class=&quot;x&quot;&gt;', html)
+        self.assertNotIn('<p class="x">', html)
+
+    def test_unknown_kind_falls_back_to_png(self):
+        self.assertIn('<img', self.render({'data': FAKE_PNG_B64}))
 
 
 class TestMathShellDo(unittest.TestCase):

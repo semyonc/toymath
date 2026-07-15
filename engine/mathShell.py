@@ -226,6 +226,35 @@ class MathShell(object):
         return ''.join(lines)
 
     @staticmethod
+    def _figure_html(figure):
+        """One sandbox figure as HTML, by kind.
+
+        png  - a raster, inlined as a data URI.
+        svg  - TikZ output: inert markup with its fonts already inlined,
+               so it drops straight in and still renders offline.
+        html - plotly, which needs its own <script> to run. JupyterLab
+               strips scripts from cell output, so it only survives inside
+               an iframe, which is a separate browsing context. srcdoc is
+               attribute-escaped; the sandbox attribute keeps the figure
+               from reaching back into the notebook page.
+        """
+        kind = figure.get('kind', 'png')
+        data = figure.get('data') or ''
+        if kind == 'svg':
+            # tex2jax_ignore: the glyphs are already typeset, MathJax must
+            # not re-scan them for $...$ delimiters
+            return (f'<div class="tex2jax_ignore" '
+                    f'style="max-width:640px;overflow-x:auto">{data}</div>')
+        if kind == 'html':
+            height = int(figure.get('height') or 520)
+            return (f'<iframe sandbox="allow-scripts" '
+                    f'srcdoc="{_html.escape(data, quote=True)}" '
+                    f'style="width:100%;max-width:760px;height:{height}px;'
+                    f'border:none"></iframe>')
+        return (f'<div><img src="data:image/png;base64,{data}" '
+                f'style="max-width:640px"/></div>')
+
+    @staticmethod
     def _assumption_html(assumption):
         """One assumption as HTML: with a `display` field, prose stays
         prose (escaped) and only the inline $...$ spans reach MathJax;
@@ -282,11 +311,9 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail the derivation step
 
-        def on_plot(caption, images):
+        def on_plot(caption, figures):
             try:
-                parts = [f'<div><img src="data:image/png;base64,{b64}" '
-                         f'style="max-width:640px"/></div>'
-                         for b64 in images]
+                parts = [self._figure_html(f) for f in figures]
                 parts.append(f'<div style="color:#888"><em>'
                              f'{_html.escape(caption)}</em> '
                              f'&mdash; illustration, not machine-checked'

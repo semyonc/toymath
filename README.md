@@ -94,14 +94,17 @@ LLM call.
 - **Classic kernel:** the original fixed-point LaTeX rewrite engine remains the
   parser, notation-DAG, and command substrate beneath the agentic layer.
 
-Plots are optional illustrations, never evidence. Agent-generated plotting
-code runs outside the kernel in a deny-by-default Pyodide/Deno sandbox and does
-not enter the ledger.
+Figures are optional illustrations, never evidence: they do not enter the
+ledger and replay ignores them. Agent-generated figure code runs outside the
+kernel in deny-by-default Deno sandboxes — Python (matplotlib/seaborn/plotly)
+under Pyodide, and TeX/TikZ through a WebAssembly TeX engine that renders to
+SVG with no network access at all.
 
 ## Quick start
 
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and JupyterLab.
-[Deno](https://deno.com) is optional for sandboxed plotting.
+[Deno](https://deno.com) is optional, and enables the sandboxed `plot` and
+`tikz` figure tools. No LaTeX installation is needed for TikZ.
 
 ```bash
 git clone https://github.com/semyonc/toymath.git

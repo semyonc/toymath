@@ -207,7 +207,7 @@ engine/agent_do.py         do! runtime and stable model tool surface
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition
 engine/prompt_commands.py  commands/*.md discovery
-engine/plot_sandbox.py     plotting backend seam
+engine/plot_sandbox.py     figure backend seam (Pyodide plots, TikZ SVG)
 engine/processor.py        classic fixed-point engine
 toymath_cli.py             generated tactic CLI + ledger controls
 ```

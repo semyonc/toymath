@@ -82,13 +82,41 @@ _DO_RULES = """
 _PLOT_RULES = """
 ## Plotting (optional)
 
-A `plot` tool renders matplotlib/seaborn figures in an isolated sandbox;
-they appear to the user inline, marked as unverified illustration. Use it
-only when a picture genuinely helps (shape of a function, roots, area
-under a curve). The code must be self-contained: import what you use,
-build numpy grids, label axes, add a legend for multiple curves; one
-figure per call. You translate LaTeX to Python yourself. Plots are never
-ledger steps - if plotting fails, continue the derivation without it.
+A `plot` tool runs self-contained Python in an isolated sandbox and shows
+the figures inline, marked as unverified illustration. Use it only when a
+picture genuinely helps (shape of a function, roots, area under a curve).
+You translate LaTeX to Python yourself. Plots are never ledger steps - if
+plotting fails, continue the derivation without it.
+
+- matplotlib and seaborn render as static images. numpy, pandas, scipy and
+  sympy are importable; import what you use, label axes, and add a legend
+  for multiple curves.
+- plotly renders as an interactive figure: build it and leave it in a
+  variable (`fig = go.Figure(...)`). Do not call `fig.show()`, and do not
+  call `fig.write_image()` - static export needs a binary that is not
+  available here. An interactive figure needs a network connection when
+  the notebook is reopened later, so prefer matplotlib when the figure
+  must keep working offline.
+- The code runs through `exec`, so top-level `await` is a syntax error.
+  Never call `micropip.install` yourself: your imports are installed for
+  you before the code runs.
+"""
+
+_TIKZ_RULES = """
+## TikZ figures (optional)
+
+A `tikz` tool renders a TeX/TikZ document to a figure, shown inline and
+marked as unverified illustration. Prefer it over `plot` for anything
+diagrammatic - commutative diagrams, geometry, number lines, labelled
+constructions - and whenever the labels should be set in real math type:
+you pass LaTeX straight through instead of translating it to Python.
+
+Pass a whole document: any `\\usepackage{...}` lines, then
+`\\begin{document}`, one `tikzpicture`, then `\\end{document}`. Available
+packages: pgfplots, tikz-cd, circuitikz, chemfig, tikz-3dplot, amsmath,
+amssymb, array. Reach for `plot` instead when the picture is driven by
+computed data. TikZ figures are never ledger steps; a failed render hands
+you the TeX log, so fix the source or continue without the figure.
 """
 
 _PROVE_RULES = """
@@ -118,7 +146,7 @@ assumptions; results are
 
 
 def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
-                 proof_claim_id='c1'):
+                 proof_claim_id='c1', tikz=False):
     """Build the small always-on core prompt and skill catalog."""
     try:
         if os.path.abspath(skill_path) == os.path.abspath(_SKILL_PATH):
@@ -143,6 +171,8 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
             + tactic_skills.catalog_markdown() + '\n' + _DO_RULES)
     if plotting:
         text += _PLOT_RULES
+    if tikz:
+        text += _TIKZ_RULES
     if prove_mode:
         text += _PROVE_RULES.replace('ROOT_CLAIM', proof_claim_id)
     return text
@@ -154,14 +184,15 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
 
 class DoSession(object):
     """Shared state of one do! run: the ledger the steps land in, the
-    streaming callbacks, the plot backend, and step-range bookkeeping."""
+    streaming callbacks, the figure backends, and step-range bookkeeping."""
 
     def __init__(self, ledger=None, on_step=None, on_plot=None,
-                 plot_backend=None):
+                 plot_backend=None, tikz_backend=None):
         self.ledger = ledger if ledger is not None else Ledger()
         self.on_step = on_step
         self.on_plot = on_plot
         self.plot_backend = plot_backend
+        self.tikz_backend = tikz_backend
         self.start = len(self.ledger.steps)
         self.result_override = None
         self.result_provenance = None
@@ -401,22 +432,43 @@ def make_api(session):
                            'provenance': provenance}, ensure_ascii=False)
 
     def plot(code: str, caption: str) -> str:
-        """Render an unverified matplotlib/seaborn illustration.
+        """Render an unverified matplotlib/seaborn/plotly illustration.
 
         Args:
             code: self-contained Python that builds a figure.
             caption: one-line description displayed under the figure.
         """
         result = session.plot_backend.run_plot(code)
-        images = result.get('images') or []
-        if images and session.on_plot is not None:
-            session.on_plot(caption, images)
-        reply = {'ok': bool(result.get('ok')) and bool(images),
-                 'plots': len(images),
+        figures = result.get('figures')
+        if figures is None:  # a PNG-only backend still satisfies the seam
+            figures = [{'kind': 'png', 'data': d}
+                       for d in (result.get('images') or [])]
+        if figures and session.on_plot is not None:
+            session.on_plot(caption, figures)
+        reply = {'ok': bool(result.get('ok')) and bool(figures),
+                 'plots': len(figures),
                  'stdout': (result.get('stdout') or '')[-800:]}
         if not reply['ok']:
             reply['error'] = (result.get('error')
                               or 'the code produced no figure')[-1200:]
+        return json.dumps(reply, ensure_ascii=False)
+
+    def tikz(code: str, caption: str) -> str:
+        """Render an unverified TikZ illustration.
+
+        Args:
+            code: a whole TeX document containing one tikzpicture.
+            caption: one-line description displayed under the figure.
+        """
+        result = session.tikz_backend.render(code)
+        svg = result.get('svg') if result.get('ok') else None
+        if svg and session.on_plot is not None:
+            session.on_plot(caption, [{'kind': 'svg', 'data': svg}])
+        reply = {'ok': bool(svg), 'plots': 1 if svg else 0}
+        if not reply['ok']:
+            # keep the tail: that is where the TeX log's `!` lines are
+            reply['error'] = (result.get('error')
+                              or 'the source produced no figure')[-1200:]
         return json.dumps(reply, ensure_ascii=False)
 
     api = {
@@ -429,6 +481,8 @@ def make_api(session):
     }
     if session.plot_backend is not None:
         api['plot'] = plot
+    if session.tikz_backend is not None:
+        api['tikz'] = tikz
 
     # Internal compatibility only: generated from the registry, never exposed
     # as model tools. This keeps focused tests and embedders off private
@@ -450,6 +504,8 @@ def make_tools(session):
              'set_result']
     if session.plot_backend is not None:
         names.append('plot')
+    if session.tikz_backend is not None:
+        names.append('tikz')
     return [function_tool(api[name]) for name in names]
 
 
@@ -474,25 +530,30 @@ def build_model():
 
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
-                    plot_backend=None, proof_goal=None):
+                    plot_backend=None, proof_goal=None, tikz_backend=None):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
     summary[, error]}.
     `steps` are the ledger steps this run added; `final_result` is the
-    cell's chainable value. Figures reach `on_plot(caption, images)`;
-    when `plot_backend` is None the configured one is auto-detected
-    (TOYMATH_SANDBOX). The agent loop runs in a private thread with its
-    own asyncio loop, so this is safe to call from the Jupyter kernel's
-    event-loop thread.
+    cell's chainable value. Figures reach
+    `on_plot(caption, [{kind, data, height?}, ...])` where kind is
+    png/html/svg; when a backend argument is None the configured one is
+    auto-detected (TOYMATH_SANDBOX). The agent loop runs in a private
+    thread with its own asyncio loop, so this is safe to call from the
+    Jupyter kernel's event-loop thread.
     """
     from agents import Agent, Runner
     from agents.exceptions import MaxTurnsExceeded
     if plot_backend is None:
         import plot_sandbox
         plot_backend = plot_sandbox.get_backend()
+    if tikz_backend is None:
+        import plot_sandbox
+        tikz_backend = plot_sandbox.get_tikz_backend()
     session = DoSession(ledger=ledger, on_step=on_step, on_plot=on_plot,
-                        plot_backend=plot_backend)
+                        plot_backend=plot_backend,
+                        tikz_backend=tikz_backend)
     root_claim = None
     if proof_goal is not None:
         try:
@@ -502,6 +563,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     agent = Agent(name='toymath',
                   instructions=build_prompt(
                       plotting=session.plot_backend is not None,
+                      tikz=session.tikz_backend is not None,
                       prove_mode=proof_goal is not None,
                       proof_claim_id=(root_claim['id']
                                       if root_claim is not None else 'c1')),

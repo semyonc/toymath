@@ -35,7 +35,7 @@ Two layers coexist:
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
 | `engine/agent_do.py` | `do!` Jupyter endpoint: small stable tool surface (`load_skill`, `run_tactic`, ledger controls) over the tactic registry |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
-| `engine/plot_sandbox.py` | Sandboxed plotting for `do!` (Pyodide under Deno) |
+| `engine/plot_sandbox.py` | Sandboxed figure backends for `do!`: Python under Pyodide/Deno (`pyodide_runner.mjs`), TeX under node-tikzjax (`tikz_runner.mjs`) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
 | `engine/notation.py` | Symbol, Func, Notation — DAG representation |
 | `engine/replicator.py` | Base class for graph walking (visitor pattern) |
@@ -252,8 +252,21 @@ if isinstance(n, IntegerValue): ...
   commands via `prompt_commands.load_commands()`.
 - The `do!` agent endpoint requires `OPEN_ROUTER` in `.env` (model via
   `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`).
-- `do!` plotting needs Deno (`brew install deno`); it is sandboxed via
-  Pyodide — toggle with `TOYMATH_SANDBOX=off`.
+- `do!` figures need Deno (`brew install deno`) — toggle both off with
+  `TOYMATH_SANDBOX=off`. Two backends, deliberately separate processes
+  with different grants (see `plot_sandbox.py`):
+  - `plot` runs agent **Python** (matplotlib/seaborn/plotly) under
+    Pyodide. Since the agent's code executes here and Pyodide's `js`
+    bridge is gated only by Deno's flags, it gets no `--allow-env`.
+    Wheels cache in `TOYMATH_WHEEL_CACHE` (default
+    `~/.cache/toymath/wheels`).
+  - `tikz` renders agent **TeX** to SVG via node-tikzjax, offline. No
+    agent code runs there — TeX executes in a wasm engine over an
+    in-memory filesystem — which is the only reason it can afford
+    `--allow-sys`/`--allow-env`. Never render agent Python in it.
+  Both spawn with a scrubbed env, so a widened grant still reaches no
+  secrets. Figure kinds are `png`/`html`/`svg`; only `html` (plotly) needs
+  the network at view time.
 
 ## Reference Reading
 
