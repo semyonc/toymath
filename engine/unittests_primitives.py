@@ -1044,6 +1044,98 @@ class TestSubtermRelax(unittest.TestCase):
                          '(x^{2}+4)(x^{2}-4)=0')
 
 
+class TestCombinatorialNotation(unittest.TestCase):
+    def parse(self, latex):
+        notation = Notation()
+        sym = MathParser(notation).parse(latex)
+        return sym, notation
+
+    def test_factorial_is_a_postfix_node_not_a_command(self):
+        sym, notation = self.parse('n!')
+        factorial = notation.getf(sym, Notation.FACTORIAL)
+        self.assertIsNotNone(factorial)
+        self.assertEqual(factorial.args[0].name, 'n')
+
+        # Juxtaposed letters remain mathematical factors: xy! = x(y!).
+        sym, notation = self.parse('xy!')
+        product = notation.getf(sym, Notation.P_LIST)
+        self.assertIsNotNone(product)
+        self.assertEqual(product.args[0].name, 'x')
+        self.assertIsNotNone(
+            notation.getf(product.args[1], Notation.FACTORIAL))
+
+        # Word-like legacy/notebook commands retain their existing node.
+        sym, notation = self.parse('mul! (x+1)(x-1)')
+        self.assertTrue(notation.get(sym).sym.props.get('command'))
+
+    def test_factorial_and_index_order_is_structural(self):
+        before, n1 = self.parse('n!^2')
+        before_index = n1.getf(before, Notation.INDEX)
+        self.assertIsNotNone(before_index)
+        self.assertIsNotNone(
+            n1.getf(before_index.args[0], Notation.FACTORIAL))
+
+        after, n2 = self.parse('n^2!')
+        after_factorial = n2.getf(after, Notation.FACTORIAL)
+        self.assertIsNotNone(after_factorial)
+        self.assertIsNotNone(
+            n2.getf(after_factorial.args[0], Notation.INDEX))
+
+        double, n3 = self.parse('n!!')
+        outer = n3.getf(double, Notation.FACTORIAL)
+        self.assertIsNotNone(n3.getf(outer.args[0], Notation.FACTORIAL))
+
+    def test_binom_trailing_power_binds_to_whole_coefficient(self):
+        sym, notation = self.parse('\\binom{n+1}{k}^2')
+        index = notation.getf(sym, Notation.INDEX)
+        self.assertIsNotNone(index)
+        binom = notation.getf(index.args[0], Notation.BINOM)
+        self.assertIsNotNone(binom)
+        self.assertIsNone(notation.getf(binom.args[1], Notation.INDEX))
+
+    def test_writer_and_replicator_round_trip(self):
+        from LatexWriter import LaTexWriter
+        from replicator import Replicator
+
+        cases = (
+            '5!', '(2n)!', 'n!!', 'n!^2', 'n^2!',
+            '\\binom{n+1}{k}^2', '\\binom{n}{k}!',
+            '\\frac{(2n)!}{2^{2n}(n!)^2}',
+        )
+        for latex in cases:
+            with self.subTest(latex=latex):
+                sym, notation = self.parse(latex)
+                output = Notation()
+                copied = Replicator(notation, output)(sym)
+                written = LaTexWriter(output)(copied)
+                reparsed, reparsed_notation = self.parse(written)
+                rewritten = LaTexWriter(reparsed_notation)(reparsed)
+                self.assertTrue(P.same_expression(written, rewritten),
+                                written)
+        sym, notation = self.parse('\\binom{n+1}{k}')
+        self.assertEqual(P.write_latex(sym, notation),
+                         '\\binom{n+1}{k}')
+
+    def test_closed_integer_oracle(self):
+        factorial, fn = self.parse('5!')
+        binom, bn = self.parse('\\binom{6}{2}')
+        self.assertEqual(P.numeric_eval(factorial, fn, {}), 120.0)
+        self.assertEqual(P.numeric_eval(binom, bn, {}), 15.0)
+        self.assertEqual(Core.equal_exprs('5!', '120')['verdict'], 'yes')
+        self.assertEqual(
+            Core.equal_exprs('\\binom{6}{2}', '15')['verdict'], 'yes')
+
+    def test_oracle_keeps_discrete_domain(self):
+        for latex in ('(-1)!', '(\\frac{1}{2})!', '\\binom{2}{3}'):
+            with self.subTest(latex=latex):
+                sym, notation = self.parse(latex)
+                with self.assertRaises(ValueError):
+                    P.numeric_eval(sym, notation, {})
+        sym, notation = self.parse('171!')
+        with self.assertRaises(OverflowError):
+            P.numeric_eval(sym, notation, {})
+
+
 # classic non-commuting pair: AB = diag(1,0), BA = diag(0,1)
 MAT_A = '\\pmatrix{0 & 1 \\cr 0 & 0}'
 MAT_B = '\\pmatrix{0 & 0 \\cr 1 & 0}'

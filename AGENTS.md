@@ -186,6 +186,8 @@ def create_actions():
 | Type | Structure | Example |
 |------|-----------|---------|
 | INDEX | `(base, (sub, sup_l, power, sup_r))` | `x^2` → `(x, (None, None, 2, None))` |
+| FACTORIAL | `(operand,)` | `n!` → `(n,)` |
+| BINOM | `(upper, lower)` | `\binom{n}{k}` → `(n, k)` |
 | P_LIST | `(factor1, factor2, ...)` | `xy` → `(x, y)` |
 | S_LIST | `(term1, +term2, ...)` | `x+y` → `(x, +y)` |
 | GROUP | `(inner,)` with `br` prop | `{x}` → `(x,)` br="{}" |
@@ -245,6 +247,10 @@ if isinstance(n, IntegerValue): ...
 
 - Symbols use name-based equality: `Symbol('x') == Symbol('x')`. Relation
   nodes all share the name `comp` — always check `f.sym.props['op']`.
+- `!` is a dedicated postfix token. A bang-word becomes a command token only
+  when its name is in `MathLexer.KNOWN_COMMANDS` (or is supplied by the live
+  command registry); keep the static table's registry-parity test green when
+  adding committed commands.
 - Use a Replicator to copy expressions between notation contexts.
 - `parser.out` is a gitignored cache; `engine/parsetab.py` is tracked —
   commit it whenever the grammar changes.

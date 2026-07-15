@@ -1094,6 +1094,14 @@ class TestPromptCommandModel(unittest.TestCase):
         self.assertTrue(reg['diff'].expr)         # direct implies expr
         self.assertEqual(reg['prove'].mode, 'prove')
 
+    def test_static_lexer_command_table_matches_committed_registries(self):
+        import prompt_commands as pc
+        from lexer import MathLexer
+        from processor import register_actions
+        expected = (set(register_actions()) | set(pc.load_commands())
+                    | set(pc.RESERVED))
+        self.assertEqual(MathLexer.KNOWN_COMMANDS, expected)
+
     def test_render_substitutes_arguments(self):
         import prompt_commands as pc
         cmd = pc.parse_command(
@@ -1682,7 +1690,8 @@ class TestDirectCommands(unittest.TestCase):
         from notation import Notation
         cmds = {'fq': pc.PromptCommand('fq', 'd', '', True, (),
                                        'factor_quadratic')}
-        sym, notation = primitives.parse_latex('{fq! x^3 + 1}')
+        sym, notation = primitives.parse_latex(
+            '{fq! x^3 + 1}', command_names=cmds)
         r = expr_commands.ExprResolver(
             notation, Notation(), cmds, None, None, _never)
         with self.assertRaises(expr_commands.ExprCommandError) as ctx:
@@ -1696,7 +1705,8 @@ class TestDirectCommands(unittest.TestCase):
         import prompt_commands as pc
         from notation import Notation
         cmds = {'ev': pc.PromptCommand('ev', 'd', '', True, (), 'evaluate')}
-        sym, notation = primitives.parse_latex('{ev! 2^{10}} + 1')
+        sym, notation = primitives.parse_latex(
+            '{ev! 2^{10}} + 1', command_names=cmds)
         out = Notation()
         r = expr_commands.ExprResolver(notation, out, cmds, None, None,
                                        _never)
@@ -1729,7 +1739,8 @@ class TestDirectCommands(unittest.TestCase):
         import prompt_commands as pc
         from notation import Notation
         cmds = {'ex': pc.PromptCommand('ex', 'd', '', True, (), 'expand')}
-        sym, notation = primitives.parse_latex('{ex! (1+x)^2}')
+        sym, notation = primitives.parse_latex(
+            '{ex! (1+x)^2}', command_names=cmds)
         r = expr_commands.ExprResolver(notation, Notation(), cmds, None,
                                        None, _never)
         r(sym)

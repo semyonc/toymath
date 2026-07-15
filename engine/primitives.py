@@ -26,6 +26,9 @@ FRAC_NAMES = ('\\frac', '\\dfrac', '\\tfrac', '\\cfrac')
 
 CONSTANT_NAMES = {'e': math.e, '\\pi': math.pi}
 
+_FACTORIAL_FLOAT_CAP = 170
+_BINOM_EVAL_CAP = 10000
+
 
 class PrimitiveError(Exception):
     pass
@@ -69,7 +72,7 @@ _ELLIPSIS_NAMES = frozenset({
 _ELLIPSIS_RE = re.compile(r'\\(?:[lcvdh])?dots[bcimo]?(?![A-Za-z])')
 
 
-def parse_latex(latex, allow_ellipsis=False):
+def parse_latex(latex, allow_ellipsis=False, command_names=None):
     # the lexer has no bare < / > tokens, only the \lt / \gt commands
     if not allow_ellipsis and _ELLIPSIS_RE.search(latex):
         raise PrimitiveError(
@@ -83,7 +86,7 @@ def parse_latex(latex, allow_ellipsis=False):
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
     notation = Notation()
     try:
-        sym = MathParser(notation).parse(normalized)
+        sym = MathParser(notation, command_names=command_names).parse(normalized)
     except Exception as e:
         raise PrimitiveError(f'cannot parse {latex!r}: {e}')
     if sym is None:
@@ -763,6 +766,33 @@ def numeric_eval(sym, notation, env):
     if op == Notation.STAR:
         return _num_mul(numeric_eval(f.args[0], notation, env),
                         numeric_eval(f.args[1], notation, env))
+    if op == Notation.FACTORIAL:
+        v = numeric_eval(f.args[0], notation, env)
+        if isinstance(v, list):
+            raise EvalError('factorial of a matrix')
+        if not math.isfinite(v) or v < 0 or abs(v - round(v)) > 1e-9:
+            raise ValueError('factorial requires a nonnegative integer')
+        n = int(round(v))
+        if n > _FACTORIAL_FLOAT_CAP:
+            raise OverflowError('factorial is too large for the oracle')
+        return float(math.factorial(n))
+    if op == Notation.BINOM:
+        n = numeric_eval(f.args[0], notation, env)
+        k = numeric_eval(f.args[1], notation, env)
+        if isinstance(n, list) or isinstance(k, list):
+            raise EvalError('binomial coefficient of a matrix')
+        if (not math.isfinite(n) or not math.isfinite(k)
+                or n < 0 or k < 0
+                or abs(n - round(n)) > 1e-9
+                or abs(k - round(k)) > 1e-9
+                or round(k) > round(n)):
+            raise ValueError(
+                'binomial coefficient requires integers 0 <= k <= n')
+        n, k = int(round(n)), int(round(k))
+        if n > _BINOM_EVAL_CAP:
+            raise OverflowError(
+                'binomial coefficient is too large for the oracle')
+        return float(math.comb(n, k))
     if op == Notation.INDEX:
         sub, sup_l, power, sup_r = f.args[1]
         if sub is not None or sup_l is not None or sup_r is not None:

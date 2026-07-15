@@ -10,13 +10,28 @@ from value import IntegerValue, FloatValue
 
 class MathLexer(object):
      """ MathLexer """
-     def __init__(self, **kwargs):
+     # Bang words are commands only when admitted here (or explicitly passed
+     # by a caller loading additional prompt commands).  Everything else is
+     # ordinary LaTeX letters followed by the postfix FACTORIAL token.
+     KNOWN_COMMANDS = frozenset({
+        # legacy cmd_* actions
+        'add', 'addex', 'clear', 'closure', 'debug', 'dump', 'echo-off',
+        'echo-on', 'goal', 'mul', 'mulex', 'rules', 'track',
+        # committed notebook commands + dispatcher built-ins
+        'commands', 'diff', 'do', 'expand', 'help', 'int', 'lim', 'prove',
+        'solve',
+     })
+
+     def __init__(self, command_names=None, **kwargs):
+        self.command_names = (MathLexer.KNOWN_COMMANDS if command_names is None
+                              else frozenset(command_names))
         self.lexer = lex.lex(module=self, **kwargs)
     
      # List of token names
      tokens = (
         'LITERAL',
         'COMMAND',
+        'FACTORIAL',
         'TEXT',
         'DIGIT',
         'DIMEN',
@@ -158,7 +173,16 @@ class MathLexer(object):
          return t
      
      def t_COMMAND(self, t):
-         r'\w[\w\-]*!'
+         r'[A-Za-z_][\w\-]*!'
+         name = t.value[:-1]
+         if name not in self.command_names:
+             # Unknown bang words are implicit multiplication with factorial
+             # on the last scalar (xy! = x y!), not executable commands.
+             # Return the first letter and rewind so later lexer calls split
+             # the rest and finally emit FACTORIAL for the bang.
+             t.type = 'LITERAL'
+             t.value = t.value[0]
+             t.lexer.lexpos = t.lexpos + 1
          return t
 
              
@@ -218,7 +242,7 @@ class MathLexer(object):
      
      def t_excl(self, t):
          r'!'
-         t.type = 'LITERAL'
+         t.type = 'FACTORIAL'
          return t
               
      def t_error(self, t):
@@ -244,5 +268,3 @@ class MathLexer(object):
         
 if __name__ == "__main__":
     m = MathLexer()
-         
-    

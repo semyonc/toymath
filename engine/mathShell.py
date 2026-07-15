@@ -48,8 +48,13 @@ class MathShell(object):
     def __init__(self):
         self.history = {}
         self.parsedNotation = Notation()
-        self.parser = MathParser(self.parsedNotation)
         self.processor = MathProcessor(model=PrologModel())
+        # Discover both command systems before constructing the lexer. Bang
+        # words become COMMAND tokens only when this registry admits them;
+        # every other bang is mathematical factorial syntax.
+        self.commands = prompt_commands.load_commands()
+        self.parser = MathParser(
+            self.parsedNotation, command_names=self._command_names())
         self.processor.trace = self.trace_step
         self.history = {}
         self.execution_history = {}
@@ -61,9 +66,11 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
-        # discoverable do!-style commands from the repo commands/ directory;
-        # commands! reloads this registry so newly-added files go live
-        self.commands = prompt_commands.load_commands()
+        # commands! reloads the discoverable prompt-command registry.
+
+    def _command_names(self):
+        return (set(self.processor.actions) | set(self.commands)
+                | set(prompt_commands.RESERVED))
 
     def trace_step(self, sym, notation, index):
         if self.trace:
@@ -74,6 +81,7 @@ class MathShell(object):
 
     def add_action(self, name, instance):
         self.processor.actions[name] = instance
+        self.parser.command_names = frozenset(self._command_names())
 
     def set_echo(self, current_echo=None, echo_mode=None):
         if current_echo is not None:
@@ -139,6 +147,7 @@ class MathShell(object):
         """Render the discoverable command list. Reloads the registry first
         so a newly-added commands/*.md file goes live without a restart."""
         self.commands = prompt_commands.load_commands()
+        self.parser.command_names = frozenset(self._command_names())
         rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
                 f'<code>{_html.escape(c.name)}!</code></td>'
                 f'<td style="color:#444">{_html.escape(c.description)}'

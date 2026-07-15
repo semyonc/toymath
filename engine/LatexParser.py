@@ -14,15 +14,26 @@ from notation import Notation, Symbol, Func
 class MathParser(object):
      tokens = MathLexer.tokens
      literals = MathLexer.literals
+     # A following ^/_ completes the current TeX index pair (x_a^b), rather
+     # than starting a second decoration on the already-indexed expression.
+     # Declaring the choice keeps the LALR table conflict-free now that
+     # postfix factorials can appear on either side of one index pair.
+     precedence = (
+         ('right', '^', '_'),
+     )
 
-     def __init__(self, notation):
+     def __init__(self, notation, command_names=None):
          self.notation = notation
+         self.command_names = (MathLexer.KNOWN_COMMANDS
+                               if command_names is None
+                               else frozenset(command_names))
          self.yacc = yacc.yacc(module=self,start='formula')
 
      def parse(self, input):
          self.notation.clear()
          try:
-             return self.yacc.parse(input, lexer=MathLexer())
+             return self.yacc.parse(
+                 input, lexer=MathLexer(command_names=self.command_names))
          except Exception:
              # TeX reads \frac12 as \frac{1}{2} (one token per unbraced
              # argument), but this dialect's lexer fuses the digit run
@@ -35,7 +46,8 @@ class MathParser(object):
              if rewritten == input:
                  raise
              self.notation.clear()
-             return self.yacc.parse(rewritten, lexer=MathLexer())
+             return self.yacc.parse(
+                 rewritten, lexer=MathLexer(command_names=self.command_names))
 
      def p_formula(self, p):
          'formula : logical-expr'
@@ -275,24 +287,58 @@ class MathParser(object):
 
 
      def p_expression(self, p):
-        'expression : scalar'
-        p[0] = p[1]
+         'expression : postfix-expr'
+         p[0] = p[1]
+
+     def p_postfix_expr_prefactor(self, p):
+         'postfix-expr : prefactor-expr'
+         p[0] = p[1]
+
+     def p_postfix_expr_indexed(self, p):
+         'postfix-expr : indexed-expr'
+         p[0] = p[1]
+
+     def p_prefactor_expr_base(self, p):
+         'prefactor-expr : postfix-base'
+         p[0] = p[1]
+
+     def p_prefactor_expr_factorial(self, p):
+         'prefactor-expr : prefactor-expr FACTORIAL'
+         p[0] = self.notation.setf(Notation.FACTORIAL, (p[1],))
+
+     def p_postfix_base_scalar(self, p):
+         'postfix-base : scalar'
+         p[0] = p[1]
+
+     def p_postfix_base_binom(self, p):
+         'postfix-base : binom scalar scalar'
+         # TeX's two binomial arguments are single tokens/groups. Keeping
+         # them scalar prevents a trailing postfix/index from binding to the
+         # second argument: \binom{n}{k}^2 is the square of the coefficient,
+         # not \binom{n}{k^2}.
+         p[0] = self.notation.setf(Notation.BINOM, (p[2], p[3]))
+
+     def p_indexed_expr(self, p):
+         'indexed-expr : prefactor-expr index-expr'
+         p[0] = self.notation.setf(
+             Notation.INDEX,
+             (p[1], (None, None, p[2][0], p[2][1])))
+
+     def p_indexed_expr_factorial(self, p):
+         'indexed-expr : indexed-expr FACTORIAL'
+         p[0] = self.notation.setf(Notation.FACTORIAL, (p[1],))
 
      def p_expression_dot3(self, p):
          '''expression : '.' '.' '.' '''
          p[0] = Notation.DOT3
 
      def p_expression_limits_expr(self, p):
-         'expression : scalar limits index-expr'
+         'postfix-base : scalar limits index-expr'
          p[0] = self.notation.setf(Notation.LIMITS, (p[1], (p[3][0], p[3][1])))
 
      def p_expression_nolimits_expr(self, p):
-         'expression : scalar nolimits index-expr'
+         'postfix-base : scalar nolimits index-expr'
          p[0] = self.notation.setf(Notation.NOLIMITS, (p[1], (p[3][0], p[3][1])))
-
-     def p_expression_index_expr(self, p):
-         'expression : scalar index-expr'
-         p[0] = self.notation.setf(Notation.INDEX, (p[1], (None, None, p[2][0], p[2][1])))
 
      def p_index_expr_subscript(self, p):
         '''index-expr : '_' scalar '''
@@ -385,8 +431,7 @@ class MathParser(object):
          '''binary-op : frac
                       | dfrac
                       | cfrac
-                      | tfrac
-                      | binom'''
+                      | tfrac'''
          p[0] = Symbol(p[1])
 
      def p_scalar_term(self, p):

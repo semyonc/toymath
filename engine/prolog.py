@@ -216,13 +216,22 @@ class Term(object):
     def __init__(self, expr: str = None, sym: SYMBOL = None, notation: NOTATION = None):
         self.notation = Notation()
         if expr is not None:
-            temp_notation = Notation()
-            p = MathParser(temp_notation)
-            sym = p.parse(expr)
-            preprocessor = Preprocessor(temp_notation, self.notation, {}, {})
-            self.sym = preprocessor(sym)
-            writer = LaTexWriter(self.notation)
-            self.expr = writer(self.sym)
+            if expr.strip() == '!':
+                # Legacy Prolog cut sentinel. Bare ! is no longer a LaTeX
+                # scalar now that the math grammar gives it the precise role
+                # of postfix factorial; keep the deprecated logic marker
+                # isolated to its only consumer.
+                self.sym = Notation.EXCL_MARK
+                self.expr = '!'
+            else:
+                temp_notation = Notation()
+                p = MathParser(temp_notation)
+                sym = p.parse(expr)
+                preprocessor = Preprocessor(
+                    temp_notation, self.notation, {}, {})
+                self.sym = preprocessor(sym)
+                writer = LaTexWriter(self.notation)
+                self.expr = writer(self.sym)
         else:
             writer = LaTexWriter(notation, show_quotes=True)
             self.expr = writer(sym)

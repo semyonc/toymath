@@ -134,6 +134,8 @@ The `Notation` class defines several predefined symbols for common operations:
 | `GROUP` | `group` | Grouping with brackets |
 | `FUNC` | `func` | Function application |
 | `INDEX` | `index` | Indexing/subscript |
+| `FACTORIAL` | `factorial` | Postfix factorial `(operand,)` |
+| `BINOM` | `\binom` | Binomial coefficient `(n, k)` |
 | `P_LIST` | `p-list` | Product list (multiplication) |
 | `S_LIST` | `s-list` | Sum list (addition) |
 | `C_LIST` | `c-list` | Comma-separated list (function arguments, parameters) |

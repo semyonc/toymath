@@ -31,6 +31,8 @@ class Replicator(object):
         '\\color': 'enter_color',
         '\\lower': 'enter_lower',
         '\\sqrt': 'enter_sqrt',
+        'factorial': 'enter_factorial',
+        '\\binom': 'enter_binom',
         '\\buildrel': 'enter_buildrel',
         'func': 'enter_func',
         'group': 'enter_group',
@@ -202,6 +204,12 @@ class Replicator(object):
         res = self._probe(sym, '\\sqrt')
         if res is not None:
             return res
+        res = self._probe(sym, 'factorial')
+        if res is not None:
+            return res
+        res = self._probe(sym, '\\binom')
+        if res is not None:
+            return res
         f = self.notation.get(sym)
         if f is not None:
             if f.sym == Notation.INDEX:
@@ -233,6 +241,12 @@ class Replicator(object):
         if res is not None:
             return res
         res = self._probe(sym, "sgroup")
+        if res is not None:
+            return res
+        res = self._probe(sym, 'factorial')
+        if res is not None:
+            return res
+        res = self._probe(sym, '\\binom')
         if res is not None:
             return res
         res = self._probe(sym, "\\array")
@@ -409,6 +423,17 @@ class Replicator(object):
                                              Func(f.sym, (self.enter_expr(f.args[0]),
                                                           self.enter_subformula(f.args[1]),)))
 
+    def enter_factorial(self, sym, f):
+        return self.output_notation.repf(
+            self.mapsym(sym),
+            Func(f.sym, (self.enter_expr(f.args[0]),), **f.props))
+
+    def enter_binom(self, sym, f):
+        return self.output_notation.repf(
+            self.mapsym(sym),
+            Func(f.sym, tuple(self.enter_expr(arg) for arg in f.args),
+                 **f.props))
+
     def enter_buildrel(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),
                                          Func(f.sym, (self.enter_subformula(f.args[0]), self.enter_expr(f.args[1]))))
@@ -433,5 +458,4 @@ class Replicator(object):
 
     def enter_collist(self, collist):
         return [self.enter_subformula(col) for col in collist]
-
 

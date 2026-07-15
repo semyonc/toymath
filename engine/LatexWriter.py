@@ -21,6 +21,8 @@ class LaTexWriter(object):
         '\\color': 'write_color',
         '\\lower': 'write_lower',
         '\\sqrt': 'write_sqrt',
+        'factorial': 'write_factorial',
+        '\\binom': 'write_binom',
         '\\buildrel': 'write_buildrel',
         'group': 'write_group',
         'vgroup': 'write_vgroup',
@@ -213,7 +215,9 @@ class LaTexWriter(object):
         if not self._probe(sym, '\\color') \
                 and not self._probe(sym, '\\lower') \
                 and not self._probe(sym, '\\buildrel') \
-                and not self._probe(sym, '\\sqrt'):
+                and not self._probe(sym, '\\sqrt') \
+                and not self._probe(sym, 'factorial') \
+                and not self._probe(sym, '\\binom'):
             f = self.notation.get(sym)
             if f is not None:
                 if f.sym == Notation.INDEX:
@@ -252,6 +256,8 @@ class LaTexWriter(object):
         if not self._probe(sym, "group") \
                 and not self._probe(sym, "vgroup") \
                 and not self._probe(sym, "sgroup") \
+                and not self._probe(sym, "factorial") \
+                and not self._probe(sym, "\\binom") \
                 and not self._probe(sym, "func") \
                 and not self._probe(sym, "\\text") \
                 and not self._probe(sym, "\\textbf") \
@@ -322,6 +328,29 @@ class LaTexWriter(object):
             self.writeString('{')
             self.write_formula(sym)
             self.writeString('}')
+
+    def write_factorial(self, f):
+        # write_expr automatically braces a programmatically-built composite
+        # operand, so the result remains parseable even beyond parser-built
+        # scalar/index/factorial operands.
+        self.write_expr(f.args[0])
+        self.writeString('!')
+
+    def write_binom_item(self, sym):
+        # Always emit standard, self-delimited LaTeX. Strip one transparent
+        # parser group to prevent brace growth across parse/write cycles.
+        group = self.notation.getf(sym, Notation.GROUP)
+        if group is not None and group.props.get('br') == '{}' \
+                and 'quoted' not in group.props:
+            sym = group.args[0]
+        self.writeString('{')
+        self.write_formula(sym)
+        self.writeString('}')
+
+    def write_binom(self, f):
+        self.writeString('\\binom')
+        self.write_binom_item(f.args[0])
+        self.write_binom_item(f.args[1])
 
     def write_index(self, f):
         dims = f.args[1]

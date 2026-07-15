@@ -148,6 +148,10 @@ Important verified-layer behaviors include:
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol
   discovery and substitution respect lexical binders;
+- postfix factorial and `\binom{n}{k}` are first-class notation nodes rather
+  than command-shaped symbols; the independent oracle evaluates closed cases
+  only on their nonnegative-integer domain, while symbolic algebra keeps them
+  as opaque atoms;
 - matrix-valued factor runs become ordered noncommutative word atoms, while
   scalar factors remain commutative;
 - rational powers of positive plain-variable bases have a limited Puiseux
