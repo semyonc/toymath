@@ -171,6 +171,13 @@ class MathLexer(object):
              # \lim_{n \rightarrow \infty} parses as a comparison, not a
              # product of plain symbols
              val = t.value = '\\to'
+           if val in ('\\cdots', '\\dots', '\\hdots', '\\dotsb',
+                      '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'):
+             # the inline dots family is pure typography for the same
+             # sequence continuation; one canonical name keeps expression
+             # and claim comparison from splitting on the spelling
+             # (\vdots/\ddots stay distinct: matrix typography)
+             val = t.value = '\\ldots'
            if val[1:] in MathLexer.tokens:
              t.type = val[1:]
            else:

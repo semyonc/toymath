@@ -10,7 +10,7 @@ from primitives import (
     _big_operator_name, _plain_symbol_name, _binder_info, free_symbols,
     _num_agree, numeric_eval, _sample_point, _result, _error,
     _peel_groups, _int_literal, _strip_limit, _infinity_sign,
-    _limit_latex, _paren, _is_sum_str,
+    _limit_latex, _paren, _is_sum_str, _normal_form,
 )
 from tactics.core import (
     equal_exprs, substitute, expand,
@@ -108,6 +108,24 @@ def _rewrap_limit(limit, body_latex):
                         limit['direction'], body_latex)
 
 
+def _proposal_limit_error(proposal_limit, expr_limit, op, label):
+    """Agents naturally re-type the whole limit when proposing the explicit
+    operator form, so a ``\\lim`` wrapper on the proposal is accepted as a
+    redundant spelling of the expression's own binder — and only then.
+    Returns None to accept, or a steering message naming the exact repair."""
+    if expr_limit is None:
+        return (f'{label} carries a \\lim but the expression has none; '
+                f'pass the bare {op} form')
+    if (proposal_limit['var'] != expr_limit['var']
+            or proposal_limit['direction'] != expr_limit['direction']
+            or _normal_form(proposal_limit['point_latex'])
+            != _normal_form(expr_limit['point_latex'])):
+        return (f"{label}'s \\lim binder differs from the expression's; "
+                f'keep the whole \\lim expression as expr (the binder is '
+                f'carried through) and pass the bare {op} it abbreviates')
+    return None
+
+
 def _finite_sum_check(sum_latex, closed_latex, upper_var, lower_int,
                       samples=6, seed=20260705):
     """Evaluate the literal finite sum against a closed form at several
@@ -199,8 +217,10 @@ def sum_from_ellipsis(expr, sum_form):
     except PrimitiveError as e:
         return _error('sum_from_ellipsis', args, f'sum_form: {e}')
     if parts['limit'] is not None:
-        return _error('sum_from_ellipsis', args,
-                      'sum_form must be a bare \\sum, without the \\lim')
+        err = _proposal_limit_error(parts['limit'], limit, '\\sum',
+                                    'sum_form')
+        if err:
+            return _error('sum_from_ellipsis', args, err)
     body_free = free_symbols(body, notation) - _ELLIPSIS_NAMES
     form_sym, form_notation = parse_latex(sum_form)
     stray = free_symbols(form_sym, form_notation) - body_free
@@ -308,8 +328,10 @@ def prod_from_ellipsis(expr, prod_form):
     except PrimitiveError as e:
         return _error('prod_from_ellipsis', args, f'prod_form: {e}')
     if parts['limit'] is not None:
-        return _error('prod_from_ellipsis', args,
-                      'prod_form must be a bare \\prod, without the \\lim')
+        err = _proposal_limit_error(parts['limit'], limit, '\\prod',
+                                    'prod_form')
+        if err:
+            return _error('prod_from_ellipsis', args, err)
     body_free = free_symbols(body, notation) - _ELLIPSIS_NAMES
     form_sym, form_notation = parse_latex(prod_form)
     stray = free_symbols(form_sym, form_notation) - body_free

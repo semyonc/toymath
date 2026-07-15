@@ -23,7 +23,9 @@ The finite-product oracle likewise evaluates literal bounded products, but no
 product rewrite or ratio-telescope tactic exists yet. Do not perform that move
 in prose.
 
-These tactics preserve an enclosing limit binder. After interpreting or
+These tactics preserve an enclosing limit binder: apply the door to the
+whole `\lim` expression, never to the inner body alone — a step recorded on
+the bare body cannot anchor a claim about the limit. After interpreting or
 telescoping a partial sum/product, load `limits` to close the remaining limit.
 Infinite operator bounds are refused; rewrite them as limits of partial
 operators through a named tactic when such a tactic becomes available.

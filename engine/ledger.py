@@ -398,7 +398,11 @@ class Ledger(object):
         for claim in self.claims:
             try:
                 import primitives
-                primitives.parse_latex(claim.get('statement', ''))
+                # shape-only validation, mirroring record_claim: an ellipsis
+                # claim is recordable and closes only through an
+                # interpretation step, so replay must not reject it here
+                primitives.parse_latex(claim.get('statement', ''),
+                                       allow_ellipsis=True)
                 if claim.get('hash') != _claim_hash(
                         claim.get('statement', ''), claim.get('parent')):
                     raise ValueError('claim hash mismatch')

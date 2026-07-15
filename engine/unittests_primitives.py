@@ -740,6 +740,30 @@ class TestParsingEdges(unittest.TestCase):
         self.assertTrue(r['ok'])
         self.assertFalse(Core.evaluate(r['result'])['holds'])
 
+    def test_compressed_frac_digit_arguments(self):
+        # TeX argument scanning: \frac12 means \frac{1}{2}. Agents type
+        # this constantly; the lexer fuses '12' into one number and the
+        # parse fails, so the TeX reading is retried on syntax error only
+        # (a live prove! derailed on this spelling).
+        self.assertEqual(Core.equal_exprs('\\frac12',
+                                          '\\frac{1}{2}')['verdict'], 'yes')
+        self.assertEqual(Core.equal_exprs('\\frac12\\cdot\\frac34',
+                                          '\\frac{3}{8}')['verdict'], 'yes')
+        # trailing digits stay ordinary factors: \frac123 = (1/2)*3
+        self.assertEqual(Core.equal_exprs('\\frac123',
+                                          '\\frac{3}{2}')['verdict'], 'yes')
+        # spaced and half-braced spellings keep parsing
+        self.assertEqual(Core.equal_exprs('\\frac 1 2',
+                                          '\\frac12')['verdict'], 'yes')
+        self.assertEqual(Core.equal_exprs('\\frac1{2n}',
+                                          '\\frac{1}{2n}')['verdict'], 'yes')
+        # token-per-argument dialect spellings parse first try and keep
+        # their meaning: the retry never reinterprets a valid parse
+        self.assertEqual(Core.equal_exprs('\\frac 13 15',
+                                          '\\frac{13}{15}')['verdict'], 'yes')
+        self.assertEqual(Core.equal_exprs('\\frac13 15',
+                                          '\\frac{13}{15}')['verdict'], 'yes')
+
 
 class TestIntegration(unittest.TestCase):
     def ok(self, rec):
@@ -1996,6 +2020,22 @@ class TestSumFromEllipsis(unittest.TestCase):
         self.assertIn('continues the pattern',
                       rec['assumptions'][0]['display'])
 
+    def test_lim_wrapped_sum_form_accepted_when_binder_matches(self):
+        rec = FiniteOperators.sum_from_ellipsis(
+            TELESCOPING_LIMIT,
+            '\\lim_{n \\to \\infty} ' + TELESCOPING_SUM_FORM)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim', rec['result'])
+        self.assertIn('\\sum', rec['result'])
+
+    def test_lim_wrapped_sum_form_refused_for_bare_expression(self):
+        rec = FiniteOperators.sum_from_ellipsis(
+            '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+            '+\\ldots+\\frac{1}{n(n+1)}',
+            '\\lim_{n \\to \\infty} ' + TELESCOPING_SUM_FORM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('the expression has none', rec['error'])
+
 
 class TestSumRewriteTelescope(unittest.TestCase):
     def test_sum_rewrite_partial_fractions(self):
@@ -2150,6 +2190,40 @@ class TestProdFromEllipsis(unittest.TestCase):
         self.assertIn('prod_from_ellipsis', rec['error'])
         self.assertIn('sum_from_ellipsis', rec['error'])
 
+    def test_compressed_frac_spelling_accepted(self):
+        # the exact first call of the live Wallis prove! agent: compressed
+        # \frac12 spellings inside the full \lim expression must parse
+        rec = FiniteOperators.prod_from_ellipsis(
+            '\\lim_{n\\to\\infty}\\left(\\frac12\\cdot\\frac34\\ldots'
+            '\\frac{2n-1}{2n}\\right)',
+            '\\prod_{k=1}^{n}\\frac{2k-1}{2k}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim', rec['result'])
+        self.assertIn('\\prod', rec['result'])
+
+    def test_lim_wrapped_prod_form_accepted_when_binder_matches(self):
+        # agents naturally re-type the whole limit as the proposal; a
+        # matching \lim wrapper is a redundant spelling, not an error
+        rec = FiniteOperators.prod_from_ellipsis(
+            WALLIS_LIMIT, '\\lim_{n \\to \\infty} ' + WALLIS_PROD_FORM)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'exact')
+        self.assertIn('\\lim', rec['result'])
+
+    def test_lim_wrapped_prod_form_refused_on_binder_mismatch(self):
+        rec = FiniteOperators.prod_from_ellipsis(
+            WALLIS_LIMIT,
+            '\\lim_{m \\to \\infty} \\prod_{k=1}^{n} \\frac{2k-1}{2k}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('differs from the expression', rec['error'])
+
+    def test_lim_wrapped_prod_form_refused_for_bare_expression(self):
+        rec = FiniteOperators.prod_from_ellipsis(
+            '\\frac{1}{2} \\cdot \\frac{3}{4} \\ldots \\frac{2n-1}{2n}',
+            '\\lim_{n \\to \\infty} ' + WALLIS_PROD_FORM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('the expression has none', rec['error'])
+
 
 class TestRootPowerDecay(unittest.TestCase):
     def test_inverse_sqrt_closes(self):
@@ -2238,13 +2312,50 @@ class TestEllipsisClaim(unittest.TestCase):
         self.assertEqual(claim['verdict'], 'open')
         first = FiniteOperators.prod_from_ellipsis(WALLIS_LIMIT, WALLIS_PROD_FORM)
         s1 = ledger.record(first, goal=claim['id'])
+        # the recorded bound-limit steps + sources mirror the do! adapter,
+        # so the whole session (not just the conclude call) stays replayable
+        lower = ledger.record(Limits.limit_table('\\lim_{n \\to \\infty} 0'),
+                              goal=claim['id'])
+        upper = ledger.record(
+            Limits.limit_table('\\lim_{n \\to \\infty} ' + WALLIS_UPPER),
+            goal=claim['id'])
         squeeze = Limits.limit_squeeze(first['result'], '0', WALLIS_UPPER, '0')
+        squeeze['sources'] = {'lower': lower['id'], 'upper': upper['id']}
         s2 = ledger.record(squeeze, goal=claim['id'])
         closed = ledger.conclude(claim['id'], [s1['id'], s2['id']])
         self.assertEqual(closed['verdict'], 'conditional')
         self.assertEqual(closed['conclusion']['closure'], 'left-to-right')
         # both the reading of the ellipsis and the ordering are recorded
         self.assertEqual(len(closed['conclusion']['assumptions']), 2)
+        # replay validates claim SHAPE only, so the ellipsis statement
+        # must not be rejected there (it was until gen 32)
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
+
+    def test_open_ellipsis_claim_session_replays(self):
+        ledger = Ledger()
+        ledger.record_claim(WALLIS_LIMIT + ' = 0')
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
+        self.assertEqual(rep['open_claims'], 1)
+
+    def test_retyped_dots_variant_reuses_open_claim(self):
+        # live failure: the agent re-typed the goal with \cdots and
+        # compressed fractions, minting a SECOND claim that it then closed
+        # while the root claim stayed open. The dots family is typography:
+        # the re-typed spelling must resolve to the same claim id.
+        ledger = Ledger()
+        root = ledger.record_claim(WALLIS_LIMIT + ' = 0')
+        retyped = ledger.record_claim(
+            '\\lim_{n\\to\\infty}\\left(\\frac12\\cdot\\frac34\\cdots'
+            '\\frac{2n-1}{2n}\\right)=0')
+        self.assertEqual(root['id'], retyped['id'])
+
+    def test_dots_family_is_one_ellipsis(self):
+        self.assertTrue(P.same_expression('a + b + \\ldots + z',
+                                          'a + b + \\cdots + z'))
+        self.assertTrue(P.same_expression('a \\cdot b \\dots z',
+                                          'a \\cdot b \\ldots z'))
 
     def test_non_relation_claim_still_rejected(self):
         ledger = Ledger()

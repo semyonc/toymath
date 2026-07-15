@@ -621,7 +621,8 @@ class TestScriptedAgent(unittest.TestCase):
             [tool_call('set_result', {'expr': '0'}, 'c6')],
             [message('Interpreted the product, squeezed it to 0.')],
         ]
-        res = run_instruction('prove the product limit',
+        ledger = Ledger()
+        res = run_instruction('prove the product limit', ledger=ledger,
                               model=ScriptedModel(script), proof_goal=goal)
         self.assertTrue(res['ok'], res.get('error'))
         self.assertEqual([s['op'] for s in res['steps']],
@@ -631,6 +632,9 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['claims'][0]['verdict'], 'conditional')
         self.assertEqual(res['final_result'], '0')
         self.assertEqual(res['final_provenance']['source'], 'claim')
+        # the full session, ellipsis root claim included, must replay
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
 
     def test_prove_mode_leaves_failed_target_open(self):
         script = [

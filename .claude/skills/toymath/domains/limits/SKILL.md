@@ -21,6 +21,15 @@ Use one tactic per mathematical justification:
   the same value. Pass the full target limit, lower body, upper body, and the
   two source step ids. Ordering is spot-checked and recorded as an assumption.
 
+When no direct rule closes the limit but the body is bounded by simpler
+sequences, propose the bounds yourself and squeeze. This is the standard
+route for bounded products: a Wallis-type
+`\lim_{n \to \infty} \prod_{k=1}^{n} \frac{2k-1}{2k}` has no table rule,
+but `0` and `\frac{1}{\sqrt{2n+1}}` bound it (root-power decay closes the
+upper bound). Close each bound's `\lim` as its own step first, then cite
+both step ids in `limit_squeeze`. Do not chase factorial or binomial
+rewrites of a product body — those forms have no grammar here.
+
 Never type the final linear combination into core `expand`; use assembly so
 the cited branch provenance remains replayable. One-sided and infinite
 approach points are supported. Non-converged approach sampling is oracle

@@ -5,6 +5,8 @@ Created on Sun Dec 27 19:15:16 2020
 
 @author: semyonc
 """
+import re
+
 import ply.yacc as yacc
 from lexer import MathLexer
 from notation import Notation, Symbol, Func
@@ -19,7 +21,21 @@ class MathParser(object):
 
      def parse(self, input):
          self.notation.clear()
-         return self.yacc.parse(input, lexer=MathLexer())
+         try:
+             return self.yacc.parse(input, lexer=MathLexer())
+         except Exception:
+             # TeX reads \frac12 as \frac{1}{2} (one token per unbraced
+             # argument), but this dialect's lexer fuses the digit run
+             # into a single number token, so that spelling arrives here
+             # only as a syntax error. Retry with the TeX reading of
+             # adjacent frac digits. Spellings that parse token-per-
+             # argument (\frac 13 15 = 13/15) never reach the retry and
+             # keep their dialect meaning.
+             rewritten = re.sub(r'(\\frac)(\d)(\d)', r'\1{\2}{\3}', input)
+             if rewritten == input:
+                 raise
+             self.notation.clear()
+             return self.yacc.parse(rewritten, lexer=MathLexer())
 
      def p_formula(self, p):
          'formula : logical-expr'
