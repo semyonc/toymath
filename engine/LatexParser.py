@@ -5,21 +5,87 @@ Created on Sun Dec 27 19:15:16 2020
 
 @author: semyonc
 """
+import re
+
 import ply.yacc as yacc
 from lexer import MathLexer
 from notation import Notation, Symbol, Func
 
+
+# These environments carry only their delimiter/presentation choice; unlike
+# array/matrix* they have no alignment preamble to preserve.  Normalize them
+# at the shared parser boundary so the kernel/legacy engine and the verified
+# tactic layer build the same dedicated array nodes.
+_PLAIN_ARRAY_ENVS = (
+    'pmatrix', 'matrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix',
+    'smallmatrix', 'cases',
+)
+_PLAIN_ARRAY_ENV_ALT = '|'.join(re.escape(name) for name in _PLAIN_ARRAY_ENVS)
+_PLAIN_ARRAY_ENV_RE = re.compile(
+    rf'\\begin\{{({_PLAIN_ARRAY_ENV_ALT})\}}'
+    rf'((?:(?!\\begin\{{(?:{_PLAIN_ARRAY_ENV_ALT})\}}|'
+    rf'\\end\{{(?:{_PLAIN_ARRAY_ENV_ALT})\}}).)*?)'
+    rf'\\end\{{\1\}}',
+    re.DOTALL,
+)
+
+
+def _normalize_plain_array_envs(latex):
+     """Turn non-alignment array environments into grammar commands.
+
+     Innermost-first replacement supports mixed nested matrix families.  The
+     alignment-bearing ``array`` and starred matrix variants are deliberately
+     excluded: discarding their preambles would make round-tripping lossy.
+     """
+     def repl(match):
+          body = match.group(2).replace('\\\\', ' \\cr ')
+          return f'\\{match.group(1)}{{{body}}}'
+
+     previous = None
+     while previous != latex:
+          previous = latex
+          latex = _PLAIN_ARRAY_ENV_RE.sub(repl, latex)
+     return latex
+
+
 class MathParser(object):
      tokens = MathLexer.tokens
      literals = MathLexer.literals
+     # A following ^/_ completes the current TeX index pair (x_a^b), rather
+     # than starting a second decoration on the already-indexed expression.
+     # Declaring the choice keeps the LALR table conflict-free now that
+     # postfix factorials can appear on either side of one index pair.
+     precedence = (
+         ('right', '^', '_'),
+     )
 
-     def __init__(self, notation):
+     def __init__(self, notation, command_names=None):
          self.notation = notation
+         self.command_names = (MathLexer.KNOWN_COMMANDS
+                               if command_names is None
+                               else frozenset(command_names))
          self.yacc = yacc.yacc(module=self,start='formula')
 
      def parse(self, input):
+         input = _normalize_plain_array_envs(input)
          self.notation.clear()
-         return self.yacc.parse(input, lexer=MathLexer())
+         try:
+             return self.yacc.parse(
+                 input, lexer=MathLexer(command_names=self.command_names))
+         except Exception:
+             # TeX reads \frac12 as \frac{1}{2} (one token per unbraced
+             # argument), but this dialect's lexer fuses the digit run
+             # into a single number token, so that spelling arrives here
+             # only as a syntax error. Retry with the TeX reading of
+             # adjacent frac digits. Spellings that parse token-per-
+             # argument (\frac 13 15 = 13/15) never reach the retry and
+             # keep their dialect meaning.
+             rewritten = re.sub(r'(\\frac)(\d)(\d)', r'\1{\2}{\3}', input)
+             if rewritten == input:
+                 raise
+             self.notation.clear()
+             return self.yacc.parse(
+                 rewritten, lexer=MathLexer(command_names=self.command_names))
 
      def p_formula(self, p):
          'formula : logical-expr'
@@ -116,8 +182,12 @@ class MathParser(object):
          'subformula : comma-list'
          p[0] = p[1]
 
-     def p_subformula_expr_comparer(self, p):
-         'subformula : additive-expr comparer comma-list'
+     def p_comma_item_additive_expr(self, p):
+         'comma-item : additive-expr'
+         p[0] = p[1]
+
+     def p_comma_item_comparer(self, p):
+         'comma-item : additive-expr comparer additive-expr'
          p[0] = self.notation.setf(Symbol('comp', op=p[2]),(p[1],p[3]))
 
      def p_comparer(self, p):
@@ -157,11 +227,11 @@ class MathParser(object):
          p[0] = p[1]
 
      def p_comma_list_additive_expr(self, p):
-         'comma-list : additive-expr'
+         'comma-list : comma-item'
          p[0] = p[1]
 
      def p_command_list_list(self, p):
-         '''comma-list : comma-list ',' additive-expr'''
+         '''comma-list : comma-list ',' comma-item'''
          f = self.notation.getf(p[1], Notation.C_LIST)
          if f is None:
              p[0] = self.notation.setf(Notation.C_LIST, [p[1], p[3]])
@@ -254,29 +324,63 @@ class MathParser(object):
            f.props['cdot'] = True
 
      def p_composite_expr_slash(self, p):
-        '''composite-expr : expression '/' expression'''
+        '''composite-expr : expression-list '/' expression'''
         p[0] = self.notation.setf(Notation.SLASH,(p[1],p[3]))
 
 
      def p_expression(self, p):
-        'expression : scalar'
-        p[0] = p[1]
+         'expression : postfix-expr'
+         p[0] = p[1]
+
+     def p_postfix_expr_prefactor(self, p):
+         'postfix-expr : prefactor-expr'
+         p[0] = p[1]
+
+     def p_postfix_expr_indexed(self, p):
+         'postfix-expr : indexed-expr'
+         p[0] = p[1]
+
+     def p_prefactor_expr_base(self, p):
+         'prefactor-expr : postfix-base'
+         p[0] = p[1]
+
+     def p_prefactor_expr_factorial(self, p):
+         'prefactor-expr : prefactor-expr FACTORIAL'
+         p[0] = self.notation.setf(Notation.FACTORIAL, (p[1],))
+
+     def p_postfix_base_scalar(self, p):
+         'postfix-base : scalar'
+         p[0] = p[1]
+
+     def p_postfix_base_binom(self, p):
+         'postfix-base : binom scalar scalar'
+         # TeX's two binomial arguments are single tokens/groups. Keeping
+         # them scalar prevents a trailing postfix/index from binding to the
+         # second argument: \binom{n}{k}^2 is the square of the coefficient,
+         # not \binom{n}{k^2}.
+         p[0] = self.notation.setf(Notation.BINOM, (p[2], p[3]))
+
+     def p_indexed_expr(self, p):
+         'indexed-expr : prefactor-expr index-expr'
+         p[0] = self.notation.setf(
+             Notation.INDEX,
+             (p[1], (None, None, p[2][0], p[2][1])))
+
+     def p_indexed_expr_factorial(self, p):
+         'indexed-expr : indexed-expr FACTORIAL'
+         p[0] = self.notation.setf(Notation.FACTORIAL, (p[1],))
 
      def p_expression_dot3(self, p):
          '''expression : '.' '.' '.' '''
          p[0] = Notation.DOT3
 
      def p_expression_limits_expr(self, p):
-         'expression : scalar limits index-expr'
+         'postfix-base : scalar limits index-expr'
          p[0] = self.notation.setf(Notation.LIMITS, (p[1], (p[3][0], p[3][1])))
 
      def p_expression_nolimits_expr(self, p):
-         'expression : scalar nolimits index-expr'
+         'postfix-base : scalar nolimits index-expr'
          p[0] = self.notation.setf(Notation.NOLIMITS, (p[1], (p[3][0], p[3][1])))
-
-     def p_expression_index_expr(self, p):
-         'expression : scalar index-expr'
-         p[0] = self.notation.setf(Notation.INDEX, (p[1], (None, None, p[2][0], p[2][1])))
 
      def p_index_expr_subscript(self, p):
         '''index-expr : '_' scalar '''
@@ -369,8 +473,7 @@ class MathParser(object):
          '''binary-op : frac
                       | dfrac
                       | cfrac
-                      | tfrac
-                      | binom'''
+                      | tfrac'''
          p[0] = Symbol(p[1])
 
      def p_scalar_term(self, p):
@@ -467,7 +570,12 @@ class MathParser(object):
      def p_scalar_array(self, p):
          '''scalar : array '{' row-list '}'
                    | pmatrix '{' row-list '}'
-                   | matrix '{' row-list '}' '''
+                   | matrix '{' row-list '}'
+                   | bmatrix '{' row-list '}'
+                   | Bmatrix '{' row-list '}'
+                   | vmatrix '{' row-list '}'
+                   | Vmatrix '{' row-list '}'
+                   | smallmatrix '{' row-list '}' '''
          p[0] = self.notation.setf(Symbol(p[1]), p[3])
 
      def p_scalar_cases(self, p):

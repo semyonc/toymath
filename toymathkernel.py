@@ -242,6 +242,47 @@ def _formatter(data, repr_func):
 class MathKernelApp(IPKernelApp):
     kernel_class = MathKernel
 
+
+def refresh_kernelspec_model_name(kernel_name="toymath"):
+    """Cosmetic: suffix the installed kernelspec display name with the
+    current do! model, so JupyterLab's kernel picker and status bar show
+    which model drives agent runs (e.g. "Toy Math · anthropic/...").
+
+    Runs at kernel startup, after load_dotenv, so editing .env and
+    restarting the kernel refreshes the label. Best-effort by design:
+    any failure (no installed spec, read-only dir) must never block
+    kernel startup. Note per-command model overrides can still diverge
+    from this label for a single run - the label is cosmetic, not
+    provenance.
+    """
+    try:
+        import json
+        import os
+        from jupyter_client.kernelspec import KernelSpecManager
+
+        try:
+            from engine.agent_do import MODEL_VAR, DEFAULT_MODEL
+        except Exception:
+            MODEL_VAR = "OPENROUTER_MODEL"
+            DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+        model = os.environ.get(MODEL_VAR, DEFAULT_MODEL)
+        spec = KernelSpecManager().get_kernel_spec(kernel_name)
+        path = os.path.join(spec.resource_dir, "kernel.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        # keep the base name stable across model changes (idempotent)
+        base = data.get("display_name", "Toy Math").split(" · ")[0]
+        display = f"{base} · {model}"
+        if data.get("display_name") != display:
+            data["display_name"] = display
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=4)
+                fh.write("\n")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     logging.disable(logging.ERROR)
+    refresh_kernelspec_model_name()
     MathKernelApp.launch_instance()

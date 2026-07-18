@@ -1,139 +1,95 @@
 # ToyMath project overview
 
-This document is the detailed system tour. For the short statement of what
-makes ToyMath unusual, start with the [README](../README.md). For the exact
-verified-primitive contract, see [PRIMITIVES.md](PRIMITIVES.md).
+ToyMath is a LaTeX-native symbolic mathematics system: LaTeX in, LaTeX out,
+with expressions stored as a notation DAG. It runs as a Jupyter kernel, a
+console application, and a deterministic JSON CLI.
 
-## System at a glance
+The project contains two deliberately different execution paths:
 
-ToyMath is a Jupyter kernel and console application with LaTeX as its input and
-output language. Its current agentic workflow sits on top of the original
-symbolic engine:
+- the current verified-derivation layer, where an agent chooses narrow tactics
+  and every transformation becomes a mechanically checked ledger step;
+- the classic fixed-point engine, which still evaluates ordinary notebook and
+  console math cells.
+
+For the exact trust and extension contract, read
+[PRIMITIVES.md](PRIMITIVES.md). For notation internals, read
+[NOTATION.md](NOTATION.md).
+
+## Verified derivations at a glance
 
 ```text
-Natural-language goal
+natural-language goal
         |
         v
-Agent chooses a named tactic
+small core prompt + domain skill catalog
+        |
+        +--> load only the needed subject skill
         |
         v
-Deterministic primitive -> fresh notation graph -> LaTeX result
-        |                                      |
-        +---------- independent oracle <-------+
-                               |
-                               v
-                    replayable step ledger
+agent chooses a registered tactic
+        |
+        v
+deterministic transformation ----> fresh notation graph
+        |                                  |
+        +------ independent oracle <-------+
+                         |
+                         v
+                 replayable ledger step
 ```
 
-The layers have deliberately different responsibilities:
+The responsibilities are separated:
 
-- **Strategy:** an LLM decides what mathematical move to try next.
-- **Mechanism:** deterministic code parses and transforms the expression.
-- **Verification:** a separate numeric evaluator checks the proposed result at
-  reproducible sample points.
-- **Record:** the ledger stores tool name, arguments, input, result,
-  assumptions, check status, and a content hash.
+- **Strategy:** the model chooses the next named tactic.
+- **Mechanism:** deterministic code performs one narrow transformation.
+- **Verification:** an independent numeric evaluator spot-checks the move.
+- **Record:** the ledger stores the operation, arguments, input, result,
+  assumptions, check, hash, goal, and any source provenance.
 
-Only successful transforming tool calls become ledger steps. Model prose and
-plots are outside the artifact.
+Only successful transforming tactic calls enter the artifact. Model prose,
+skill text, comments, and plots cannot establish a mathematical result.
 
-## The `do!` notebook endpoint
+## `do!` and progressive skills
 
-A Jupyter cell beginning with `do!` sends the remainder to an agent backed by
-the OpenAI Agents SDK over OpenRouter:
+A notebook cell beginning with `do!` sends the rest of the cell to an
+OpenRouter-backed agent through the OpenAI Agents SDK:
 
 ```text
 do! solve 2x + 3 = 7 for x and verify the candidate
 ```
 
-The agent can act only through ToyMath's function tools. As each call returns:
+The runtime no longer exposes one function schema per mathematical tactic.
+It has a stable small surface:
 
-- the checked step streams into the output cell;
-- assumptions are accumulated;
-- the step joins the notebook-wide ledger;
-- a later cell can refer to the selected result as `[[n]]`.
+- `load_skill` progressively loads a relevant subject workflow;
+- `run_tactic` invokes an allowlisted registry entry;
+- `comment`, `claim`, `conclude`, and `set_result` manage the ledger/result;
+- `plot` appears only when the optional sandbox is available.
 
-A typical rendered step has the shape:
+Core algebra/checking guidance is always present. Differentiation, equations,
+integration, limits, and finite-operator workflows are loaded only when the
+problem needs them. The virtual loader accepts canonical subjects, bounded
+subject aliases, or an exact tactic name and resolves all of them through the
+static registry. A derivation may load another skill when it crosses a subject
+boundary. This keeps the prompt and tool schemas bounded while the tactic
+library grows.
+
+Each successful call streams a checked step such as:
 
 ```text
 s2#43bdac6 [ok] expand: 2x+3-3 = 7-3  ==>  2x = 4
 ```
 
-The agent can designate which established expression should become the cell's
-chainable value. This matters when the last tool call verifies an earlier
-answer—for example, substitution may end at `7 = 7`, while the useful value is
-still `x = 2`.
+All agent cells in a notebook share one ledger. Each cell renders only its new
+slice, and a selected established result becomes addressable as `[[n]]` by a
+later cell.
 
-All `do!` cells in a notebook share one ledger, but each output renders only
-the steps added by that cell. Ledger replay re-executes every stored operation
-and checks its recorded result.
+`prove!` creates a root claim before the model runs. The claim remains visibly
+open until `conclude` receives a connected, goal-owned checked chain. Prose
+cannot substitute for a missing step.
 
-### Plotting
+## Notebook command tiers
 
-When Deno is installed, the agent may receive a plotting tool. Its Python code
-runs in Pyodide WASM under Deno's deny-by-default permissions:
-
-- no environment access;
-- no project-filesystem access;
-- network access only to the package CDNs;
-- matplotlib images returned as data, not executable notebook content.
-
-Plots are captioned as illustrations, never machine-checked evidence. They are
-not ledger steps and replay ignores them. Set `TOYMATH_SANDBOX=off` to disable
-the tool.
-
-## Verified primitives
-
-Every transforming primitive returns a record shaped like:
-
-```text
-{ok, op, args, input, result, assumptions, check}
-```
-
-The principal operations are:
-
-| Primitive | Role |
-|---|---|
-| `substitute(expr, var, value)` | notation-graph replacement with binding-safe grouping |
-| `apply_both_sides(eq, op, arg)` | `+ - * / ^` on equations and inequalities; records nonzero assumptions and flips inequalities for negative constants |
-| `expand(expr)` | canonical rational algebra; outside it, combines like opaque atoms such as `\sin x` |
-| `collect(expr, var)` | groups polynomial and rational expressions by powers of a variable |
-| `evaluate(expr)` | exact arithmetic; reports whether a closed relation holds |
-| `differentiate(expr, var)` | exact rational derivative plus mechanical rules for common functions |
-| `rewrite(expr, lemma, direction)` | applies a registered identity at the root or a matching subterm |
-| `factor_gcd(expr)` | pulls out a common monomial/numeric factor, including applicable relation sides |
-| `factor_quadratic(expr, var)` | factors rational-root quadratics, including applicable relation sides |
-| `integrate_power_rule` | termwise power-rule tactic |
-| `integrate_table` | table tactic for basic functions and `1/x` |
-| `integrate_by_parts(u, dv)` | verifies the supplied split and returns one by-parts step |
-| `integrate_substitute(...)` | verifies a user-supplied substitution before changing variables |
-| `equal?(e1, e2)` | exact/canonical comparison where possible, otherwise an honest numeric verdict |
-
-There is no general `solve`, `simplify`, `factor`, or autonomous `integrate`.
-The agent must expose its strategy as a sequence of narrower operations.
-
-### Two checking paths
-
-ToyMath does not treat one implementation as its own proof of correctness:
-
-1. The symbolic path constructs the transformed notation graph.
-2. The numeric oracle independently evaluates the input and output at fixed,
-   reproducible sample points.
-
-For rational expressions, canonical comparison is exact. Outside that
-fragment, oracle agreement is probabilistic and is reported as such. Domain
-differences, unsupported evaluation, and assumptions are surfaced rather than
-silently converted into equality.
-
-Full details—including opaque atoms, noncommutative matrix words, domain-aware
-checks, and integration verification—are in
-[docs/PRIMITIVES.md](PRIMITIVES.md).
-
-## Named notebook commands
-
-A notebook command is a reusable `do!` instruction stored as Markdown in
-`commands/`. Discovery is automatic: add a valid file and the command becomes
-available without editing a registry.
+Saved notebook commands are Markdown templates in `commands/`:
 
 ```markdown
 ---
@@ -144,118 +100,86 @@ expr: true
 Apply symbolic integration for $ARGUMENTS ...
 ```
 
-This creates `int!`. `commands!` lists the discovered commands. The shipped
-templates include `solve!`, `int!`, and `diff!`.
+They form three execution tiers:
 
-The frontmatter fields are:
+1. **Direct primitive:** `expand!` and `diff!` run one verified operation with
+   no model call.
+2. **Tactic template:** `int!`, `lim!`, and `solve!` seed a focused agent run;
+   the agent loads the relevant skill and records each move.
+3. **Whole derivation:** `do!` accepts an unrestricted natural-language goal;
+   `prove!` adds the claim-closure requirement.
 
-| Field | Meaning |
-|---|---|
-| `name` | command name; defaults to the Markdown filename |
-| `description` | discovery/help text |
-| `expr` | when true, permits inline `{name! ...}` composition |
-
-The body must contain `$ARGUMENTS`, which is replaced by the cell argument.
-The template adds no new authority: the resulting agent still has only the
-verified primitive tools.
-
-## Inline command composition
-
-Expression-capable commands can appear inside LaTeX:
+Expression-capable commands compose inline:
 
 ```text
 {diff! {int! x^3}}
-{int! x^2} + {int! x^2}
 2 {diff! x^2} - 1
 ```
 
-The expression resolver:
-
-1. parses the cell into the notation graph;
-2. resolves nested commands from the inside out;
-3. memoizes identical command/argument pairs within the cell;
-4. splices each checked command result back into the graph with safe grouping;
-5. sends the combined expression through `expand` so the arithmetic glue gets
-   its own oracle check.
-
-Only commands marked `expr: true` can appear inline. Legacy commands or unknown
-commands are refused rather than mixed into an apparently verified composite.
-A per-cell call cap prevents accidental unbounded agent expansion.
+The resolver works inside-out, splices only verified results with safe
+grouping, and sends the combined expression through `expand` so the glue gets
+its own oracle check. Certificates compose locally: each sub-command keeps its
+own steps, while the final check certifies only the splice arithmetic.
 
 ## Command-line interface
 
-`toymath_cli.py` exposes the same primitive layer. Each invocation prints one
-deterministic JSON object; `--session` appends transforming results to a ledger.
+`toymath_cli.py` is the stable external interface. Existing tactic commands
+remain positional and backward compatible:
 
 ```bash
-python toymath_cli.py apply "2x + 3 = 7" - 3 --session derivation.json
-python toymath_cli.py expand "2x+3 - 3 = 7 - 3" --session derivation.json
-python toymath_cli.py factor_quadratic "x^2+6x+9=4" x --session derivation.json
-python toymath_cli.py show --session derivation.json --format md
-python toymath_cli.py replay --session derivation.json
+python toymath_cli.py apply "2x + 3 = 7" - 3 --session work.json
+python toymath_cli.py expand "2x+3-3 = 7-3" --session work.json
+python toymath_cli.py replay --session work.json
 ```
 
-The Claude Code skill in `.claude/skills/toymath/` documents the same protocol.
-The `do!` prompt is generated from that skill file so the two interfaces share
-one operational description.
+The parser and dispatch are generated from the same registry used by `do!` and
+ledger replay. Discovery is generated too:
+
+```bash
+python toymath_cli.py skills
+python toymath_cli.py tactics --skill integration
+python toymath_cli.py describe integrate_by_parts
+```
+
+Ledger-control commands (`claim`, `conclude`, `show`, `replay`) remain explicit
+CLI operations rather than math tactics.
+
+## Plotting
+
+When Deno is installed, plots run in Pyodide WASM under deny-by-default Deno
+permissions: no environment access, no project-filesystem access, and network
+access only to package CDNs. Images are rendered as unverified illustrations,
+never ledger evidence. Set `TOYMATH_SANDBOX=off` to disable the tool.
 
 ## The classic kernel
 
-The original ToyMath is a fixed-point symbolic LaTeX kernel:
+Ordinary math cells use the original fixed-point pipeline:
 
 ```text
-LaTeX -> parser -> notation graph (DAG) -> processor -> LaTeX
+LaTeX -> parser -> notation DAG -> processor fixed point -> LaTeX
 ```
 
-- `notation.py` defines `Symbol`, `Func`, and the graph relations.
-- `LatexParser.py` and `lexer.py` build the notation graph.
-- `LatexWriter.py` renders it back to LaTeX.
-- `processor.py` repeatedly walks the graph until the output reaches a fixed
-  point.
-- `cmd_*.py` modules are auto-discovered procedural commands.
+`processor.py` auto-discovers `cmd_*.py` commands such as `mul!` and `add!`.
+That rewrite layer is retained for existing calculator behavior but is not the
+extension point for new polynomial/rational capabilities. Canonical work
+belongs in `polyrat.py`; agentic mathematical strategy belongs in registered
+verified tactics.
 
-Numeric constants evaluate automatically. Classic symbolic transformations are
-requested with commands such as:
-
-```latex
-\frac{1}{2} + \frac{1}{3}      % -> 5/6
-mul! x^{-1}x                   % -> 1
-mul! (a/b)^2                   % -> a^2/b^2
-add! \frac{a}{b}+\frac{c}{d}   % -> (ad+bc)/(bd)
-add! {mul! (a+b)(c+d)} + x     % nested procedural commands
-```
-
-The verified primitives now carry most agentic algebra. The classic engine
-remains important as the LaTeX parser, notation-DAG substrate, fixed-point
-runtime, and command-node grammar reused by inline agent commands.
-
-Other classic commands include Prolog-style `goal`/`rules`, notation and trace
-tools such as `dump`/`track`/`debug`, and session controls such as
-`echo-on`/`echo-off`/`clear`.
-
-Console mode without Jupyter is available through `python console.py`.
+Notebook prefix commands and `cmd_*.py` rewrite commands share the `name!`
+surface but are different systems. A prompt command must never shadow a
+registered rewrite command.
 
 ## Installation and configuration
 
-Requirements:
-
-- Python 3.11 or newer;
-- [uv](https://docs.astral.sh/uv/);
-- JupyterLab, installed from `requirements.txt`;
-- optionally [Deno](https://deno.com) for sandboxed plotting.
-
 ```bash
-git clone https://github.com/semyonc/toymath.git
-cd toymath
-
 uv venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-
 jupyter kernelspec install kernel_spec --user
+jupyter lab
 ```
 
-Agent configuration lives in `.env` at the repository root:
+Agent configuration is read from `.env`:
 
 ```dotenv
 OPEN_ROUTER=sk-or-...
@@ -263,68 +187,30 @@ OPENROUTER_MODEL=anthropic/claude-sonnet-5
 TOYMATH_SANDBOX=auto
 ```
 
-| Variable | Meaning |
-|---|---|
-| `OPEN_ROUTER` | OpenRouter API key required for agent-backed commands |
-| `OPENROUTER_MODEL` | OpenRouter model slug |
-| `TOYMATH_SANDBOX` | `auto`, `pyodide`, or `off` for the plotting backend |
-
-Launch JupyterLab and select the **Toy Math** kernel:
+The normal test suite is offline; live OpenRouter and plot probes are opt-in:
 
 ```bash
-jupyter lab
+.venv/bin/python -m pytest -q
+TOYMATH_LIVE_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
+TOYMATH_PLOT_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 ```
-
-## Tests
-
-The normal suite is offline. It uses a scripted fake model to exercise the
-complete agent/tool/ledger loop without an API call.
-
-```bash
-pytest                                  # all offline suites
-pytest engine/unittests.py              # classic engine
-pytest engine/unittests_frac.py         # fractions
-pytest engine/unittests_primitives.py   # verified primitives and oracle
-pytest engine/unittests_do.py           # agent endpoint and commands
-```
-
-Live probes are opt-in:
-
-```bash
-TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py
-TOYMATH_PLOT_TESTS=1 pytest engine/unittests_do.py
-```
-
-The first uses the configured OpenRouter model. The second exercises the live
-Deno/Pyodide sandbox.
 
 ## Repository map
 
 ```text
-toymath/
-|- engine/
-|  |- primitives.py       verified primitives and numeric oracle
-|  |- polyrat.py          canonical rational-function core
-|  |- ledger.py           record, render, and replay derivations
-|  |- agent_do.py         do! agent endpoint and function tools
-|  |- prompt_commands.py  discovery of commands/*.md templates
-|  |- expr_commands.py    inline {name! expression} resolver
-|  |- plot_sandbox.py     plotting backend seam
-|  |- notation.py         notation graph structures
-|  |- processor.py        classic fixed-point processor
-|  |- mathShell.py        notebook cell routing
-|  `- cmd_*.py            classic procedural commands
-|- commands/              solve/int/diff prompt templates
-|- docs/                  this tour, primitive and notation internals, images
-|- toymath_cli.py         JSON command-line interface
-|- toymathkernel.py       Jupyter kernel entry point
-`- .claude/skills/        agent-facing ToyMath protocol
+engine/primitives.py       shared notation infrastructure and numeric oracle
+engine/tactics/*.py        static tactic implementations by subject skill
+engine/tactic_registry.py  authoritative tactic schemas and dispatch
+engine/tactic_skills.py    progressive SKILL.md discovery/rendering
+engine/ledger.py           record, render, claim closure, and replay
+engine/agent_do.py         do! runtime and stable model tool surface
+engine/polyrat.py          canonical rational-function core
+engine/expr_commands.py    inline command composition
+engine/prompt_commands.py  commands/*.md discovery
+engine/plot_sandbox.py     figure backend seam (Pyodide plots, TikZ SVG)
+engine/processor.py        classic fixed-point engine
+toymath_cli.py             generated tactic CLI + ledger controls
 ```
 
-## Further documentation
-
-- [Verified primitives](PRIMITIVES.md)
-- [Notation graph internals](NOTATION.md)
-- [Developer and agent guide](../AGENTS.md)
-
-ToyMath is released under the MIT License.
+Further reading: [verified-derivation contract](PRIMITIVES.md),
+[notation DAG](NOTATION.md), and [agent/developer workflow](../AGENTS.md).

@@ -14,19 +14,10 @@ import json
 import os
 import hashlib
 
+from tactic_registry import TRANSFORMING_OPS
+from tactics import core as core_tactics
+
 LEDGER_VERSION = 2
-
-# primitives whose successful results become ledger steps (everything that
-# transforms an expression; equal/lemmas are queries, not steps)
-TRANSFORMING_OPS = frozenset({
-    'substitute', 'apply_both_sides', 'expand', 'collect', 'evaluate',
-    'differentiate', 'rewrite', 'factor_gcd', 'factor_quadratic',
-    'limit_rewrite', 'limit_substitute', 'limit_linearity', 'limit_table',
-    'limit_lhopital', 'limit_assemble',
-    'integrate_power_rule', 'integrate_table', 'integrate_by_parts',
-    'integrate_substitute', 'integrate_rewrite', 'integrate_linearity',
-    'integrate_assemble'})
-
 
 def _step_hash(op, input_latex, result_latex):
     h = hashlib.sha1(f'{op}|{input_latex}|{result_latex}'.encode('utf-8'))
@@ -60,20 +51,30 @@ def _presentation_free(conclusion):
 
 
 def _eq_yes(left, right):
-    """Semantic equality used only for ledger connectivity/closure."""
+    """Semantic equality used only for ledger connectivity/closure.
+    Structural identity (which tolerates ellipsis spellings) is decided
+    first; equal_exprs does math and therefore refuses ellipsis input."""
     import primitives
     try:
-        rec = primitives.equal_exprs(left, right)
+        if primitives.same_expression(left, right):
+            return True
+    except Exception:
+        pass
+    try:
+        rec = core_tactics.equal_exprs(left, right)
     except Exception:
         return False
     return rec.get('ok') and rec.get('verdict') == 'yes'
 
 
 def _relation_parts(statement):
-    """Return (lhs, rhs, relation) for a parsed relation, else None."""
+    """Return (lhs, rhs, relation) for a parsed relation, else None.
+    Parses with allow_ellipsis: this only splits a statement into sides
+    (comparison class, no math); an ellipsis claim is pinned down by the
+    *_from_ellipsis step whose recorded assumption interprets it."""
     import primitives
     from notation import Notation
-    sym, notation = primitives.parse_latex(statement)
+    sym, notation = primitives.parse_latex(statement, allow_ellipsis=True)
     comp = notation.getf(sym, Notation.COMP)
     if comp is None:
         return None
@@ -84,14 +85,13 @@ def _relation_parts(statement):
 
 def _relation_holds(statement):
     """Mechanically decide a relation endpoint when possible."""
-    import primitives
     parts = _relation_parts(statement)
     if parts is None:
         return False
     lhs, rhs, relation = parts
     if relation == '=':
         return _eq_yes(lhs, rhs)
-    rec = primitives.evaluate(statement)
+    rec = core_tactics.evaluate(statement)
     return rec.get('ok') and rec.get('holds') is True
 
 
@@ -142,19 +142,37 @@ class Ledger(object):
         return next((c for c in self.claims if c['id'] == claim_id), None)
 
     def record_claim(self, statement, parent=None):
-        """Record a parseable root claim or subclaim, initially open."""
+        """Record a parseable root claim or subclaim, initially open.
+
+        Ellipsis statements are accepted: recording only validates the
+        relation shape, and a claim containing an ellipsis can only ever
+        close through a *_from_ellipsis step whose recorded assumption
+        pins down the reading."""
         import primitives
         statement = (statement or '').strip()
         if not statement:
             raise ValueError('empty claim')
         try:
-            primitives.parse_latex(statement)
+            primitives.parse_latex(statement, allow_ellipsis=True)
         except primitives.PrimitiveError as e:
             raise ValueError(str(e))
         if _relation_parts(statement) is None:
             raise ValueError('claim must be a top-level relation')
         if parent is not None and self.get_claim(parent) is None:
             raise ValueError(f'unknown parent claim {parent!r}')
+        # Repeating a formatting variant of the same open claim should focus
+        # the existing goal, not mint another notebook-global claim id.
+        for claim in self.claims:
+            if (claim.get('parent') == parent
+                    and claim.get('verdict') == 'open'):
+                try:
+                    same = (claim.get('statement') == statement
+                            or primitives.same_expression(
+                                claim.get('statement', ''), statement))
+                except (primitives.PrimitiveError, ValueError):
+                    same = False
+                if same:
+                    return claim
         claim = {
             'id': f'c{len(self.claims) + 1}',
             'hash': _claim_hash(statement, parent),
@@ -180,8 +198,7 @@ class Ledger(object):
             if prev == cur:
                 continues = True
             else:
-                import primitives
-                eq = primitives.equal_exprs(prev, cur)
+                eq = core_tactics.equal_exprs(prev, cur)
                 continues = (eq.get('verdict') == 'yes'
                              if eq.get('ok') else None)
         step = {
@@ -205,6 +222,8 @@ class Ledger(object):
             step['terms'] = result['terms']
         if result.get('sources'):
             step['sources'] = result['sources']
+        if result.get('solutions') is not None:
+            step['solutions'] = list(result['solutions'])
         if goal is not None:
             step['goal'] = goal
         self.steps.append(step)
@@ -337,48 +356,7 @@ class Ledger(object):
         """Re-run every step through its primitive and confirm the recorded
         result. Returns {'status': 'verified'|'failed', ...}."""
         import primitives
-        dispatch = {
-            'substitute': lambda a: primitives.substitute(
-                a['expr'], a['var'], a['value']),
-            'apply_both_sides': lambda a: primitives.apply_both_sides(
-                a['equation'], a['op'], a['arg']),
-            'expand': lambda a: primitives.expand(a['expr']),
-            'collect': lambda a: primitives.collect(a['expr'], a['var']),
-            'evaluate': lambda a: primitives.evaluate(a['expr']),
-            'differentiate': lambda a: primitives.differentiate(
-                a['expr'], a['var']),
-            'rewrite': lambda a: primitives.rewrite(
-                a['expr'], a['lemma'], a.get('direction', 'forward')),
-            'factor_gcd': lambda a: primitives.factor_gcd(a['expr']),
-            'factor_quadratic': lambda a: primitives.factor_quadratic(
-                a['expr'], a['var']),
-            'limit_rewrite': lambda a: primitives.limit_rewrite(
-                a['expr'], a['new_body']),
-            'limit_substitute': lambda a: primitives.limit_substitute(
-                a['expr']),
-            'limit_linearity': lambda a: primitives.limit_linearity(
-                a['expr']),
-            'limit_table': lambda a: primitives.limit_table(a['expr']),
-            'limit_lhopital': lambda a: primitives.limit_lhopital(a['expr']),
-            'limit_assemble': lambda a: primitives.limit_assemble(
-                a['expr'], a['values']),
-            'integrate_power_rule': lambda a: primitives.integrate_power_rule(
-                a['expr'], a['var']),
-            'integrate_table': lambda a: primitives.integrate_table(
-                a['expr'], a['var']),
-            'integrate_by_parts': lambda a: primitives.integrate_by_parts(
-                a['expr'], a['var'], a['u'], a['dv']),
-            'integrate_substitute':
-                lambda a: primitives.integrate_substitute(
-                    a['expr'], a['var'], a['u_expr'], a['u_var'],
-                    a['new_integrand']),
-            'integrate_rewrite': lambda a: primitives.integrate_rewrite(
-                a['expr'], a['var'], a['new_integrand']),
-            'integrate_linearity': lambda a: primitives.integrate_linearity(
-                a['expr'], a['var']),
-            'integrate_assemble': lambda a: primitives.integrate_assemble(
-                a['expr'], a['var'], a['antiderivatives']),
-        }
+        import tactic_registry
         seen = {}
         replayed_steps = []
         for step in self.steps:
@@ -386,72 +364,29 @@ class Ledger(object):
                 seen[step['id']] = step
                 replayed_steps.append(step)
                 continue
-            if step['op'] == 'integrate_assemble':
-                sources = step.get('sources') or {}
-                linearity = seen.get(sources.get('linearity'))
-                if linearity is None or linearity.get('op') != \
-                        'integrate_linearity':
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'missing linearity-step provenance'}
-                args = step.get('args', {})
-                if (linearity.get('input') != args.get('expr')
-                        or linearity.get('args', {}).get('var')
-                        != args.get('var')):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'linearity-step provenance mismatch'}
-                source_ids = sources.get('antiderivatives') or []
-                values = args.get('antiderivatives') or []
-                if len(source_ids) != len(values):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'antiderivative provenance mismatch'}
-                for source_id, value in zip(source_ids, values):
-                    source = seen.get(source_id)
-                    if source is None or source.get('result') != value:
-                        return {
-                            'status': 'failed', 'step': step['id'],
-                            'reason': ('antiderivative provenance mismatch '
-                                       f'at {source_id}')}
-            if step['op'] == 'limit_assemble':
-                sources = step.get('sources') or {}
-                linearity = seen.get(sources.get('linearity'))
-                if linearity is None or linearity.get('op') != \
-                        'limit_linearity':
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'missing limit-linearity provenance'}
-                args = step.get('args', {})
-                if linearity.get('input') != args.get('expr'):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'limit-linearity provenance mismatch'}
-                source_ids = sources.get('values') or []
-                values = args.get('values') or []
-                if len(source_ids) != len(values):
-                    return {'status': 'failed', 'step': step['id'],
-                            'reason': 'limit-value provenance mismatch'}
-                for source_id, value in zip(source_ids, values):
-                    source = seen.get(source_id)
-                    if source is None or source.get('result') != value:
-                        return {
-                            'status': 'failed', 'step': step['id'],
-                            'reason': ('limit-value provenance mismatch at '
-                                       f'{source_id}')}
-            fn = dispatch.get(step['op'])
-            if fn is None:
+            provenance_error = tactic_registry.validate_provenance(step,
+                                                                   seen)
+            if provenance_error:
                 return {'status': 'failed', 'step': step['id'],
-                        'reason': f'unknown op {step["op"]}'}
-            res = fn(step['args'])
+                        'reason': provenance_error}
+            res = tactic_registry.replay(step['op'], step['args'])
             if not res.get('ok'):
                 return {'status': 'failed', 'step': step['id'],
                         'reason': res.get('error')}
             if res.get('result') != step['result']:
                 # tolerate formatting drift between versions, but only if
                 # the results are semantically equal
-                eq = primitives.equal_exprs(res.get('result'),
-                                            step['result'])
+                eq = core_tactics.equal_exprs(res.get('result'),
+                                              step['result'])
                 if not (eq.get('ok') and eq.get('verdict') == 'yes'):
                     return {'status': 'failed', 'step': step['id'],
                             'reason': 'result mismatch',
                             'recorded': step['result'],
                             'replayed': res.get('result')}
+            if ('solutions' in step
+                    and res.get('solutions') != step['solutions']):
+                return {'status': 'failed', 'step': step['id'],
+                        'reason': 'solution metadata mismatch'}
             if res.get('check', {}).get('status') == 'disagree':
                 return {'status': 'failed', 'step': step['id'],
                         'reason': 'numeric oracle disagrees on replay'}
@@ -463,7 +398,11 @@ class Ledger(object):
         for claim in self.claims:
             try:
                 import primitives
-                primitives.parse_latex(claim.get('statement', ''))
+                # shape-only validation, mirroring record_claim: an ellipsis
+                # claim is recordable and closes only through an
+                # interpretation step, so replay must not reject it here
+                primitives.parse_latex(claim.get('statement', ''),
+                                       allow_ellipsis=True)
                 if claim.get('hash') != _claim_hash(
                         claim.get('statement', ''), claim.get('parent')):
                     raise ValueError('claim hash mismatch')

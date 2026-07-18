@@ -48,8 +48,13 @@ class MathShell(object):
     def __init__(self):
         self.history = {}
         self.parsedNotation = Notation()
-        self.parser = MathParser(self.parsedNotation)
         self.processor = MathProcessor(model=PrologModel())
+        # Discover both command systems before constructing the lexer. Bang
+        # words become COMMAND tokens only when this registry admits them;
+        # every other bang is mathematical factorial syntax.
+        self.commands = prompt_commands.load_commands()
+        self.parser = MathParser(
+            self.parsedNotation, command_names=self._command_names())
         self.processor.trace = self.trace_step
         self.history = {}
         self.execution_history = {}
@@ -61,9 +66,11 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
-        # discoverable do!-style commands from the repo commands/ directory;
-        # commands! reloads this registry so newly-added files go live
-        self.commands = prompt_commands.load_commands()
+        # commands! reloads the discoverable prompt-command registry.
+
+    def _command_names(self):
+        return (set(self.processor.actions) | set(self.commands)
+                | set(prompt_commands.RESERVED))
 
     def trace_step(self, sym, notation, index):
         if self.trace:
@@ -74,6 +81,7 @@ class MathShell(object):
 
     def add_action(self, name, instance):
         self.processor.actions[name] = instance
+        self.parser.command_names = frozenset(self._command_names())
 
     def set_echo(self, current_echo=None, echo_mode=None):
         if current_echo is not None:
@@ -139,6 +147,7 @@ class MathShell(object):
         """Render the discoverable command list. Reloads the registry first
         so a newly-added commands/*.md file goes live without a restart."""
         self.commands = prompt_commands.load_commands()
+        self.parser.command_names = frozenset(self._command_names())
         rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
                 f'<code>{_html.escape(c.name)}!</code></td>'
                 f'<td style="color:#444">{_html.escape(c.description)}'
@@ -182,6 +191,8 @@ class MathShell(object):
     def resolve_backrefs(self, text):
         """Inline [[n]] references as the rendered LaTeX of prior cell
         results; raises ValueError on an undefined reference."""
+        import primitives
+
         def repl(m):
             key = m.group(1)
             sym = self.execution_history.get(key)
@@ -189,7 +200,7 @@ class MathShell(object):
                 raise ValueError(
                     f'[[{key}]] does not reference a previous result')
             notation = self.history.get(sym, self.parsedNotation)
-            return LaTexWriter(notation)(sym)
+            return primitives.write_latex(sym, notation)
         return BACKREF_RE.sub(repl, text)
 
     _DO_MARKS = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
@@ -224,6 +235,86 @@ class MathShell(object):
             lines.append(f'<div style="margin-left:2em;color:#888">'
                          f'assumes {self._assumption_html(a)}</div>')
         return ''.join(lines)
+
+    _CHECK_COLORS = {'agree': '#176b2c', 'exact': '#176b2c',
+                     'skipped': '#888', 'domain-differs': '#b65c00',
+                     'disagree': '#c00'}
+
+    def render_do_chain(self, steps):
+        """End-of-run summary table of a run's verified chain, generated
+        from the ledger records themselves — the agent is told never to
+        retype it. Returns None when a table would add nothing (fewer
+        than two transforming steps)."""
+        rows = []
+        for step in steps:
+            if step.get('result') is None:
+                continue  # comments are strategy notes, not chain links
+            check = step['check'].get('status', '?')
+            color = self._CHECK_COLORS.get(check, '#c00')
+            branch = ('<div style="color:#888;font-size:85%">(branch)'
+                      '</div>'
+                      if step.get('continues') is False else '')
+            note = ''
+            if step['op'] == 'apply_both_sides':
+                a = step['args']
+                note = ' ' + _html.escape(a['op'] + ' ' + a['arg'])
+            assum = ''
+            if step['assumptions']:
+                assum = (f' <span style="color:#888">+'
+                         f'{len(step["assumptions"])} assum.</span>')
+            cell = 'padding:2px 12px 2px 0;text-align:left;' \
+                   'vertical-align:top'
+            rows.append(
+                '<tr>'
+                f'<td style="{cell}"><code>{step["id"]}</code>'
+                f'{branch}</td>'
+                f'<td style="{cell}"><code>'
+                f'{_html.escape(step["op"])}{note}</code></td>'
+                f'<td style="{cell}">${step["result"]}$</td>'
+                f'<td style="{cell};color:{color}">{check}{assum}</td>'
+                '</tr>')
+        if len(rows) < 2:
+            return None
+        head = 'padding:2px 12px 2px 0;text-align:left;' \
+               'border-bottom:1px solid #8884'
+        header = ('<tr>'
+                  + ''.join(f'<th style="{head}">{h}</th>'
+                            for h in ('step', 'move', 'result', 'check'))
+                  + '</tr>')
+        return ('<div style="margin-top:4px"><strong>verified chain'
+                '</strong> <span style="color:#888">&mdash; rendered '
+                'from the ledger</span></div>'
+                '<table style="border-collapse:collapse">'
+                + header + ''.join(rows) + '</table>')
+
+    @staticmethod
+    def _figure_html(figure):
+        """One sandbox figure as HTML, by kind.
+
+        png  - a raster, inlined as a data URI.
+        svg  - TikZ output: inert markup with its fonts already inlined,
+               so it drops straight in and still renders offline.
+        html - plotly, which needs its own <script> to run. JupyterLab
+               strips scripts from cell output, so it only survives inside
+               an iframe, which is a separate browsing context. srcdoc is
+               attribute-escaped; the sandbox attribute keeps the figure
+               from reaching back into the notebook page.
+        """
+        kind = figure.get('kind', 'png')
+        data = figure.get('data') or ''
+        if kind == 'svg':
+            # tex2jax_ignore: the glyphs are already typeset, MathJax must
+            # not re-scan them for $...$ delimiters
+            return (f'<div class="tex2jax_ignore" '
+                    f'style="max-width:640px;overflow-x:auto">{data}</div>')
+        if kind == 'html':
+            height = int(figure.get('height') or 520)
+            return (f'<iframe sandbox="allow-scripts" '
+                    f'srcdoc="{_html.escape(data, quote=True)}" '
+                    f'style="width:100%;max-width:760px;height:{height}px;'
+                    f'border:none"></iframe>')
+        return (f'<div><img src="data:image/png;base64,{data}" '
+                f'style="max-width:640px"/></div>')
 
     @staticmethod
     def _assumption_html(assumption):
@@ -282,11 +373,9 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail the derivation step
 
-        def on_plot(caption, images):
+        def on_plot(caption, figures):
             try:
-                parts = [f'<div><img src="data:image/png;base64,{b64}" '
-                         f'style="max-width:640px"/></div>'
-                         for b64 in images]
+                parts = [self._figure_html(f) for f in figures]
                 parts.append(f'<div style="color:#888"><em>'
                              f'{_html.escape(caption)}</em> '
                              f'&mdash; illustration, not machine-checked'
@@ -307,6 +396,9 @@ class MathShell(object):
             self._do_error(res.get('error', 'agent failed'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
+        chain = self.render_do_chain(res.get('steps') or [])
+        if chain:
+            display(HTML(chain))
         if res.get('summary'):
             label = ('<strong>agent narrative — unverified:</strong> '
                      if res.get('summary_unverified') else '')
@@ -349,7 +441,10 @@ class MathShell(object):
             self._do_error(str(e))
             return
         try:
-            sym, notation = primitives.parse_latex(text)
+            # ellipsis may legitimately appear inside a command argument
+            # (the agent interprets it via sum_from_ellipsis); the glue
+            # expand() below still rejects it outside command results
+            sym, notation = primitives.parse_latex(text, allow_ellipsis=True)
         except primitives.PrimitiveError as e:
             self._do_error(str(e))
             return
@@ -369,9 +464,10 @@ class MathShell(object):
             self._do_error(str(e))
             return
 
-        composite = LaTexWriter(resolver.output_notation)(root)
+        composite = primitives.write_latex(root, resolver.output_notation)
         # verified glue: the numeric oracle proves the composition
-        rec = primitives.expand(composite)
+        from tactics import core as core_tactics
+        rec = core_tactics.expand(composite)
         assumptions = []
         for run in resolver.subruns:
             for a in run.get('assumptions', []):
@@ -420,9 +516,13 @@ class MathShell(object):
             notation = snapshot
             self.execution_history[str(execution_count)] = outsym
             self.history[outsym] = snapshot
-        writer = LaTexWriter(notation, show_quotes=self.show_quotes)
-        result = writer(outsym)
-        return result
+        if self.show_quotes:
+            return LaTexWriter(notation, show_quotes=True)(outsym)
+        # Notebook output is also future [[n]] input.  Use the validated
+        # pretty writer so repeated parse/write hops stay stable instead of
+        # accumulating one transparent brace layer per hop.
+        import primitives
+        return primitives.write_latex(outsym, notation)
 
     def clear(self):
         self.processor.prologModel.clear()

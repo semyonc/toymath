@@ -114,6 +114,8 @@ class Notation(object):
     INDEX = Symbol('index')
     LIMITS = Symbol('limits')
     NOLIMITS = Symbol('nolimits')
+    FACTORIAL = Symbol('factorial')
+    BINOM = Symbol('\\binom')
     REF = Symbol('backref')
     PRIME = Symbol('prime')
     PLUS = Symbol('+')

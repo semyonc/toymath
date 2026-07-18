@@ -99,6 +99,12 @@ class TestScenario(unittest.TestCase):
             [("a", NotationParam.Value), ("b", NotationParam.Value)],
         )
 
+    def test_classic_relation_system(self):
+        self.checkEqual('x+x=2,y+y=4', '2x=2,2y=4')
+
+    def test_classic_product_slash_in_exponent(self):
+        self.checkEqual('(-1)^{n(n-1)/2}', '(-1)^{n(n-1)/2}')
+
     def test_pattern2(self):
         self.assertCompare("a + b + c", "c + b + a")
 
@@ -229,6 +235,21 @@ class TestScenario(unittest.TestCase):
             "x \\pmatrix{1 & 2 \\cr 3 & 4} x",
             "x^2 \\pmatrix{1 & 2 \\cr 3 & 4}",
         )
+
+    def test_bmatrix_environment_classic_path(self):
+        expr = "\\begin{bmatrix}1 & 2 \\\\ 3 & 4\\end{bmatrix}"
+        notation = Notation()
+        sym = MathParser(notation).parse(expr)
+        self.assertEqual(
+            LaTexWriter(notation)(sym),
+            "\\begin{bmatrix} {1} & {2} \\\\ {3} & {4} \\end{bmatrix}",
+        )
+        self.checkEqual(expr, expr)
+
+    def test_bmatrix_word_order(self):
+        a = "\\begin{bmatrix}1 & 2 \\\\ 3 & 4\\end{bmatrix}"
+        b = "\\begin{bmatrix}0 & 1 \\\\ 1 & 0\\end{bmatrix}"
+        self.checkEqual(f"{a} {b} {a}", f"{a} {b} {a}")
 
     def test_infty_no_cancel(self):
         self.checkEqual("\\infty - \\infty", "\\infty - \\infty")

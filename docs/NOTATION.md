@@ -123,6 +123,26 @@ _n6: p-list [f, _n5]            # Function application as product list
 - `_n5` represents `x` grouped with parentheses
 - `_n6` represents function application as a product of `f` and its argument group
 
+### Example 5: Matrix environments
+
+Standard non-alignment matrix environments normalize before grammar dispatch.
+For example, `\begin{bmatrix}a & b \\ c & d\end{bmatrix}` is stored as:
+
+```text
+_n1: \bmatrix [[a, b], [c, d]]
+```
+
+Rows and columns are nested lists, while the function-symbol name preserves
+the environment kind. `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, and
+`smallmatrix` write back as AMS environments because MathJax does not expose
+equivalent plain-TeX commands. `matrix` and `pmatrix` retain ToyMath's existing
+plain-command canonical output. `cases` uses the same row/column shape but is
+piecewise scalar syntax, not a matrix-valued object.
+
+The shared parser normalization deliberately excludes `array` and starred
+matrix variants: their alignment preambles require explicit notation metadata
+to round-trip without loss.
+
 ## Built-in Symbol Types
 
 The `Notation` class defines several predefined symbols for common operations:
@@ -134,9 +154,11 @@ The `Notation` class defines several predefined symbols for common operations:
 | `GROUP` | `group` | Grouping with brackets |
 | `FUNC` | `func` | Function application |
 | `INDEX` | `index` | Indexing/subscript |
+| `FACTORIAL` | `factorial` | Postfix factorial `(operand,)` |
+| `BINOM` | `\binom` | Binomial coefficient `(n, k)` |
 | `P_LIST` | `p-list` | Product list (multiplication) |
 | `S_LIST` | `s-list` | Sum list (addition) |
-| `C_LIST` | `c-list` | Comma-separated list (function arguments, parameters) |
+| `C_LIST` | `c-list` | Comma-separated list (arguments, parameters, or relation systems) |
 | `A_LIST` | `a-list` | Logical AND list (conjunction) |
 | `O_LIST` | `o-list` | Logical OR list (disjunction) |
 | `SETQ` | `setq` | Assignment |
@@ -241,9 +263,9 @@ enter_and_expr_list       (logical AND: ∧)
   ↓
 enter_not_expr            (negation: ¬)
   ↓
-enter_subformula          (comparisons: =, <, >, etc.)
+enter_subformula          (comparisons and comma-separated relation systems)
   ↓
-enter_comma_list          (comma-separated lists: function arguments, parameters)
+enter_comma_list          (comma-separated relations, arguments, parameters)
   ↓
 enter_additive_expr_list  (sum lists: a + b + c)
   ↓
@@ -332,6 +354,14 @@ class LaTexWriter(object):
     def write_symbol(self, sym):
         # Output the symbol name
 ```
+
+Direct `LaTexWriter` output is the faithful/raw graph spelling. User-visible
+verified results and notebook-history values use `primitives.write_latex`,
+whose `PrettyWriter` candidate is accepted only after reparsing to the same
+normal form. This distinction matters for repeated `[[n]]` hops: reparsing an
+index introduces transparent brace groups, so raw writing would grow
+`x^{3}` into `x^{{3}}`, then `x^{{{3}}}`, while validated pretty output stays
+idempotent.
 
 ### Context Tracking
 

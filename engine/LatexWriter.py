@@ -21,6 +21,8 @@ class LaTexWriter(object):
         '\\color': 'write_color',
         '\\lower': 'write_lower',
         '\\sqrt': 'write_sqrt',
+        'factorial': 'write_factorial',
+        '\\binom': 'write_binom',
         '\\buildrel': 'write_buildrel',
         'group': 'write_group',
         'vgroup': 'write_vgroup',
@@ -29,6 +31,11 @@ class LaTexWriter(object):
         '\\array': 'write_array',
         '\\pmatrix': 'write_array',
         '\\matrix': 'write_array',
+        '\\bmatrix': 'write_array',
+        '\\Bmatrix': 'write_array',
+        '\\vmatrix': 'write_array',
+        '\\Vmatrix': 'write_array',
+        '\\smallmatrix': 'write_array',
         '\\cases': 'write_array',
         '\\text': 'write_text',
         '\\textbf': 'write_text',
@@ -170,7 +177,7 @@ class LaTexWriter(object):
             for i, expr in enumerate(f.args):
                 if i > 0:
                     self.writeString(',')
-                self.write_additive_expr_list(expr)
+                self.write_subformula(expr)
         else:
             self.write_additive_expr_list(sym)
 
@@ -213,7 +220,9 @@ class LaTexWriter(object):
         if not self._probe(sym, '\\color') \
                 and not self._probe(sym, '\\lower') \
                 and not self._probe(sym, '\\buildrel') \
-                and not self._probe(sym, '\\sqrt'):
+                and not self._probe(sym, '\\sqrt') \
+                and not self._probe(sym, 'factorial') \
+                and not self._probe(sym, '\\binom'):
             f = self.notation.get(sym)
             if f is not None:
                 if f.sym == Notation.INDEX:
@@ -224,9 +233,14 @@ class LaTexWriter(object):
                     self.write_nolimits(f)
                 elif f.sym.name in Notation.oper:
                     self.writeString(f.sym.name)
+                    braced_args = f.sym.name in ('\\frac', '\\dfrac',
+                                                 '\\tfrac', '\\cfrac')
                     for expr in f.args:
                         self.writeString(' ')
-                        self.write_expr(expr)
+                        if braced_args:
+                            self.write_frac_item(expr)
+                        else:
+                            self.write_expr(expr)
                 else:
                     self.write_scalar(sym)
             else:
@@ -247,6 +261,8 @@ class LaTexWriter(object):
         if not self._probe(sym, "group") \
                 and not self._probe(sym, "vgroup") \
                 and not self._probe(sym, "sgroup") \
+                and not self._probe(sym, "factorial") \
+                and not self._probe(sym, "\\binom") \
                 and not self._probe(sym, "func") \
                 and not self._probe(sym, "\\text") \
                 and not self._probe(sym, "\\textbf") \
@@ -257,6 +273,11 @@ class LaTexWriter(object):
                 and not self._probe(sym, "\\array") \
                 and not self._probe(sym, "\\pmatrix") \
                 and not self._probe(sym, "\\matrix") \
+                and not self._probe(sym, "\\bmatrix") \
+                and not self._probe(sym, "\\Bmatrix") \
+                and not self._probe(sym, "\\vmatrix") \
+                and not self._probe(sym, "\\Vmatrix") \
+                and not self._probe(sym, "\\smallmatrix") \
                 and not self._probe(sym, "\\cases"):
             f = self.notation.getf(sym, Notation.REF)
             if f is not None:
@@ -298,6 +319,48 @@ class LaTexWriter(object):
             self.writeString('{')
             self.write_scalar(sym)
             self.writeString('}')
+
+    def write_frac_item(self, sym):
+        # \frac consumes exactly one token or {...} group per argument:
+        # a ()-group or \left...\right argument emitted bare changes the
+        # meaning for any standard LaTeX reader (\frac {dx} (g) reads as
+        # numerator dx over denominator "("), so anything that is not a
+        # bare token, a {}-group, or a self-bracing value repr is wrapped
+        if isinstance(sym, Symbol):
+            f = self.notation.get(sym)
+            selfdelimited = f is None or (
+                f.sym == Notation.GROUP and f.props.get('br') == '{}')
+        else:
+            selfdelimited = sym.__repr__().startswith('{')
+        if selfdelimited:
+            self.write_expr(sym)
+        else:
+            self.writeString('{')
+            self.write_formula(sym)
+            self.writeString('}')
+
+    def write_factorial(self, f):
+        # write_expr automatically braces a programmatically-built composite
+        # operand, so the result remains parseable even beyond parser-built
+        # scalar/index/factorial operands.
+        self.write_expr(f.args[0])
+        self.writeString('!')
+
+    def write_binom_item(self, sym):
+        # Always emit standard, self-delimited LaTeX. Strip one transparent
+        # parser group to prevent brace growth across parse/write cycles.
+        group = self.notation.getf(sym, Notation.GROUP)
+        if group is not None and group.props.get('br') == '{}' \
+                and 'quoted' not in group.props:
+            sym = group.args[0]
+        self.writeString('{')
+        self.write_formula(sym)
+        self.writeString('}')
+
+    def write_binom(self, f):
+        self.writeString('\\binom')
+        self.write_binom_item(f.args[0])
+        self.write_binom_item(f.args[1])
 
     def write_index(self, f):
         dims = f.args[1]
@@ -405,7 +468,7 @@ class LaTexWriter(object):
             self.write_expr(expr)
 
     def write_slashExpr(self, f):
-        self.write_expr(f.args[0])
+        self.write_composite_expr(f.args[0])
         self.writeString('/')
         self.write_expr(f.args[1])
 
@@ -501,15 +564,24 @@ class LaTexWriter(object):
         self.writeString('\\}')
 
     def write_array(self, f):
-        self.writeString(f.sym.name)
-        self.writeString('{')
-        self.write_row_list(f.args)
-        self.writeString('}')
+        name = f.sym.name[1:]
+        if name in ('bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix',
+                    'smallmatrix'):
+            # MathJax supports these as AMS environments, not as the
+            # plain-TeX commands used internally by the notation DAG.
+            self.writeString(f'\\begin{{{name}}}')
+            self.write_row_list(f.args, separator=' \\\\ ')
+            self.writeString(f'\\end{{{name}}}')
+        else:
+            self.writeString(f.sym.name)
+            self.writeString('{')
+            self.write_row_list(f.args)
+            self.writeString('}')
 
-    def write_row_list(self, rows):
+    def write_row_list(self, rows, separator='\\cr'):
         for i, row in enumerate(rows):
             if i > 0:
-                self.writeString('\\cr')
+                self.writeString(separator)
             self.write_col_list(row)
 
     def write_col_list(self, row):

@@ -69,7 +69,10 @@ def is_spacer(sym):
     return issym(sym, ["\\!", "\\,", "\\:", "\\;", "\\;"])
 
 
-MATRIX_NODE_NAMES = ('\\array', '\\pmatrix', '\\matrix', '\\vec')
+MATRIX_NODE_NAMES = (
+    '\\array', '\\pmatrix', '\\matrix', '\\bmatrix', '\\Bmatrix',
+    '\\vmatrix', '\\Vmatrix', '\\smallmatrix', '\\vec',
+)
 
 
 def contains_matrix_node(sym, notation):

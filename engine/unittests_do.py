@@ -13,6 +13,9 @@ from unittest import mock
 
 import agent_do
 import plot_sandbox
+import tactic_registry
+from tactics import core as core_tactics
+from tactics import integration as integration_tactics
 from agent_do import DoSession, make_api, run_instruction
 from ledger import Ledger
 
@@ -44,6 +47,19 @@ class ScriptedModel(Model):
 
 
 def tool_call(name, args, cid):
+    if name in tactic_registry.BY_NAME:
+        spec = tactic_registry.BY_NAME[name]
+        ordered = []
+        for arg in spec.agent_args:
+            value = args.get(arg.name, arg.default)
+            if value is tactic_registry._MISSING:
+                raise AssertionError(f'missing scripted argument {arg.name}')
+            if arg.nargs in ('+', '*'):
+                ordered.extend(value)
+            else:
+                ordered.append(value)
+        name = 'run_tactic'
+        args = {'tactic': spec.name, 'arguments': ordered}
     return ResponseFunctionToolCall(type='function_call', name=name,
                                     arguments=json.dumps(args),
                                     call_id=cid, id=cid)
@@ -70,16 +86,30 @@ class TestPromptBuilder(unittest.TestCase):
         # frontmatter stripped, bash invocation replaced, rules appended
         self.assertFalse(p.startswith('---'))
         self.assertNotIn('python toymath_cli.py <command>', p)
-        self.assertIn('Jupyter notebook cell', p)
+        self.assertIn('Invocation inside do!', p)
         self.assertIn('## do! mode', p)
-        # the command table survives verbatim
+        # core signatures and the small domain catalog are present; detailed
+        # subject tactics are progressively loaded
         self.assertIn('factor_quadratic', p)
+        self.assertIn('`integration`', p)
+        self.assertIn('`equations`', p)
+        self.assertNotIn('integrate_by_parts EXPR', p)
+        self.assertIn('never for\n  an equation whose solutions', p)
         self.assertIn('mechanically checked', p)
 
     def test_missing_skill_falls_back(self):
         p = agent_do.build_prompt(skill_path='/nonexistent/SKILL.md')
         self.assertIn('mechanical checker', p)
         self.assertIn('## do! mode', p)
+
+    def test_prompt_forbids_restating_the_ledger(self):
+        # live defect: an agent hand-retyped the step chain as a markdown
+        # table (raw pipes in the em line, broken attachment: image link).
+        # The notebook renders the verified chain from the ledger; the
+        # prompt must keep final answers to plain commentary.
+        p = agent_do.build_prompt()
+        self.assertIn('Never restate ledger steps', p)
+        self.assertIn('write image links', p)
 
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
@@ -169,6 +199,25 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertTrue(rec['ok'])
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertEqual(session.new_steps(), [])
+
+    def test_plain_do_claim_does_not_become_governing_proof(self):
+        session = DoSession()
+        claim = session.claim('x^2-1=0')
+        self.assertIsNone(session.proof_claim_id)
+        step = json.loads(make_api(session)['expand']('x^2-1'))
+        selected = json.loads(make_api(session)['set_result'](
+            step['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], 's1')
+        self.assertEqual(session.ledger.get_claim(claim['id'])['verdict'],
+                         'open')
+
+    def test_plain_do_reuses_equivalent_open_claim(self):
+        session = DoSession()
+        first = session.claim('3x^{2}-3=0')
+        again = session.claim('3x^2-3=0')
+        self.assertEqual(again['id'], first['id'])
+        self.assertEqual(len(session.ledger.claims), 1)
 
     def test_open_proof_rejects_unrelated_verified_value(self):
         session = DoSession()
@@ -266,6 +315,61 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(replay['status'], 'failed')
         self.assertIn('provenance mismatch', replay['reason'])
 
+    WALLIS_EXPLICIT = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} ' \
+                      '\\frac{2k-1}{2k}'
+    WALLIS_UPPER = '\\frac{1}{\\sqrt{2n+1}}'
+
+    def _squeeze_setup(self, api):
+        upper = json.loads(api['limit_table'](
+            '\\lim_{n \\to \\infty} ' + self.WALLIS_UPPER))
+        lower = json.loads(api['limit_table']('\\lim_{n \\to \\infty} 0'))
+        return lower['step']['id'], upper['step']['id']
+
+    def test_limit_squeeze_uses_recorded_bound_limits(self):
+        session = DoSession()
+        api = make_api(session)
+        lower_id, upper_id = self._squeeze_setup(api)
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower_id, upper_id))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['sources'],
+                         {'lower': lower_id, 'upper': upper_id})
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_squeeze_rejects_unknown_bound_step(self):
+        session = DoSession()
+        api = make_api(session)
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER, 's7', 's8'))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_limit_squeeze_rejects_mismatched_bound_step(self):
+        session = DoSession()
+        api = make_api(session)
+        other = json.loads(api['limit_table'](
+            '\\lim_{n \\to \\infty} \\frac{1}{n}'))
+        lower = json.loads(api['limit_table']('\\lim_{n \\to \\infty} 0'))
+        rec = json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower['step']['id'], other['step']['id']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not record', rec['error'])
+
+    def test_replay_rejects_tampered_squeeze_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        lower_id, upper_id = self._squeeze_setup(api)
+        json.loads(api['limit_squeeze'](
+            self.WALLIS_EXPLICIT, '0', self.WALLIS_UPPER,
+            lower_id, upper_id))
+        session.ledger.steps[-1]['sources']['upper'] = lower_id
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance', replay['reason'])
+
     def test_integrate_assemble_rejects_wrong_source_order(self):
         session = DoSession()
         api = make_api(session)
@@ -336,7 +440,79 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(len(session.new_steps()), 1)
 
 
+LIM_SUM_EXPR = ('\\lim _{n \\rightarrow \\infty}\\left['
+                '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
+                '+\\ldots+\\frac{1}{n(n+1)}\\right]')
+
+LIM_SUM_SCRIPT = [
+    [tool_call('load_skill', {'skill': 'finite_operators'}, 'sk1')],
+    [tool_call('sum_from_ellipsis',
+               {'expr': LIM_SUM_EXPR,
+                'sum_form': '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}'}, 'c1')],
+    [tool_call('sum_telescope',
+               {'expr': ('\\lim_{n \\to \\infty} \\sum_{k=1}^{n} '
+                         '\\frac{1}{k(k+1)}'),
+                'term': '\\frac{1}{k}'}, 'c2')],
+    [tool_call('load_skill', {'skill': 'limits'}, 'sk2')],
+    [tool_call('limit_table',
+               {'expr': '\\lim_{n \\to \\infty} \\frac{n}{n+1}'}, 'c3')],
+    [message('Interpreted the ellipsis, telescoped, closed at 1.')],
+]
+
+
 class TestScriptedAgent(unittest.TestCase):
+    def test_derivative_roots_and_plot_finishes_with_solution_result(self):
+        shown = []
+        script = [
+            [tool_call('load_skill', {'skill': 'differentiation'}, 'sk1')],
+            [tool_call('diff', {'expr': 'x^3-3x', 'var': 'x'}, 'd1')],
+            [tool_call('load_skill', {'skill': 'roots'}, 'sk2')],
+            [tool_call('quadratic_roots', {
+                'expr': '3x^{2}-3', 'var': 'x'}, 'r1')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '-1'}, 'p1')],
+            [tool_call('evaluate', {
+                'expr': '(-1)^3-3(-1)'}, 'p2')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '1'}, 'p3')],
+            [tool_call('evaluate', {'expr': '(1)^3-3(1)'}, 'p4')],
+            [tool_call('plot', {
+                'code': 'import matplotlib.pyplot as plt; plt.plot([0])',
+                'caption': 'stationary points'}, 'plot1')],
+            [tool_call('set_result', {
+                'expr': r'x=-1 \lor x=1'}, 'done')],
+            [message('Mechanically checked the derivative and roots.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction(
+            'differentiate x^3-3x, find where the derivative is zero, '
+            'plot with those points marked',
+            model=ScriptedModel(script), ledger=ledger,
+            plot_backend=FakePlotBackend(),
+            on_plot=lambda caption, images: shown.append(caption))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_result'], r'x=-1 \lor x=1')
+        self.assertEqual(res['final_provenance']['step'], 's2')
+        self.assertEqual([step['op'] for step in res['steps']], [
+            'differentiate', 'quadratic_roots', 'substitute', 'evaluate',
+            'substitute', 'evaluate'])
+        self.assertTrue(res['steps'][1]['continues'])
+        self.assertEqual(shown, ['stationary points'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_ellipsis_series_limit_closes_via_sum_tactics(self):
+        res = run_instruction('evaluate ' + LIM_SUM_EXPR,
+                              model=ScriptedModel(LIM_SUM_SCRIPT))
+        self.assertTrue(res['ok'])
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['sum_from_ellipsis', 'sum_telescope',
+                          'limit_table'])
+        self.assertEqual(res['final_result'], '1')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        # the pattern continuation is honestly conditional
+        self.assertTrue(any('\\ldots' in a['text']
+                            for a in res['assumptions']))
+
     def test_full_run(self):
         seen = []
         res = run_instruction('solve 2x + 3 = 7 for x',
@@ -406,6 +582,7 @@ class TestScriptedAgent(unittest.TestCase):
 
     def test_prove_mode_closes_root_claim(self):
         script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
             [tool_call('limit_table', {
                 'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
             [tool_call('conclude', {'claim_id': 'c1',
@@ -425,8 +602,52 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertTrue(res['summary_unverified'])
         self.assertIn('narrative truncated', res['summary'])
 
+    def test_prove_mode_closes_ellipsis_product_claim(self):
+        # the reported cell: prove! \lim (1/2 * 3/4 ... (2n-1)/2n) = 0.
+        # The ellipsis claim records, the product door interprets it, the
+        # bound limits close by table rules, and the squeeze concludes.
+        goal = ('\\lim _{n \\rightarrow \\infty}\\left(\\frac{1}{2} \\cdot '
+                '\\frac{3}{4} \\ldots \\frac{2 n-1}{2 n}\\right) = 0')
+        expr = ('\\lim _{n \\rightarrow \\infty}\\left(\\frac{1}{2} \\cdot '
+                '\\frac{3}{4} \\ldots \\frac{2 n-1}{2 n}\\right)')
+        explicit = '\\lim_{n \\to \\infty} \\prod_{k=1}^{n} \\frac{2k-1}{2k}'
+        upper = '\\frac{1}{\\sqrt{2n+1}}'
+        script = [
+            [tool_call('load_skill', {'skill': 'finite_operators'}, 'sk1')],
+            [tool_call('prod_from_ellipsis', {
+                'expr': expr,
+                'prod_form': '\\prod_{k=1}^{n} \\frac{2k-1}{2k}'}, 'c1')],
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk2')],
+            [tool_call('limit_table', {
+                'expr': '\\lim_{n \\to \\infty} 0'}, 'c2')],
+            [tool_call('limit_table', {
+                'expr': '\\lim_{n \\to \\infty} ' + upper}, 'c3')],
+            [tool_call('limit_squeeze', {
+                'expr': explicit, 'lower': '0', 'upper': upper,
+                'lower_step': 's2', 'upper_step': 's3'}, 'c4')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s1', 's4']}, 'c5')],
+            [tool_call('set_result', {'expr': '0'}, 'c6')],
+            [message('Interpreted the product, squeezed it to 0.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('prove the product limit', ledger=ledger,
+                              model=ScriptedModel(script), proof_goal=goal)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['prod_from_ellipsis', 'limit_table',
+                          'limit_table', 'limit_squeeze'])
+        # conditional: the ellipsis reading and the ordering are assumptions
+        self.assertEqual(res['claims'][0]['verdict'], 'conditional')
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(res['final_provenance']['source'], 'claim')
+        # the full session, ellipsis root claim included, must replay
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
+
     def test_prove_mode_leaves_failed_target_open(self):
         script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
             [tool_call('limit_table', {
                 'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
             [tool_call('set_result', {'expr': '0'}, 'c2')],
@@ -489,15 +710,32 @@ class TestScriptedAgent(unittest.TestCase):
 FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
 
 
+FAKE_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>'
+
+
 class FakePlotBackend(object):
     name = 'fake'
 
     def __init__(self, result=None):
         self.calls = []
+        # the default deliberately speaks the older images-only dialect,
+        # so the typed-figure fallback stays covered
         self.result = result or {'ok': True, 'stdout': 'drew it\n',
                                  'stderr': '', 'images': [FAKE_PNG_B64]}
 
     def run_plot(self, code, timeout=None):
+        self.calls.append(code)
+        return dict(self.result)
+
+
+class FakeTikzBackend(object):
+    name = 'fake-tikz'
+
+    def __init__(self, result=None):
+        self.calls = []
+        self.result = result or {'ok': True, 'svg': FAKE_SVG}
+
+    def render(self, code, timeout=None):
         self.calls.append(code)
         return dict(self.result)
 
@@ -516,19 +754,37 @@ class TestPlotTool(unittest.TestCase):
         shown = []
         backend = FakePlotBackend()
         session = DoSession(plot_backend=backend,
-                            on_plot=lambda cap, imgs: shown.append(
-                                (cap, imgs)))
+                            on_plot=lambda cap, figs: shown.append(
+                                (cap, figs)))
         api = make_api(session)
         reply = json.loads(api['plot']('plt.plot([1])', 'a parabola'))
         # the model sees counts and stdout, never image bytes
         self.assertTrue(reply['ok'])
         self.assertEqual(reply['plots'], 1)
         self.assertNotIn(FAKE_PNG_B64[:24], json.dumps(reply))
-        # the user sees the figure with its caption
+        # the user sees the figure with its caption; an images-only
+        # backend is adapted up into the typed shape
         self.assertEqual(shown[0][0], 'a parabola')
-        self.assertEqual(shown[0][1], [FAKE_PNG_B64])
+        self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
+
+    def test_plot_streams_typed_figures(self):
+        shown = []
+        backend = FakePlotBackend({
+            'ok': True, 'stdout': '', 'stderr': '',
+            'figures': [{'kind': 'html', 'data': '<html>fig</html>',
+                         'height': 400}]})
+        session = DoSession(plot_backend=backend,
+                            on_plot=lambda cap, figs: shown.append(figs))
+        reply = json.loads(make_api(session)['plot']('fig = go.Figure()',
+                                                     'interactive'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['plots'], 1)
+        self.assertEqual(shown[0][0]['kind'], 'html')
+        self.assertEqual(shown[0][0]['height'], 400)
+        # figure bytes never reach the model
+        self.assertNotIn('<html>', json.dumps(reply))
 
     def test_plot_failure_reported_in_band(self):
         backend = FakePlotBackend({'ok': False, 'images': [],
@@ -565,6 +821,7 @@ class TestPlotTool(unittest.TestCase):
     def test_get_backend_off(self):
         with mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'off'}):
             self.assertIsNone(plot_sandbox.get_backend())
+            self.assertIsNone(plot_sandbox.get_tikz_backend())
 
     def test_parse_runner_output(self):
         good = plot_sandbox._parse_runner_output(
@@ -573,6 +830,53 @@ class TestPlotTool(unittest.TestCase):
         bad = plot_sandbox._parse_runner_output('garbage only', 'boom')
         self.assertFalse(bad['ok'])
         self.assertIn('boom', bad['stderr'])
+
+    def test_child_env_scrubs_secrets(self):
+        with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-secret',
+                                          'AWS_SECRET_ACCESS_KEY': 'nope',
+                                          'PATH': '/usr/bin'}):
+            env = plot_sandbox._child_env()
+        self.assertNotIn('OPEN_ROUTER', env)
+        self.assertNotIn('AWS_SECRET_ACCESS_KEY', env)
+        self.assertEqual(env['PATH'], '/usr/bin')
+
+
+class TestTikzTool(unittest.TestCase):
+    def test_registered_only_with_backend(self):
+        self.assertNotIn('tikz', make_api(DoSession()))
+        session = DoSession(tikz_backend=FakeTikzBackend())
+        self.assertIn('tikz', make_api(session))
+
+    def test_prompt_mentions_tikz_only_when_available(self):
+        self.assertNotIn('## TikZ', agent_do.build_prompt())
+        self.assertIn('## TikZ', agent_do.build_prompt(tikz=True))
+
+    def test_tikz_streams_svg_not_tokens(self):
+        shown = []
+        session = DoSession(tikz_backend=FakeTikzBackend(),
+                            on_plot=lambda cap, figs: shown.append(
+                                (cap, figs)))
+        reply = json.loads(make_api(session)['tikz'](
+            r'\begin{document}\end{document}', 'a diagram'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['plots'], 1)
+        self.assertNotIn('<svg', json.dumps(reply))
+        self.assertEqual(shown[0][0], 'a diagram')
+        self.assertEqual(shown[0][1], [{'kind': 'svg', 'data': FAKE_SVG}])
+        # illustrations are never evidence
+        self.assertEqual(session.new_steps(), [])
+
+    def test_tikz_failure_returns_tex_log(self):
+        backend = FakeTikzBackend({
+            'ok': False,
+            'error': 'TikZ render failed: TeX engine render failed.\n'
+                     'TeX log:\n! Undefined control sequence.\n'
+                     'l.4 \\draw (0,0) circle (\\nosuchmacro)'})
+        session = DoSession(tikz_backend=backend)
+        reply = json.loads(make_api(session)['tikz']('bad', 'cap'))
+        self.assertFalse(reply['ok'])
+        # the agent can only fix its source if the TeX error survives
+        self.assertIn('Undefined control sequence', reply['error'])
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_PLOT_TESTS') == '1',
@@ -599,6 +903,97 @@ class TestLivePlotSandbox(unittest.TestCase):
             self.assertFalse(r['ok'])
             self.assertTrue('NotCapable' in (r.get('error') or '')
                             or 'PermissionDenied' in (r.get('error') or ''))
+
+    def test_submodule_import_of_uninstalled_package(self):
+        """find_imports reports 'seaborn.objects' alongside 'seaborn', and
+        find_spec raises on the dotted name while the parent is absent.
+        That used to kill the sandbox before the user code ever ran."""
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'import seaborn.objects as so\nimport matplotlib.pyplot as plt\n'
+            'plt.plot([1, 2])\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual([f['kind'] for f in r['figures']], ['png'])
+
+    def test_bundled_submodule_still_resolves(self):
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'from scipy.integrate import quad\n'
+            'import matplotlib.pyplot as plt\n'
+            'v, _ = quad(lambda t: t**2, 0, 3)\nprint(round(v, 6))\n'
+            'plt.plot([0, v])\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('9.0', r['stdout'])
+
+    def test_plotly_figure_becomes_html(self):
+        backend = plot_sandbox.get_backend()
+        r = backend.run_plot(
+            'import plotly.graph_objects as go\n'
+            'fig = go.Figure(data=[go.Scatter(x=[1, 2], y=[1, 4])])\n'
+            'fig.update_layout(height=400)\n')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual([f['kind'] for f in r['figures']], ['html'])
+        self.assertEqual(r['images'], [])  # plotly cannot rasterise here
+        self.assertEqual(r['figures'][0]['height'], 440)
+
+
+@unittest.skipUnless(os.environ.get('TOYMATH_PLOT_TESTS') == '1',
+                     'set TOYMATH_PLOT_TESTS=1 for a live deno/tikzjax '
+                     'test')
+class TestLiveTikzSandbox(unittest.TestCase):
+    def test_tikz_renders_self_contained_svg(self):
+        backend = plot_sandbox.get_tikz_backend()
+        self.assertIsNotNone(backend, 'deno not available')
+        r = backend.render(
+            r'\usepackage{pgfplots}'
+            '\n\\begin{document}\n\\begin{tikzpicture}\n'
+            r'\begin{axis}[width=6cm]\addplot[domain=-2:2]{x^2};\end{axis}'
+            '\n\\end{tikzpicture}\n\\end{document}')
+        self.assertTrue(r['ok'], r.get('error'))
+        svg = r['svg']
+        self.assertTrue(svg.lstrip().startswith('<svg'))
+        # fonts are inlined, so the figure still renders with no network
+        self.assertIn('@font-face', svg)
+        self.assertIn('data:font/ttf;base64', svg)
+        self.assertNotIn('<script', svg.lower())
+
+    def test_tikz_error_carries_the_tex_log(self):
+        backend = plot_sandbox.get_tikz_backend()
+        r = backend.render(r'\begin{document}\begin{tikzpicture}'
+                           r'\draw (0,0) circle (\nosuchmacro);'
+                           r'\end{tikzpicture}\end{document}')
+        self.assertFalse(r['ok'])
+        self.assertIn('Undefined control sequence', r['error'])
+
+
+class TestFigureHtml(unittest.TestCase):
+    def setUp(self):
+        from mathShell import MathShell
+        self.render = MathShell._figure_html
+
+    def test_png_inlined_as_data_uri(self):
+        html = self.render({'kind': 'png', 'data': FAKE_PNG_B64})
+        self.assertIn(f'src="data:image/png;base64,{FAKE_PNG_B64}"', html)
+
+    def test_svg_dropped_in_and_hidden_from_mathjax(self):
+        html = self.render({'kind': 'svg', 'data': FAKE_SVG})
+        self.assertIn(FAKE_SVG, html)       # inert markup, no iframe needed
+        self.assertIn('tex2jax_ignore', html)
+
+    def test_html_iframed_and_escaped(self):
+        # JupyterLab strips <script> from cell output, so plotly only runs
+        # inside an iframe - and srcdoc must be attribute-escaped or the
+        # figure's own quotes break out of it
+        html = self.render({'kind': 'html', 'height': 400,
+                            'data': '<p class="x">hi</p>'})
+        self.assertIn('<iframe', html)
+        self.assertIn('height:400px', html)
+        self.assertIn('sandbox="allow-scripts"', html)
+        self.assertIn('&lt;p class=&quot;x&quot;&gt;', html)
+        self.assertNotIn('<p class="x">', html)
+
+    def test_unknown_kind_falls_back_to_png(self):
+        self.assertIn('<img', self.render({'data': FAKE_PNG_B64}))
 
 
 class TestMathShellDo(unittest.TestCase):
@@ -662,6 +1057,8 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('s1#', out)
         self.assertIn('s2#', out)
         self.assertIn('Subtracted 3', out)
+        # the harness renders the end-of-run chain table from the ledger
+        self.assertIn('verified chain', out)
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
@@ -680,6 +1077,38 @@ class TestMathShellDo(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.shell.exec('do! solve 2x = 4', 4, add_to_history=True)
         self.assertIn(agent_do.API_KEY_VAR, self._html())
+
+    def _chain_step(self, sid, op, result, check='agree', continues=True,
+                    assumptions=()):
+        return {'id': sid, 'hash': 'h' + sid, 'op': op,
+                'args': {}, 'input': 'x', 'result': result,
+                'check': {'status': check}, 'continues': continues,
+                'assumptions': list(assumptions)}
+
+    def test_chain_table_renders_from_step_records(self):
+        html = self.shell.render_do_chain([
+            self._chain_step('s1', 'expand', 'x^{2}+2x+1'),
+            self._chain_step('s2', 'factor_quadratic', '(x+1)^{2}',
+                             assumptions=[{'text': 'x \\ne 0'}]),
+            self._chain_step('s3', 'sum_telescope', '\\frac{n}{n+1}',
+                             check='skipped', continues=False),
+        ])
+        self.assertIn('verified chain', html)
+        for frag in ('<code>s1</code>', '<code>expand</code>',
+                     '$x^{2}+2x+1$', '(branch)', '+1 assum.'):
+            self.assertIn(frag, html)
+        # check-status colors: agree green, skipped grey
+        self.assertIn('#176b2c', html)
+        self.assertIn('#888', html)
+
+    def test_chain_table_skips_comments_and_short_runs(self):
+        comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
+                   'args': {'text': 'strategy note'}, 'input': None,
+                   'result': None, 'check': {'status': 'note'},
+                   'assumptions': []}
+        self.assertIsNone(self.shell.render_do_chain([]))
+        self.assertIsNone(self.shell.render_do_chain(
+            [comment, self._chain_step('s2', 'expand', '5')]))
 
     def test_query_only_final_is_rendered_unverified(self):
         result = {'ok': True, 'steps': [], 'assumptions': [],
@@ -700,13 +1129,25 @@ class TestPromptCommandModel(unittest.TestCase):
     def test_repo_commands_load(self):
         import prompt_commands as pc
         reg = pc.load_commands()
-        for name in ('int', 'diff', 'solve', 'expand', 'prove'):
+        for name in ('int', 'diff', 'solve', 'expand', 'prove', 'conv'):
             self.assertIn(name, reg)
         self.assertIsNone(reg['int'].direct)      # LLM tactic tier
         self.assertEqual(reg['diff'].direct, 'differentiate')
         self.assertEqual(reg['expand'].direct, 'expand')
         self.assertTrue(reg['diff'].expr)         # direct implies expr
         self.assertEqual(reg['prove'].mode, 'prove')
+        # conv! is a plain agent command: the verdict must live in the
+        # recorded series_converges step, never in an expr splice
+        self.assertFalse(reg['conv'].expr)
+        self.assertIsNone(reg['conv'].direct)
+
+    def test_static_lexer_command_table_matches_committed_registries(self):
+        import prompt_commands as pc
+        from lexer import MathLexer
+        from processor import register_actions
+        expected = (set(register_actions()) | set(pc.load_commands())
+                    | set(pc.RESERVED))
+        self.assertEqual(MathLexer.KNOWN_COMMANDS, expected)
 
     def test_render_substitutes_arguments(self):
         import prompt_commands as pc
@@ -881,12 +1322,26 @@ class TestPromptCommandDispatch(unittest.TestCase):
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
 
 
-def _ok(result):
+def _ok(result, goal=None):
+    """A well-behaved sub-run: when `goal` is given, the run carries one
+    transforming step from the goal to the result (the chain an inline
+    expr command now requires); without it the run is step-less."""
+    steps = [] if goal is None else [
+        {'id': 's1', 'op': 'scripted', 'input': goal, 'result': result}]
     return {'ok': True, 'final_result': result, 'assumptions': [],
-            'steps': [], 'summary': None,
+            'steps': steps, 'summary': None,
             'final_provenance': {
                 'status': 'verified', 'source': 'ledger', 'step': 's1',
                 'method': 'test-fixture'}}
+
+
+def _arg_of(instruction):
+    """The argument embedded in a rendered int! instruction (first line:
+    'Apply symbolic integration for <ARG>.')."""
+    first = instruction.split('\n', 1)[0]
+    prefix = 'Apply symbolic integration for '
+    assert first.startswith(prefix) and first.endswith('.'), first
+    return first[len(prefix):-1]
 
 
 def _fail(error='no scripted answer'):
@@ -926,15 +1381,14 @@ class TestExprComposite(unittest.TestCase):
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
             if instruction.startswith('Apply symbolic integration'):
-                return _ok('\\frac{x^4}{4} + C')
+                return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
             return _fail()
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
         self.assertEqual(len(calls), 1)          # int! only; diff! is direct
         self.assertTrue(calls[0].startswith('Apply symbolic integration'))
-        import primitives
         chained = self.shell.resolve_backrefs('[[1]]')
-        self.assertEqual(primitives.equal_exprs(chained, 'x^3')['verdict'],
+        self.assertEqual(core_tactics.equal_exprs(chained, 'x^3')['verdict'],
                          'yes')
         # ledger: the direct differentiate step + the oracle-checked glue
         ops = [s['op'] for s in self.shell.ledger.steps]
@@ -942,12 +1396,25 @@ class TestExprComposite(unittest.TestCase):
         for s in self.shell.ledger.steps:
             self.assertEqual(s['check']['status'], 'agree')
 
+    def test_history_backrefs_do_not_accumulate_index_braces(self):
+        # Final do!/composite output is future [[n]] input.  Every old plain
+        # writer hop added one transparent group around powers/subscripts.
+        source = 'x^{3}+C_{1}'
+        for execution_count in range(1, 5):
+            sym = self.shell.parser.parse(source)
+            shown = self.shell.output(
+                sym, self.shell.parsedNotation, execution_count, True)
+            self.assertEqual(shown, 'x^{3}+C_{1}')
+            source = self.shell.resolve_backrefs(
+                f'[[{execution_count}]]')
+            self.assertEqual(source, 'x^{3}+C_{1}')
+
     def test_duplicate_subexpression_memoized(self):
         calls = []
 
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} + {int! x^2}', 1, add_to_history=True)
         self.assertEqual(len(calls), 1)          # identical arg -> one call
@@ -965,7 +1432,7 @@ class TestExprComposite(unittest.TestCase):
         # {int! f} - {int! f} is an arbitrary constant, not 0: the memoised
         # result is spliced twice but each splice mints its own C
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} - {int! x^2}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -977,7 +1444,7 @@ class TestExprComposite(unittest.TestCase):
 
     def test_single_command_keeps_plain_constant(self):
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -988,7 +1455,7 @@ class TestExprComposite(unittest.TestCase):
     def test_user_constant_never_captured(self):
         # a C the user wrote in the cell must stay distinct from the minted one
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^3}{3} + C')
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2} + C', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -1002,8 +1469,8 @@ class TestExprComposite(unittest.TestCase):
         # own argument (the inner result) - bound, not minted, so not renamed
         def fake(instruction, ledger=None, on_step=None, **kw):
             if 'frac' in instruction:  # outer call sees the spliced inner result
-                return _ok('\\frac{x^3}{6} + Cx + K')
-            return _ok('\\frac{x^2}{2} + C')
+                return _ok('\\frac{x^3}{6} + Cx + K', _arg_of(instruction))
+            return _ok('\\frac{x^2}{2} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! {int! x}}', 1, add_to_history=True)
         step = self.shell.ledger.steps[-1]
@@ -1017,7 +1484,7 @@ class TestExprComposite(unittest.TestCase):
 
         def fake(instruction, ledger=None, on_step=None, **kw):
             calls.append(instruction)
-            return _ok('\\frac{x^4}{4} + C')
+            return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('int! x^3', 1, add_to_history=True)  # no braces
         self.assertEqual(len(calls), 1)
@@ -1042,9 +1509,8 @@ class TestExprComposite(unittest.TestCase):
         # and the whole cell costs zero agent calls
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('{diff! [[1]]}', 2, add_to_history=True)
-        import primitives
         chained = self.shell.resolve_backrefs('[[2]]')
-        self.assertEqual(primitives.equal_exprs(chained, '3x^2')['verdict'],
+        self.assertEqual(core_tactics.equal_exprs(chained, '3x^2')['verdict'],
                          'yes')
 
     def test_agent_failure_surfaces(self):
@@ -1073,9 +1539,91 @@ class TestExprComposite(unittest.TestCase):
         sym, notation = primitives.parse_latex('{int! x} + {int! x^2}')
         r = expr_commands.ExprResolver(
             notation, Notation(), cmds, self.shell.ledger, None,
-            lambda *a, **k: _ok('F'), max_calls=1)
+            lambda instruction, **k: _ok('F', _arg_of(instruction)),
+            max_calls=1)
         with self.assertRaises(expr_commands.ExprCommandError):
             r(sym)
+
+    def test_non_closing_subrun_refused_and_summary_surfaced(self):
+        # the run's only verified step answers a DIFFERENT question than
+        # the cell asked; its result must not become the cell's value
+        run = {'ok': True, 'final_result': '0', 'assumptions': [],
+               'steps': [{'id': 's1', 'op': 'limit_table',
+                          'input': '\\lim_{n \\to \\infty} \\frac{1}{n}',
+                          'result': '0'}],
+               'summary': 'the tactics do not close this; a telescoping '
+                          'move is missing',
+               'final_provenance': {'status': 'verified', 'source': 'ledger',
+                                    'step': 's1', 'method': 'last-step'}}
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: run):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        html = self._html()
+        self.assertIn('did not close', html)
+        self.assertIn('telescoping move is missing', html)
+        self.assertEqual(self.shell.ledger.steps, [])
+
+    def test_operator_wrapped_root_step_accepted(self):
+        # agents legitimately restate a bare integrand goal inside \int
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            arg = _arg_of(instruction)
+            run = _ok('\\frac{x^4}{4} + C',
+                      goal=f'\\int {arg} \\, dx')
+            run['final_provenance']['method'] = 'last-step'
+            return run
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('{int! x^3}', 1, add_to_history=True)
+        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+
+    def test_whole_cell_lim_ellipsis_closes_via_sum_tactics(self):
+        # the original failing notebook cell, end to end through the shell
+        # composite path with a scripted agent (offline)
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda: ScriptedModel(list(LIM_SUM_SCRIPT))):
+            self.shell.exec('lim! ' + LIM_SUM_EXPR, 1, add_to_history=True)
+        html = self._html()
+        self.assertNotIn('do! error', html)
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['sum_from_ellipsis', 'sum_telescope',
+                               'limit_table', 'expand'])
+        chained = self.shell.resolve_backrefs('[[1]]')
+        self.assertEqual(core_tactics.equal_exprs(chained, '1')['verdict'],
+                         'yes')
+        # the pattern-continuation assumption is surfaced on the cell
+        self.assertIn('continues the pattern', html)
+
+
+class TestChainsToGoal(unittest.TestCase):
+    """The goal-coverage gate on inline expr sub-runs."""
+
+    def _steps(self, *triples):
+        return [{'id': f's{i}', 'op': 'scripted', 'input': a, 'result': b}
+                for i, (a, b) in enumerate(triples, 1)]
+
+    def test_connected_chain_accepted(self):
+        import expr_commands as ec
+        steps = self._steps(('x^{3}', '3x^{2}'), ('3x^2', '6x'))
+        self.assertTrue(ec._chains_to_goal(steps, 's2', 'x^3'))
+
+    def test_disconnected_final_step_rejected(self):
+        import expr_commands as ec
+        steps = self._steps(('x^{3}', '3x^{2}'), ('y', '1'))
+        self.assertFalse(ec._chains_to_goal(steps, 's2', 'x^3'))
+
+    def test_branch_piece_rejected(self):
+        # the lim! failure mode: a split produced pieces; a piece result
+        # is not an answer to the whole
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\lim_{x \\to 0}(\\frac{\\sin x}{x} + x^2)',
+             '\\lim_{x \\to 0} \\frac{\\sin x}{x} + \\lim_{x \\to 0} x^2'),
+            ('\\lim_{x \\to 0} x^2', '0'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's2', '\\lim_{x \\to 0}(\\frac{\\sin x}{x} + x^2)'))
+
+    def test_no_steps_rejected(self):
+        import expr_commands as ec
+        self.assertFalse(ec._chains_to_goal([], 's1', 'x'))
 
 
 class TestDirectCommands(unittest.TestCase):
@@ -1126,7 +1674,7 @@ class TestDirectCommands(unittest.TestCase):
         # {diff! {int! x^3}}: the inner splice contains the minted C; the
         # direct differentiate must infer x, not refuse as ambiguous
         def fake(instruction, ledger=None, on_step=None, **kw):
-            return _ok('\\frac{x^4}{4} + C')
+            return _ok('\\frac{x^4}{4} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{diff! {int! x^3}}', 1, add_to_history=True)
         step = self.shell.ledger.steps[0]
@@ -1157,8 +1705,8 @@ class TestDirectCommands(unittest.TestCase):
     def test_ledger_constant_breaks_inference_tie(self):
         # an antiderivative chained via [[n]] carries its minted C into a
         # later cell; the ledger's constant provenance disambiguates
-        import primitives
-        self.shell.ledger.record(primitives.integrate_power_rule('x^2', 'x'))
+        self.shell.ledger.record(
+            integration_tactics.integrate_power_rule('x^2', 'x'))
         self.assertEqual(self.shell.ledger.steps[0].get('constant'), 'C')
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('diff! \\frac{x^{3}}{3} + C', 2,
@@ -1202,7 +1750,8 @@ class TestDirectCommands(unittest.TestCase):
         from notation import Notation
         cmds = {'fq': pc.PromptCommand('fq', 'd', '', True, (),
                                        'factor_quadratic')}
-        sym, notation = primitives.parse_latex('{fq! x^3 + 1}')
+        sym, notation = primitives.parse_latex(
+            '{fq! x^3 + 1}', command_names=cmds)
         r = expr_commands.ExprResolver(
             notation, Notation(), cmds, None, None, _never)
         with self.assertRaises(expr_commands.ExprCommandError) as ctx:
@@ -1216,13 +1765,14 @@ class TestDirectCommands(unittest.TestCase):
         import prompt_commands as pc
         from notation import Notation
         cmds = {'ev': pc.PromptCommand('ev', 'd', '', True, (), 'evaluate')}
-        sym, notation = primitives.parse_latex('{ev! 2^{10}} + 1')
+        sym, notation = primitives.parse_latex(
+            '{ev! 2^{10}} + 1', command_names=cmds)
         out = Notation()
         r = expr_commands.ExprResolver(notation, out, cmds, None, None,
                                        _never)
         root = r(sym)
         from LatexWriter import LaTexWriter
-        rec = primitives.expand(LaTexWriter(out)(root))
+        rec = core_tactics.expand(LaTexWriter(out)(root))
         self.assertEqual(rec['result'].replace(' ', ''), '1025')
 
     def test_unknown_direct_primitive_rejected_at_parse(self):
@@ -1249,7 +1799,8 @@ class TestDirectCommands(unittest.TestCase):
         import prompt_commands as pc
         from notation import Notation
         cmds = {'ex': pc.PromptCommand('ex', 'd', '', True, (), 'expand')}
-        sym, notation = primitives.parse_latex('{ex! (1+x)^2}')
+        sym, notation = primitives.parse_latex(
+            '{ex! (1+x)^2}', command_names=cmds)
         r = expr_commands.ExprResolver(notation, Notation(), cmds, None,
                                        None, _never)
         r(sym)
