@@ -291,14 +291,40 @@ def differentiate(expr, var):
     except PrimitiveError as e:
         return _error('differentiate', args, str(e))
     result = canonical_or_same(deriv)
+    assumptions = []
+    cleanup_check = None
+    # The rule builder deliberately favors local, obviously-correct formulas;
+    # quotient/product chains can therefore contain 0/16 debris and layers of
+    # transparent grouping.  Feed that formula through the same checked
+    # canonical core an agent would call next.  The final derivative checker
+    # still independently tests the cleaned result against the source.
+    from tactics import core as core_tactics
+    cleanup = core_tactics.expand(result)
+    if cleanup.get('ok') and cleanup.get('check', {}).get('status') \
+            in ('agree', 'domain-differs'):
+        result = cleanup['result']
+        assumptions = cleanup.get('assumptions', [])
+        cleanup_check = cleanup['check']
     try:
         parse_latex(result)
     except PrimitiveError as e:
         return _error('differentiate', args,
                       f'internal: unparseable derivative: {e}')
+    extra = {'method': 'rules'}
+    if cleanup_check is not None:
+        extra['cleanup'] = 'expand'
     rec = _result('differentiate', args, expr, result,
-                  extra={'method': 'rules'})
-    rec['check'] = _derivative_check(expr, result, var)
+                  assumptions=assumptions, extra=extra)
+    derivative_check = _derivative_check(expr, result, var)
+    if derivative_check.get('status') == 'agree' and cleanup_check \
+            and cleanup_check.get('status') == 'domain-differs':
+        # Canonical cleanup may expose a wider written domain after dropping
+        # zero-multiplied log/root atoms.  Keep that visible instead of
+        # laundering the derivative into an unconditional green step.
+        rec['check'] = dict(cleanup_check)
+        rec['check']['derivative_samples'] = derivative_check.get('samples')
+    else:
+        rec['check'] = derivative_check
     return rec
 
 

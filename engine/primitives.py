@@ -75,31 +75,69 @@ class PrettyWriter(LaTexWriter):
 
     def __init__(self, notation, **kwargs):
         super(PrettyWriter, self).__init__(notation, **kwargs)
-        self._keep_braces = 0
+        self._index_depth = 0
+
+    def _index_payload(self, sym):
+        """Peel redundant transparent braces around one delimited item."""
+        while isinstance(sym, Symbol):
+            group = self.notation.getf(sym, Notation.GROUP)
+            if group is None or group.props.get('br') != '{}' \
+                    or 'quoted' in group.props:
+                break
+            sym = group.args[0]
+        return sym
+
+    def _write_braced_item(self, sym):
+        """Write exactly one standard pair of braces around ``sym``."""
+        item = self._index_payload(sym)
+        self.writeString('{')
+        if isinstance(item, Symbol) and self.notation.get(item) is not None:
+            self.write_formula(item)
+        else:
+            self.write_scalar(item)
+        self.writeString('}')
 
     def write_index_item(self, sym):
-        # reparsing wraps INDEX dims in a {}-group; when it holds a bare
-        # integer the value's own repr braces suffice: x^{12}, not x^{{12}}
-        item = None
-        if isinstance(sym, Symbol):
-            g = self.notation.getf(sym, Notation.GROUP)
-            if g is not None and g.props.get('br') == '{}' \
-                    and 'quoted' not in g.props \
-                    and isinstance(g.args[0], IntegerValue) \
-                    and g.args[0].val >= 0:
-                item = g.args[0]
-        self._keep_braces += 1
+        # Every parse wraps an explicitly braced dimension in one more GROUP.
+        # Peel the whole transparent chain, then restore exactly the delimiter
+        # the grammar needs.  Bare symbolic dimensions remain e^x/0^- so a
+        # presentation pass does not introduce a semantic GROUP into later
+        # tactic input; integers keep conventional x^{12} spelling.
+        item = self._index_payload(sym)
+        if isinstance(item, IntegerValue) and item.val >= 0:
+            self._write_braced_item(item)
+            return
+        self._index_depth += 1
         try:
-            if item is not None:
-                self.write_raw_term(item)
+            if isinstance(item, Symbol) and self.notation.get(item) is not None:
+                self._write_braced_item(item)
             else:
-                super(PrettyWriter, self).write_index_item(sym)
+                super(PrettyWriter, self).write_index_item(item)
         finally:
-            self._keep_braces -= 1
+            self._index_depth -= 1
+
+    def write_frac_item(self, sym):
+        # Fraction arguments are their own delimiter context.  Reusing the
+        # exact-one-brace rule keeps x^{\frac{1}{2}} both standard and stable.
+        self._write_braced_item(sym)
+
+    def write_binom_item(self, sym):
+        self._write_braced_item(sym)
+
+    def write_scalar(self, sym):
+        # Inside an already-delimited composite index, `{2}x` is safely `2x`.
+        # The normal-form validation in write_latex rejects the candidate if
+        # removing braces would fuse adjacent numeric tokens.
+        if self._index_depth:
+            item = self._index_payload(sym)
+            if isinstance(item, IntegerValue) and item.val >= 0:
+                self.write_raw_term(item)
+                return
+        super(PrettyWriter, self).write_scalar(sym)
 
     def write_raw_term(self, t):
-        if self._keep_braces == 0 and isinstance(t, IntegerValue):
-            self.writeString(str(abs(t.val)))
+        if isinstance(t, IntegerValue) and t.val >= 0:
+            self.writeString(str(t.val))
         else:
             super(PrettyWriter, self).write_raw_term(t)
 

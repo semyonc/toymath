@@ -156,12 +156,19 @@ Important verified-layer behaviors include:
   than command-shaped symbols; the independent oracle evaluates closed cases
   only on their nonnegative-integer domain, while symbolic algebra keeps them
   as opaque atoms;
+- numeral-subscript names such as `C_{1}` are atomic variables in both trust
+  legs, and their positive integer powers enter the same canonical atom power
+  as repeated multiplication;
 - standard `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`,
   and `smallmatrix` environments normalize at the shared parser boundary;
   the delimiter-bearing forms remain dedicated matrix nodes, so vertical-bar
   matrices are never confused with scalar absolute value;
 - matrix-valued factor runs become ordered noncommutative word atoms, while
   scalar factors remain commutative;
+- rule-built derivatives pass through checked canonical algebra before being
+  recorded; if removing zero-multiplied domain-bearing terms widens the
+  written domain, the step remains visibly `domain-differs` rather than being
+  presented as unconditional cleanup;
 - rational powers of positive plain-variable bases have a limited Puiseux
   fold; composite bases remain opaque because identities such as
   `(x^2)^(1/2)=|x|` are domain-sensitive;

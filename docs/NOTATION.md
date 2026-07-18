@@ -355,6 +355,14 @@ class LaTexWriter(object):
         # Output the symbol name
 ```
 
+Direct `LaTexWriter` output is the faithful/raw graph spelling. User-visible
+verified results and notebook-history values use `primitives.write_latex`,
+whose `PrettyWriter` candidate is accepted only after reparsing to the same
+normal form. This distinction matters for repeated `[[n]]` hops: reparsing an
+index introduces transparent brace groups, so raw writing would grow
+`x^{3}` into `x^{{3}}`, then `x^{{{3}}}`, while validated pretty output stays
+idempotent.
+
 ### Context Tracking
 
 The walker maintains a stack of `(symbol, func)` pairs during traversal:

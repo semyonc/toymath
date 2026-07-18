@@ -1396,6 +1396,19 @@ class TestExprComposite(unittest.TestCase):
         for s in self.shell.ledger.steps:
             self.assertEqual(s['check']['status'], 'agree')
 
+    def test_history_backrefs_do_not_accumulate_index_braces(self):
+        # Final do!/composite output is future [[n]] input.  Every old plain
+        # writer hop added one transparent group around powers/subscripts.
+        source = 'x^{3}+C_{1}'
+        for execution_count in range(1, 5):
+            sym = self.shell.parser.parse(source)
+            shown = self.shell.output(
+                sym, self.shell.parsedNotation, execution_count, True)
+            self.assertEqual(shown, 'x^{3}+C_{1}')
+            source = self.shell.resolve_backrefs(
+                f'[[{execution_count}]]')
+            self.assertEqual(source, 'x^{3}+C_{1}')
+
     def test_duplicate_subexpression_memoized(self):
         calls = []
 

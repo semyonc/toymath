@@ -191,6 +191,8 @@ class MathShell(object):
     def resolve_backrefs(self, text):
         """Inline [[n]] references as the rendered LaTeX of prior cell
         results; raises ValueError on an undefined reference."""
+        import primitives
+
         def repl(m):
             key = m.group(1)
             sym = self.execution_history.get(key)
@@ -198,7 +200,7 @@ class MathShell(object):
                 raise ValueError(
                     f'[[{key}]] does not reference a previous result')
             notation = self.history.get(sym, self.parsedNotation)
-            return LaTexWriter(notation)(sym)
+            return primitives.write_latex(sym, notation)
         return BACKREF_RE.sub(repl, text)
 
     _DO_MARKS = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
@@ -462,7 +464,7 @@ class MathShell(object):
             self._do_error(str(e))
             return
 
-        composite = LaTexWriter(resolver.output_notation)(root)
+        composite = primitives.write_latex(root, resolver.output_notation)
         # verified glue: the numeric oracle proves the composition
         from tactics import core as core_tactics
         rec = core_tactics.expand(composite)
@@ -514,9 +516,13 @@ class MathShell(object):
             notation = snapshot
             self.execution_history[str(execution_count)] = outsym
             self.history[outsym] = snapshot
-        writer = LaTexWriter(notation, show_quotes=self.show_quotes)
-        result = writer(outsym)
-        return result
+        if self.show_quotes:
+            return LaTexWriter(notation, show_quotes=True)(outsym)
+        # Notebook output is also future [[n]] input.  Use the validated
+        # pretty writer so repeated parse/write hops stay stable instead of
+        # accumulating one transparent brace layer per hop.
+        import primitives
+        return primitives.write_latex(outsym, notation)
 
     def clear(self):
         self.processor.prologModel.clear()

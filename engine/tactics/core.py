@@ -870,6 +870,22 @@ def _atomize_walk(sym, notation, out_n, store):
         return out_n.setf(f.sym, (a, b), **f.props)
     if op == Notation.INDEX:
         sub, sup_l, power, sup_r = f.args[1]
+        if _subscript_var(sym, notation) is not None and power is not None:
+            try:
+                n = _index_power(power, notation)
+            except NotInFragment:
+                n = None
+            if n is not None and n >= 2:
+                # C_{1}^{n} is a power of the SAME atomic variable C_{1},
+                # not an unrelated atom.  Put the base in the atom store and
+                # the integer power in polyrat, mirroring function powers.
+                base = notation.setf(
+                    Notation.INDEX,
+                    (f.args[0], (None, None, None, sup_r)))
+                return out_n.setf(
+                    Notation.INDEX,
+                    (store.atom(base, notation),
+                     (None, None, IntegerValue(n), None)))
         if sub is None and sup_l is None and sup_r is None \
                 and power is not None:
             try:
@@ -1076,6 +1092,40 @@ def _emit_powered_func(pw, notation, out_n):
     return [head] + [Replicator(notation, out_n)(m) for m in inner]
 
 
+def _powered_subscript_payload(sym, notation):
+    """INDEX((C_{1}), n) built by atom substitution -> (C_{1}, n)."""
+    f = notation.getf(sym, Notation.INDEX)
+    if f is None:
+        return None
+    sub_l, sup_l, power, sub_r = f.args[1]
+    if sub_l is not None or sup_l is not None or sub_r is not None \
+            or power is None:
+        return None
+    try:
+        n = _index_power(power, notation)
+    except NotInFragment:
+        return None
+    if n < 2:
+        return None
+    payload = _paren_payload(f.args[0], notation)
+    if payload is None or _subscript_var(payload, notation) is None:
+        return None
+    pf = notation.getf(payload, Notation.INDEX)
+    if pf is None or pf.args[1][2] is not None:
+        return None
+    return payload, n
+
+
+def _emit_powered_subscript(payload, n, notation, out_n):
+    """Recombine the atom-store spelling (C_{1})^n as C_{1}^n."""
+    f = notation.getf(payload, Notation.INDEX)
+    base = Replicator(notation, out_n)(f.args[0])
+    sub = Replicator(notation, out_n)(f.args[1][3])
+    return out_n.setf(
+        Notation.INDEX,
+        (base, (None, None, IntegerValue(n), sub)))
+
+
 def _relax_atom_parens(sym, notation):
     """Cosmetic pass over an atom-substituted result: drop the () wrappers
     Substitutor adds wherever the expression stays unambiguous — at the
@@ -1129,22 +1179,57 @@ def _relax_walk(sym, notation, out_n):
         # term/root position: ( \sin x)^{2} prints as \sin^{2}x
         return out_n.setf(Notation.P_LIST,
                           _emit_powered_func(pw, notation, out_n))
+    ps = _powered_subscript_payload(sym, notation)
+    if ps is not None:
+        return _emit_powered_subscript(ps[0], ps[1], notation, out_n)
     return Replicator(notation, out_n)(sym)
 
 
 def _relax_plist(f, notation, out_n):
     args = list(f.args)
+    starts_head = [False] * len(args)
+
+    def wrapped_function(a):
+        if _powered_func_payload(a, notation) is not None:
+            return True
+        payload = _paren_payload(a, notation)
+        pf = notation.getf(payload, Notation.P_LIST) \
+            if payload is not None else None
+        return (pf is not None and pf.args
+                and _plist_head_kind(pf.args[0], notation) == 'func')
+
+    # A parenthesized function factor can lose its wrapper before another
+    # function factor because the next head terminates the current argument
+    # span.  Compute that boundary right-to-left: (sin x)(cos x) may flatten,
+    # while (sin x)(cos x)y must stay wrapped because cos would capture y.
+    for idx in range(len(args) - 1, -1, -1):
+        raw_head = _plist_head_kind(args[idx], notation) is not None
+        last = idx == len(args) - 1
+        boundary_after = last or starts_head[idx + 1]
+        prev_raw_head = idx > 0 and _plist_head_kind(
+            args[idx - 1], notation) is not None
+        starts_head[idx] = raw_head or (
+            wrapped_function(args[idx]) and boundary_after
+            and not prev_raw_head)
+
     new_args = []
     for idx, a in enumerate(args):
         last = idx == len(args) - 1
+        boundary_after = last or starts_head[idx + 1]
         prev_head = idx > 0 and _plist_head_kind(args[idx - 1],
                                                  notation) is not None
         payload = _paren_payload(a, notation)
         if payload is None:
             pw = _powered_func_payload(a, notation)
-            if pw is not None and last and not prev_head:
-                # trailing ( \sin x)^{2} factor prints as \sin^{2}x
+            if pw is not None and boundary_after and not prev_head:
+                # A following function head is as safe as product-end: it
+                # terminates this function's argument span.
                 new_args.extend(_emit_powered_func(pw, notation, out_n))
+                continue
+            ps = _powered_subscript_payload(a, notation)
+            if ps is not None:
+                new_args.append(_emit_powered_subscript(
+                    ps[0], ps[1], notation, out_n))
                 continue
             new_args.append(Replicator(notation, out_n)(a))
             continue
@@ -1154,13 +1239,14 @@ def _relax_plist(f, notation, out_n):
             new_args.append(out_n.setf(Notation.GROUP, (inner,), br='()'))
             continue
         pf = notation.getf(payload, Notation.P_LIST)
-        if last and not prev_head:
+        if boundary_after and not prev_head:
             if pf is not None \
                     and _plist_head_kind(pf.args[0], notation) is not None:
                 # function-application span: splice its factors in
                 new_args.extend(Replicator(notation, out_n)(m)
                                 for m in pf.args)
                 continue
+        if last and not prev_head:
             if pf is not None \
                     and _paren_payload(pf.args[0], notation) is not None:
                 # trailing ((x+2)(x-2)) from a subterm rewrite:

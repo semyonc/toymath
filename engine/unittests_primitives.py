@@ -208,8 +208,8 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
         self.assertEqual(
             r['result'],
-            r'\frac {1} {2}x^{2} \ln (x^{4}+4)-x^{2}+C'
-            r'+2 \arctan\left ( \frac {1} {2}x^{2} \right )')
+            r'\frac {1} {2}x^{2}\ln (x^{4}+4)-x^{2}+C'
+            r'+2 \arctan\left ( \frac {1} {2}x^{2}\right )')
 
     def test_expand_merges_atoms_after_argument_canonicalization(self):
         r = Core.expand(r'\ln(4+(x^2)^2)-\ln(x^4+4)')
@@ -296,11 +296,11 @@ class TestExpandCollectEvaluate(unittest.TestCase):
         r = Core.expand('(\\sin x)^2 + 1')
         self.assertEqual(r['check']['status'], 'agree')
         self.assertEqual(r['result'], '\\sin^{2}x+1')
-        # ...but keeps its parens as a non-trailing product factor, where
-        # \sin^{2}x \cos^{2}x would rebind the argument
+        # A following function head supplies an unambiguous argument boundary,
+        # so the non-trailing wrapper is redundant too.
         r = Core.expand('\\sin^2 x \\cos^2 x')
         self.assertEqual(r['check']['status'], 'agree')
-        self.assertEqual(r['result'], '( \\sin x)^{2} \\cos^{2}x')
+        self.assertEqual(r['result'], '\\sin^{2}x \\cos^{2}x')
 
     def test_atom_integral_keeps_thin_space(self):
         r = Core.expand('x \\sin x + \\int x \\, dx - x \\sin x')
@@ -374,6 +374,16 @@ class TestAtomPowers(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
         self.assertIn('\\sin^{-', r['result'])
 
+    def test_adjacent_function_atoms_drop_safe_nontrailing_parens(self):
+        r = Core.expand('2(\\sin x)\\cos x')
+        self.assertEqual(r['result'], '2 \\sin x \\cos x')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_adjacent_powered_function_atoms_drop_safe_parens(self):
+        r = Core.expand('(\\sin x)^2\\cos^2 x')
+        self.assertEqual(r['result'], '\\sin^{2}x \\cos^{2}x')
+        self.assertEqual(r['check']['status'], 'agree')
+
 
 class TestDifferentiate(unittest.TestCase):
     def check(self, expr, var='x'):
@@ -394,10 +404,16 @@ class TestDifferentiate(unittest.TestCase):
         self.check('x \\sin x')
 
     def test_quotient_rule(self):
-        self.check('\\frac{\\sin x}{x}')
+        r = self.check('\\frac{\\sin x}{x}')
+        self.assertEqual(
+            r['result'],
+            '\\frac {x \\cos\\left (x \\right )- \\sin\\left (x \\right )} '
+            '{x^{2}}',
+        )
 
     def test_chain_exp(self):
-        self.check('e^{x^2}')
+        r = self.check('e^{x^2}')
+        self.assertEqual(r['result'], '2xe^{\\left (x^{2}\\right )}')
 
     def test_chain_ln(self):
         self.check('\\ln(x^2 + 1)')
@@ -583,6 +599,16 @@ class TestPrettyOutput(unittest.TestCase):
     def test_index_dims_keep_braces(self):
         r = Core.expand('x^{12} x')
         self.assertIn('x^{13}', r['result'])
+
+    def test_repeated_index_groups_collapse_to_one_layer(self):
+        for source, expected in (
+                ('x^{{{3}}}', 'x^{3}'),
+                ('C_{{{1}}}', 'C_{1}'),
+                ('C_{{{1}}}^{2}', 'C_{1}^{2}'),
+                ('2e^{{2}x}', '2e^{2x}')):
+            with self.subTest(source=source):
+                sym, notation = P.parse_latex(source)
+                self.assertEqual(P.write_latex(sym, notation), expected)
 
     def test_pretty_reparses_equal(self):
         # every pretty result must parse back to an equal expression
@@ -1636,7 +1662,7 @@ class TestBigOperatorScoping(unittest.TestCase):
         r = Core.substitute('\\sum_{k=0}^{n} x^k', 'x', 'y')
         self.assertTrue(r['ok'], r.get('error'))
         self.assertIn('y^k', r['result'])
-        self.assertIn('k={0}', r['result'])
+        self.assertIn('k=0', r['result'])
 
     def test_substitution_refuses_capture_from_replacement(self):
         r = Core.substitute('\\sum_{k=0}^{n} x^k', 'x', 'k')
@@ -1701,6 +1727,16 @@ class TestSubscriptedVariables(unittest.TestCase):
     def test_powered_subscripted_variable_evaluates(self):
         c = P.numeric_spot_check('C_{1}^{2}', 'C_{1} C_{1}')
         self.assertEqual(c['status'], 'agree')
+
+    def test_powered_subscripted_variable_uses_one_atom(self):
+        r = Core.expand('C_{1}^{2}-C_{1}C_{1}')
+        self.assertEqual(r['result'], '0')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_like_powered_subscripted_terms_collect(self):
+        r = Core.expand('2C_{1}^{2}+3C_{1}^{2}')
+        self.assertEqual(r['result'], '5C_{1}^{2}')
+        self.assertEqual(r['check']['status'], 'agree')
 
     def test_symbolic_subscript_stays_outside_the_oracle(self):
         # x_i is not a numeral subscript: oracle ignorance, never a verdict
@@ -1834,6 +1870,11 @@ class TestPartialFractionsIntegral(unittest.TestCase):
         # independent confirmation: d/dx(answer) == integrand, exactly
         d = Differentiation.differentiate(final['result'], 'x')
         self.assertTrue(d['ok'], d.get('error'))
+        self.assertNotIn('\\ln', d['result'])
+        self.assertNotIn('\\frac{0}', d['result'])
+        # Dropping zero-multiplied log terms exposes a wider written domain;
+        # cleanup stays honest by retaining the domain-differs signal.
+        self.assertEqual(d['check']['status'], 'domain-differs')
         eq = Core.equal_exprs(d['result'], '\\frac{x^2}{(1-x^2)^3}')
         self.assertEqual(eq['verdict'], 'yes')
         self.assertIn('canonical', eq['method'])
@@ -1916,7 +1957,7 @@ class TestPuiseuxFold(unittest.TestCase):
              '{x x^{\\frac{1}{6}} + x}')
         r = self.ok(Core.expand(E))
         self.assertEqual(r['result'].replace(' ', ''),
-                         '\\frac{1}{x^{{\\frac{1}{2}}}+x^{{\\frac{1}{3}}}}')
+                         '\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}')
         self.assertIn({'text': 'x > 0', 'nonzero': 'x'}, r['assumptions'])
         eq = Core.equal_exprs(r['result'],
                            '\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}')
@@ -1925,12 +1966,12 @@ class TestPuiseuxFold(unittest.TestCase):
     def test_power_of_root_folds(self):
         r = self.ok(Core.expand('(x^{\\frac{1}{6}})^{4}'))
         self.assertEqual(r['result'].replace(' ', ''),
-                         'x^{{\\frac{2}{3}}}')
+                         'x^{\\frac{2}{3}}')
 
     def test_bare_variable_merges(self):
         r = self.ok(Core.expand('x \\cdot x^{\\frac{1}{6}}'))
         self.assertEqual(r['result'].replace(' ', ''),
-                         'x^{{\\frac{7}{6}}}')
+                         'x^{\\frac{7}{6}}')
 
     def test_domain_extension_is_flagged(self):
         # (x^{1/6})^6 = x only for x >= 0: the fold is right, the oracle
@@ -1954,7 +1995,7 @@ class TestPuiseuxFold(unittest.TestCase):
         r = self.ok(Core.expand('2 x^{\\frac{1}{2}} \\sin y '
                              '+ 3 x^{\\frac{1}{2}} \\sin y'))
         self.assertEqual(r['result'].replace(' ', ''),
-                         '5x^{{\\frac{1}{2}}}\\siny')
+                         '5x^{\\frac{1}{2}}\\siny')
 
     def test_integer_only_expressions_untouched(self):
         r = self.ok(Core.expand('(x+1)(x-2)'))
@@ -2074,7 +2115,7 @@ class TestLimitTactics(unittest.TestCase):
         r = self.ok(Limits.limit_lhopital(
             '\\lim_{x \\to 0} \\frac{e^x-1}{x}'))
         self.assertEqual(r['indeterminate_form'], '0/0')
-        self.assertIn('e^{x}', r['result'])
+        self.assertIn('e^x', r['result'])
         self.assertTrue(r['assumptions'])
 
     def test_lhopital_infinity_over_infinity(self):

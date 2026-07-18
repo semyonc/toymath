@@ -252,6 +252,9 @@ if isinstance(n, IntegerValue): ...
   command registry); keep the static table's registry-parity test green when
   adding committed commands.
 - Use a Replicator to copy expressions between notation contexts.
+- Use `primitives.write_latex` for user-visible verified results and notebook
+  history/backreferences. Direct `LaTexWriter` is the raw/debug spelling and
+  accumulates transparent INDEX brace groups across repeated parse/write hops.
 - Array-family nodes require matching lexer, grammar, writer, and Replicator
   dispatch. Standard non-alignment environments (`matrix`, `pmatrix`,
   `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, and `cases`)
