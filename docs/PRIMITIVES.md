@@ -159,7 +159,12 @@ Important verified-layer behaviors include:
   `(x^2)^(1/2)=|x|` are domain-sensitive;
 - ellipsis tokens have no semantics and are rejected except by the explicit
   finite-sum/product interpretation tactics, which record continuation as an
-  assumption.
+  assumption;
+- big-operator bound variables are integer-valued by the semantics of
+  `\sum`/`\prod`: the closed-form tactics check agent proposals by literal
+  accumulation at several integer bounds and record the integer domain as an
+  assumption, while general equality checking never silently integer-samples
+  a free variable.
 
 See [NOTATION.md](NOTATION.md) for graph shapes and `AGENTS.md` for parser,
 writer, comparer, and replicator landmines.
@@ -178,8 +183,9 @@ writer, comparer, and replicator landmines.
   general matrix multiplication/determinant tactic.
 - Quadratic root finding returns complete rational roots; irrational and
   complex roots remain outside the executable equation tactics.
-- Infinite sums/products must be expressed through partial operators and
-  limits; ellipsis and infinite bounds never become sampled ring variables.
+- Infinite sums/products enter only through the definitional
+  partial-sums rewrite (value = limit of partial sums, if it exists);
+  ellipsis and infinite bounds never become sampled ring variables.
 - Numeric oracle `skipped` means the checker lacks evidence. It must never be
   presented as a counterexample or a successful verification.
 

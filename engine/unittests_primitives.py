@@ -2317,7 +2317,211 @@ class TestProdFromEllipsis(unittest.TestCase):
         self.assertIn('the expression has none', rec['error'])
 
 
-class TestRootPowerDecay(unittest.TestCase):
+GEOMETRIC_SERIES = '\\sum_{k=0}^{\\infty} (\\frac{1}{2})^k'
+
+
+class TestSeriesPartialSums(unittest.TestCase):
+    def test_sum_door_is_exact_with_existence_assumption(self):
+        rec = FiniteOperators.series_partial_sums(GEOMETRIC_SERIES)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim_{n \\to \\infty}', rec['result'])
+        self.assertIn('\\sum_{k=0}^{n}', rec['result'])
+        self.assertEqual(rec['check']['status'], 'exact')
+        self.assertEqual(len(rec['assumptions']), 1)
+        self.assertIn('when that limit exists',
+                      rec['assumptions'][0]['text'])
+
+    def test_product_door(self):
+        rec = FiniteOperators.series_partial_sums(
+            '\\prod_{k=1}^{\\infty} \\frac{2k-1}{2k}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\prod_{k=1}^{n}', rec['result'])
+        self.assertIn('partial products', rec['assumptions'][0]['display'])
+
+    def test_finite_bounds_refused(self):
+        rec = FiniteOperators.series_partial_sums('\\sum_{k=0}^{n} r^k')
+        self.assertFalse(rec['ok'])
+        self.assertIn('already finite', rec['error'])
+
+    def test_lim_wrapper_refused(self):
+        rec = FiniteOperators.series_partial_sums(
+            '\\lim_{m \\to \\infty} ' + GEOMETRIC_SERIES)
+        self.assertFalse(rec['ok'])
+        self.assertIn('bare infinite', rec['error'])
+
+    def test_fresh_bound_avoids_free_symbols(self):
+        rec = FiniteOperators.series_partial_sums(
+            '\\sum_{k=0}^{\\infty} \\frac{n}{2^k}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim_{m \\to \\infty}', rec['result'])
+
+    def test_infinite_lower_bound_refused_without_circular_steering(self):
+        # the generic infinite-bounds refusal steers to this very tactic;
+        # from inside it that advice would be circular (agent-livelock
+        # class) and must be reworded
+        rec = FiniteOperators.series_partial_sums(
+            '\\sum_{k=-\\infty}^{0} 2^k')
+        self.assertFalse(rec['ok'])
+        self.assertNotIn('series_partial_sums', rec['error'])
+        self.assertIn('infinite lower bound', rec['error'])
+
+    def test_finite_tactic_refusal_names_this_door(self):
+        # the shipped steering once pointed at a rewrite no tactic could
+        # perform (unfollowable-advice class); it must name the door now
+        rec = FiniteOperators.sum_telescope('\\sum_{k=0}^{\\infty} r^k',
+                                            '\\frac{r^k}{1-r}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('series_partial_sums', rec['error'])
+
+
+class TestClosedForm(unittest.TestCase):
+    def test_wallis_product_equals_factorial_ratio(self):
+        # the gen-33 follow-up probe: both sides parse, general equal? is
+        # honestly unknown (real-valued sampling); the NAMED integer-
+        # domain tactic closes it with the assumption recorded
+        rec = FiniteOperators.prod_closed_form(
+            WALLIS_PROD_FORM, '\\frac{(2n)!}{2^{2n}(n!)^2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('integer', rec['check']['method'])
+        self.assertEqual(len(rec['assumptions']), 1)
+        self.assertIn('\\mathbb{Z}', rec['assumptions'][0]['text'])
+
+    def test_product_of_indices_is_factorial(self):
+        rec = FiniteOperators.prod_closed_form('\\prod_{k=1}^{n} k', 'n!')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], 'n!')
+
+    def test_faulhaber_sum(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k^2', '\\frac{n(n+1)(2n+1)}{6}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_geometric_sum_with_free_ratio(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=0}^{n} r^k', '\\frac{1-r^{n+1}}{1-r}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_wrong_form_refused_with_witness(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k^2', '\\frac{n(n+1)}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('disagree at', rec['error'])
+
+    def test_bound_variable_refused(self):
+        rec = FiniteOperators.sum_closed_form('\\sum_{k=1}^{n} k^2', 'k n')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bound variable', rec['error'])
+
+    def test_stray_variable_refused(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k^2', '\\frac{m(m+1)}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('new free variable', rec['error'])
+
+    def test_vacuous_proposal_refused(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k^2', '\\sum_{k=1}^{n} k^2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('itself', rec['error'])
+
+    def test_limit_binder_carried_through(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\lim_{n \\to \\infty} \\sum_{k=0}^{n} (\\frac{1}{2})^k',
+            '2 - (\\frac{1}{2})^{n}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lim', rec['result'])
+
+    def test_lim_wrapped_proposal_accepted_when_binder_matches(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\lim_{n \\to \\infty} \\sum_{k=0}^{n} (\\frac{1}{2})^k',
+            '\\lim_{n \\to \\infty} (2 - (\\frac{1}{2})^{n})')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_lim_wrapped_proposal_refused_for_bare_expression(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=0}^{n} (\\frac{1}{2})^k',
+            '\\lim_{m \\to \\infty} (2 - (\\frac{1}{2})^{m})')
+        self.assertFalse(rec['ok'])
+
+    def test_ratio_product(self):
+        rec = FiniteOperators.prod_closed_form(
+            '\\prod_{k=1}^{n} \\frac{k}{k+1}', '\\frac{1}{n+1}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_shifted_sum_proposal(self):
+        # index shifts are reachable as proposals: the literal loop
+        # evaluates the nested shifted sum at each integer bound
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k^2', '\\sum_{j=0}^{n-1} (j+1)^2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_infinite_bounds_refused(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=0}^{\\infty} r^k', '\\frac{1}{1-r}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('series_partial_sums', rec['error'])
+
+
+class TestBigopExpand(unittest.TestCase):
+    def test_literal_sum_folds_to_value(self):
+        rec = FiniteOperators.sum_expand('\\sum_{k=1}^{5} k^2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '55')
+        self.assertEqual(len(rec['terms']), 5)
+
+    def test_literal_product_folds_to_value(self):
+        rec = FiniteOperators.prod_expand('\\prod_{k=1}^{4} k')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '24')
+
+    def test_empty_conventions_are_exact(self):
+        rec = FiniteOperators.sum_expand('\\sum_{k=3}^{2} k')
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['check']['status'], 'exact')
+        rec = FiniteOperators.prod_expand('\\prod_{k=3}^{2} k')
+        self.assertEqual(rec['result'], '1')
+        self.assertEqual(rec['check']['status'], 'exact')
+
+    def test_term_cap_refused_with_steering(self):
+        rec = FiniteOperators.sum_expand('\\sum_{k=1}^{100} k')
+        self.assertFalse(rec['ok'])
+        self.assertIn('sum_closed_form', rec['error'])
+
+    def test_symbolic_bound_refused_with_steering(self):
+        rec = FiniteOperators.sum_expand('\\sum_{k=1}^{n} k')
+        self.assertFalse(rec['ok'])
+        self.assertIn('sum_closed_form', rec['error'])
+
+    def test_fractional_terms(self):
+        rec = FiniteOperators.sum_expand('\\sum_{k=1}^{3} \\frac{1}{k}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(
+            Core.equal_exprs(rec['result'], '\\frac{11}{6}')['verdict'],
+            'yes')
+
+
+class TestGeometricSeriesEndToEnd(unittest.TestCase):
+    def test_full_chain_closes_at_two_and_replays(self):
+        # the backlog's promise: with the definitional door the geometric
+        # series closes end to end with EXISTING machinery
+        ledger = Ledger()
+        ledger.record(FiniteOperators.series_partial_sums(GEOMETRIC_SERIES))
+        ledger.record(FiniteOperators.sum_closed_form(
+            ledger.last_result(), '2 - (\\frac{1}{2})^{n}'))
+        split = Limits.limit_linearity(ledger.last_result())
+        ledger.record(split)
+        values = []
+        for piece in split['limits']:
+            rec = Limits.limit_table(piece)
+            ledger.record(rec)
+            values.append(rec['result'])
+        assembled = Limits.limit_assemble(split['input'], values)
+        self.assertTrue(assembled['ok'], assembled.get('error'))
+        self.assertEqual(assembled['result'], '2')
+        # the assemble step needs do!-recorded sources to replay; the
+        # chain up to the pieces must replay standalone
+        self.assertEqual(ledger.replay()['status'], 'verified')
     def test_inverse_sqrt_closes(self):
         rec = Limits.limit_table('\\lim_{n \\to \\infty} ' + WALLIS_UPPER)
         self.assertTrue(rec['ok'], rec.get('error'))

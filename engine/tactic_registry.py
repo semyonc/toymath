@@ -412,6 +412,29 @@ TACTICS = (
                'collapse a checked telescoping finite sum',
                finite_operators.sum_telescope,
                (E, _arg('term', 'TERM', 'proposed telescoping f(k)'))),
+    TacticSpec('series_partial_sums', 'series_partial_sums',
+               'finite_operators',
+               'rewrite an infinite sum/product as the limit of its '
+               'partial sums/products',
+               finite_operators.series_partial_sums, (E,)),
+    TacticSpec('sum_closed_form', 'sum_closed_form', 'finite_operators',
+               'replace a finite sum by a checked closed form in the '
+               'upper bound', finite_operators.sum_closed_form,
+               (E, _arg('closed_form', 'CLOSED_FORM',
+                        'proposed closed form in the upper-bound '
+                        'variable'))),
+    TacticSpec('prod_closed_form', 'prod_closed_form', 'finite_operators',
+               'replace a finite product by a checked closed form in the '
+               'upper bound', finite_operators.prod_closed_form,
+               (E, _arg('closed_form', 'CLOSED_FORM',
+                        'proposed closed form in the upper-bound '
+                        'variable'))),
+    TacticSpec('sum_expand', 'sum_expand', 'finite_operators',
+               'write a literal-bounds finite sum out term by term',
+               finite_operators.sum_expand, (E,)),
+    TacticSpec('prod_expand', 'prod_expand', 'finite_operators',
+               'write a literal-bounds finite product out factor by '
+               'factor', finite_operators.prod_expand, (E,)),
 )
 
 
