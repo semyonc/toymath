@@ -234,6 +234,57 @@ class MathShell(object):
                          f'assumes {self._assumption_html(a)}</div>')
         return ''.join(lines)
 
+    _CHECK_COLORS = {'agree': '#176b2c', 'exact': '#176b2c',
+                     'skipped': '#888', 'domain-differs': '#b65c00',
+                     'disagree': '#c00'}
+
+    def render_do_chain(self, steps):
+        """End-of-run summary table of a run's verified chain, generated
+        from the ledger records themselves — the agent is told never to
+        retype it. Returns None when a table would add nothing (fewer
+        than two transforming steps)."""
+        rows = []
+        for step in steps:
+            if step.get('result') is None:
+                continue  # comments are strategy notes, not chain links
+            check = step['check'].get('status', '?')
+            color = self._CHECK_COLORS.get(check, '#c00')
+            branch = ('<div style="color:#888;font-size:85%">(branch)'
+                      '</div>'
+                      if step.get('continues') is False else '')
+            note = ''
+            if step['op'] == 'apply_both_sides':
+                a = step['args']
+                note = ' ' + _html.escape(a['op'] + ' ' + a['arg'])
+            assum = ''
+            if step['assumptions']:
+                assum = (f' <span style="color:#888">+'
+                         f'{len(step["assumptions"])} assum.</span>')
+            cell = 'padding:2px 12px 2px 0;text-align:left;' \
+                   'vertical-align:top'
+            rows.append(
+                '<tr>'
+                f'<td style="{cell}"><code>{step["id"]}</code>'
+                f'{branch}</td>'
+                f'<td style="{cell}"><code>'
+                f'{_html.escape(step["op"])}{note}</code></td>'
+                f'<td style="{cell}">${step["result"]}$</td>'
+                f'<td style="{cell};color:{color}">{check}{assum}</td>'
+                '</tr>')
+        if len(rows) < 2:
+            return None
+        head = 'padding:2px 12px 2px 0;text-align:left;' \
+               'border-bottom:1px solid #8884'
+        header = ('<tr>'
+                  + ''.join(f'<th style="{head}">{h}</th>'
+                            for h in ('step', 'move', 'result', 'check'))
+                  + '</tr>')
+        return ('<div style="margin-top:4px"><strong>verified chain'
+                '</strong> <span style="color:#888">&mdash; rendered '
+                'from the ledger</span></div>'
+                '<table style="border-collapse:collapse">'
+                + header + ''.join(rows) + '</table>')
+
     @staticmethod
     def _figure_html(figure):
         """One sandbox figure as HTML, by kind.
@@ -343,6 +394,9 @@ class MathShell(object):
             self._do_error(res.get('error', 'agent failed'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
+        chain = self.render_do_chain(res.get('steps') or [])
+        if chain:
+            display(HTML(chain))
         if res.get('summary'):
             label = ('<strong>agent narrative — unverified:</strong> '
                      if res.get('summary_unverified') else '')

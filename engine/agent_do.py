@@ -69,6 +69,10 @@ _DO_RULES = """
   value, then stop calling tools and answer in one short sentence. A detached
   value after transforming steps is refused; query-only values are explicitly
   unverified.
+- The notebook renders the verified chain, claims, assumptions, figures, and
+  final value from the ledger itself. Never restate ledger steps, retype
+  results, draw markdown tables, or write image links in your final answer -
+  it is displayed as plain text commentary only.
 - If a tactic refuses or its check disagrees, change strategy. Never present
   an unverified result as the answer.
 - Confirm equation candidates with substitute plus evaluate when cheap.

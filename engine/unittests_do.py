@@ -102,6 +102,15 @@ class TestPromptBuilder(unittest.TestCase):
         self.assertIn('mechanical checker', p)
         self.assertIn('## do! mode', p)
 
+    def test_prompt_forbids_restating_the_ledger(self):
+        # live defect: an agent hand-retyped the step chain as a markdown
+        # table (raw pipes in the em line, broken attachment: image link).
+        # The notebook renders the verified chain from the ledger; the
+        # prompt must keep final answers to plain commentary.
+        p = agent_do.build_prompt()
+        self.assertIn('Never restate ledger steps', p)
+        self.assertIn('write image links', p)
+
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
         self.assertIn('root claim\n`c7`', p)
@@ -1048,6 +1057,8 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('s1#', out)
         self.assertIn('s2#', out)
         self.assertIn('Subtracted 3', out)
+        # the harness renders the end-of-run chain table from the ledger
+        self.assertIn('verified chain', out)
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
@@ -1066,6 +1077,38 @@ class TestMathShellDo(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.shell.exec('do! solve 2x = 4', 4, add_to_history=True)
         self.assertIn(agent_do.API_KEY_VAR, self._html())
+
+    def _chain_step(self, sid, op, result, check='agree', continues=True,
+                    assumptions=()):
+        return {'id': sid, 'hash': 'h' + sid, 'op': op,
+                'args': {}, 'input': 'x', 'result': result,
+                'check': {'status': check}, 'continues': continues,
+                'assumptions': list(assumptions)}
+
+    def test_chain_table_renders_from_step_records(self):
+        html = self.shell.render_do_chain([
+            self._chain_step('s1', 'expand', 'x^{2}+2x+1'),
+            self._chain_step('s2', 'factor_quadratic', '(x+1)^{2}',
+                             assumptions=[{'text': 'x \\ne 0'}]),
+            self._chain_step('s3', 'sum_telescope', '\\frac{n}{n+1}',
+                             check='skipped', continues=False),
+        ])
+        self.assertIn('verified chain', html)
+        for frag in ('<code>s1</code>', '<code>expand</code>',
+                     '$x^{2}+2x+1$', '(branch)', '+1 assum.'):
+            self.assertIn(frag, html)
+        # check-status colors: agree green, skipped grey
+        self.assertIn('#176b2c', html)
+        self.assertIn('#888', html)
+
+    def test_chain_table_skips_comments_and_short_runs(self):
+        comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
+                   'args': {'text': 'strategy note'}, 'input': None,
+                   'result': None, 'check': {'status': 'note'},
+                   'assumptions': []}
+        self.assertIsNone(self.shell.render_do_chain([]))
+        self.assertIsNone(self.shell.render_do_chain(
+            [comment, self._chain_step('s2', 'expand', '5')]))
 
     def test_query_only_final_is_rendered_unverified(self):
         result = {'ok': True, 'steps': [], 'assumptions': [],
