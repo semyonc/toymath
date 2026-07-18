@@ -266,6 +266,17 @@ if isinstance(n, IntegerValue): ...
   commands via `prompt_commands.load_commands()`.
 - The `do!` agent endpoint requires `OPEN_ROUTER` in `.env` (model via
   `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`).
+- Optional Langfuse tracing of do! runs is off by default; set
+  `TOYMATH_OBSERVABILITY=on` (with `LANGFUSE_PUBLIC_KEY`/
+  `LANGFUSE_SECRET_KEY`/`LANGFUSE_BASE_URL`) to send one trace per run —
+  agent turns, LLM generations with token usage/latency, and every trusted
+  primitive call — to Langfuse. `engine/observability.py` owns the wiring
+  (OpenInference instrumentor → OTEL → Langfuse). It is observability only:
+  it never touches the ledger or oracle, and any Langfuse failure is
+  downgraded to a warning so a derivation always runs. LANDMINE: the
+  instrumentor rides the Agents-SDK tracing pipeline, so `build_model` only
+  calls `set_tracing_disabled(True)` when tracing is inactive — enabling it
+  with tracing disabled would silently emit nothing.
 - `do!` figures need Deno (`brew install deno`) — toggle both off with
   `TOYMATH_SANDBOX=off`. Two backends, deliberately separate processes
   with different grants (see `plot_sandbox.py`):

@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import agent_do
+import observability
 import plot_sandbox
 import tactic_registry
 from tactics import core as core_tactics
@@ -806,6 +807,110 @@ class TestScriptedAgent(unittest.TestCase):
             ledger=ledger)
         self.assertEqual(len(ledger.steps), 3)
         self.assertEqual(len(res['steps']), 1)  # only this run's slice
+
+
+class TestObservability(unittest.TestCase):
+    """Langfuse tracing is opt-in, non-fatal, and never touches the ledger.
+
+    Runs fully offline: a Langfuse client backed by an in-memory OTEL
+    exporter captures spans without any network or credentials.
+    """
+
+    def test_env_toggle_parsing(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(observability.ENABLE_VAR, None)
+            self.assertFalse(observability.is_enabled())
+        for on in ('1', 'true', 'on', 'yes', 'ON', 'Enabled'):
+            with mock.patch.dict(os.environ,
+                                 {observability.ENABLE_VAR: on}):
+                self.assertTrue(observability.is_enabled(), on)
+        for off in ('0', 'false', 'off', 'no', '', 'maybe'):
+            with mock.patch.dict(os.environ,
+                                 {observability.ENABLE_VAR: off}):
+                self.assertFalse(observability.is_enabled(), off)
+
+    def test_disabled_is_a_noop_and_run_is_unaffected(self):
+        observability._reset_for_tests()
+        self.addCleanup(observability._reset_for_tests)
+        with mock.patch.dict(os.environ, {observability.ENABLE_VAR: 'off'}):
+            self.assertFalse(observability.setup())
+        self.assertFalse(observability.active())
+        with observability.trace_run('anything') as span:
+            self.assertIsNone(span)  # a no-op context manager
+        observability.set_output(None, 'ignored')  # must not raise
+        observability.flush()  # must not raise
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x',
+            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]))
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['final_result'], '2x = 4')
+
+    def test_build_model_tracing_toggle_follows_observability(self):
+        # THE landmine: the OpenInference instrumentor rides the Agents-SDK
+        # tracing pipeline, so an active observability must leave that
+        # pipeline ENABLED; an inactive one disables it (no OpenAI upload).
+        for is_active, expected_disabled in [(True, False), (False, True)]:
+            calls = []
+            with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
+                 mock.patch('agents.set_tracing_disabled',
+                            side_effect=calls.append), \
+                 mock.patch.object(observability, 'active',
+                                   return_value=is_active):
+                agent_do.build_model()
+            self.assertEqual(calls, [expected_disabled], is_active)
+
+    def test_active_run_emits_one_nested_langfuse_trace(self):
+        from agents import set_tracing_disabled
+        from openinference.instrumentation.openai_agents import (
+            OpenAIAgentsInstrumentor)
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter)
+        from langfuse import Langfuse
+
+        exporter = InMemorySpanExporter()
+        lf = Langfuse(public_key='pk-lf-test', secret_key='sk-lf-test',
+                      tracing_enabled=True, span_exporter=exporter)
+        set_tracing_disabled(False)
+        observability._reset_for_tests()
+
+        def cleanup():
+            OpenAIAgentsInstrumentor().uninstrument()
+            observability._reset_for_tests()
+            set_tracing_disabled(True)  # leave the process quiet again
+            lf.shutdown()
+        self.addCleanup(cleanup)
+
+        self.assertTrue(observability.setup(client=lf))
+        self.assertTrue(observability.active())
+
+        ledger = Ledger()
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x',
+            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]),
+            ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        lf.flush()
+
+        spans = exporter.get_finished_spans()
+        self.assertTrue(spans, 'no spans were exported')
+        # one trace for the whole run, rooted at our wrapping observation
+        self.assertEqual(len({s.context.trace_id for s in spans}), 1)
+        root = next(s for s in spans if s.parent is None)
+        self.assertEqual(root.name, 'do!')
+        attrs = dict(root.attributes)
+        self.assertEqual(attrs.get('langfuse.observation.input'),
+                         'solve 2x + 3 = 7 for x')
+        self.assertEqual(attrs.get('langfuse.observation.metadata.mode'),
+                         'do')
+        self.assertEqual(attrs.get('langfuse.observation.type'), 'agent')
+        # the trusted-primitive calls appear as nested tool spans
+        kinds = {s.attributes.get('openinference.span.kind') for s in spans}
+        self.assertIn('TOOL', kinds)
+        # tracing is observability only: the ledger is exactly what it would
+        # be without it
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['apply_both_sides', 'expand'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='

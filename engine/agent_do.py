@@ -18,6 +18,7 @@ import os
 import re
 import threading
 
+import observability
 import primitives
 import tactic_registry
 import tactic_skills
@@ -560,7 +561,11 @@ def build_model():
             f'{API_KEY_VAR} is not set - put the OpenRouter key in .env')
     from openai import AsyncOpenAI
     from agents import OpenAIChatCompletionsModel, set_tracing_disabled
-    set_tracing_disabled(True)
+    # Leave the Agents SDK tracing ENABLED only when observability is active:
+    # the OpenInference instrumentor rides that pipeline, so disabling it
+    # would silently starve Langfuse. When inactive, disable it as before so
+    # no traces are shipped to OpenAI's backend.
+    set_tracing_disabled(not observability.active())
     client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
     return OpenAIChatCompletionsModel(
         model=os.environ.get(MODEL_VAR, DEFAULT_MODEL),
@@ -584,6 +589,9 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     """
     from agents import Agent, Runner
     from agents.exceptions import MaxTurnsExceeded
+    # Set up tracing before the model is built: build_model consults
+    # observability.active() to decide whether to leave Agents-SDK tracing on.
+    observability.setup()
     if plot_backend is None:
         import plot_sandbox
         plot_backend = plot_sandbox.get_backend()
@@ -609,18 +617,33 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                   tools=make_tools(session),
                   model=model if model is not None else build_model())
     holder = {}
+    trace_meta = {
+        'mode': 'prove' if proof_goal is not None else 'do',
+        'model': (os.environ.get(MODEL_VAR, DEFAULT_MODEL)
+                  if model is None else type(model).__name__),
+        'max_turns': max_turns,
+    }
 
     def worker():
         import asyncio
         try:
-            holder['res'] = asyncio.run(
-                Runner.run(agent, instruction, max_turns=max_turns))
+            # trace_run must be entered on this thread: the instrumentor's
+            # root span inherits the active OTEL context here so the whole
+            # agent trace nests under one Langfuse observation.
+            with observability.trace_run(instruction,
+                                         metadata=trace_meta) as span:
+                res = asyncio.run(
+                    Runner.run(agent, instruction, max_turns=max_turns))
+                observability.set_output(
+                    span, str(res.final_output or '').strip() or None)
+                holder['res'] = res
         except Exception as e:  # surfaced below, never swallowed
             holder['err'] = e
 
     t = threading.Thread(target=worker, name='toymath-do', daemon=True)
     t.start()
     t.join()
+    observability.flush()
 
     steps = session.new_steps()
     last_transform = next((s for s in reversed(steps)

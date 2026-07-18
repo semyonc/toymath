@@ -191,7 +191,18 @@ Agent configuration is read from `.env`:
 OPEN_ROUTER=sk-or-...
 OPENROUTER_MODEL=anthropic/claude-sonnet-5
 TOYMATH_SANDBOX=auto
+# optional Langfuse tracing of do! runs (off unless set to on/1/true)
+TOYMATH_OBSERVABILITY=off
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```
+
+With `TOYMATH_OBSERVABILITY=on`, each do! run is exported to Langfuse as one
+trace (agent turns, LLM generations with token usage and latency, and every
+trusted-primitive tool call) via the OpenInference instrumentor. Tracing is
+observability only — it never touches the ledger or the numeric oracle, and a
+Langfuse outage is downgraded to a logged warning so the derivation still runs.
 
 The normal test suite is offline; live OpenRouter and plot probes are opt-in:
 
