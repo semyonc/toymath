@@ -172,7 +172,7 @@ class LaTexWriter(object):
             for i, expr in enumerate(f.args):
                 if i > 0:
                     self.writeString(',')
-                self.write_additive_expr_list(expr)
+                self.write_subformula(expr)
         else:
             self.write_additive_expr_list(sym)
 
@@ -458,7 +458,7 @@ class LaTexWriter(object):
             self.write_expr(expr)
 
     def write_slashExpr(self, f):
-        self.write_expr(f.args[0])
+        self.write_composite_expr(f.args[0])
         self.writeString('/')
         self.write_expr(f.args[1])
 

@@ -99,6 +99,12 @@ class TestScenario(unittest.TestCase):
             [("a", NotationParam.Value), ("b", NotationParam.Value)],
         )
 
+    def test_classic_relation_system(self):
+        self.checkEqual('x+x=2,y+y=4', '2x=2,2y=4')
+
+    def test_classic_product_slash_in_exponent(self):
+        self.checkEqual('(-1)^{n(n-1)/2}', '(-1)^{n(n-1)/2}')
+
     def test_pattern2(self):
         self.assertCompare("a + b + c", "c + b + a")
 

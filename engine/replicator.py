@@ -343,7 +343,7 @@ class Replicator(object):
         return self.output_notation.repf(self.mapsym(sym), Func(f.sym, (self.enter_composite_expr(f.args[0]),)))
 
     def enter_clist(self, sym, f):
-        args = self.build_list(f, self.enter_additive_expr_list)
+        args = self.build_list(f, self.enter_subformula)
         return self.output_notation.repf(self.mapsym(sym), Func(Notation.C_LIST, args))
 
     def enter_slist(self, sym, f):
@@ -356,7 +356,7 @@ class Replicator(object):
 
     def enter_slashExpr(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),
-                                         Func(f.sym, (self.enter_expr(f.args[0]), self.enter_expr(f.args[1]))))
+                                         Func(f.sym, (self.enter_composite_expr(f.args[0]), self.enter_expr(f.args[1]))))
 
     def enter_starExpr(self, sym, f):
         return self.output_notation.repf(self.mapsym(sym),
@@ -458,4 +458,3 @@ class Replicator(object):
 
     def enter_collist(self, collist):
         return [self.enter_subformula(col) for col in collist]
-

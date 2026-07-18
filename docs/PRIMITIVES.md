@@ -144,6 +144,10 @@ Important verified-layer behaviors include:
 
 - `polyrat.py` canonicalizes the rational fragment using sparse polynomials
   and rational functions;
+- comma-separated equations/inequalities form a relation collection rather
+  than one comparison with a comma-valued right side; one-column `\cases`
+  is also recognized as a system, and whole-system substitution/apply merge
+  independently checked per-relation steps;
 - maximal non-fragment subtrees become opaque atoms so rational algebra can
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol
@@ -181,6 +185,9 @@ writer, comparer, and replicator landmines.
   intentionally narrow; floor and ceiling are not modeled.
 - Literal matrices have oracle support and scalar-linear algebra, but no
   general matrix multiplication/determinant tactic.
+- Relation systems parse and support whole-system substitution and uniform
+  both-sides operations, but there is no autonomous elimination, row-combine,
+  or general linear-system solver.
 - Quadratic root finding returns complete rational roots; irrational and
   complex roots remain outside the executable equation tactics.
 - Infinite sums/products enter only through the definitional

@@ -144,8 +144,12 @@ class MathParser(object):
          'subformula : comma-list'
          p[0] = p[1]
 
-     def p_subformula_expr_comparer(self, p):
-         'subformula : additive-expr comparer comma-list'
+     def p_comma_item_additive_expr(self, p):
+         'comma-item : additive-expr'
+         p[0] = p[1]
+
+     def p_comma_item_comparer(self, p):
+         'comma-item : additive-expr comparer additive-expr'
          p[0] = self.notation.setf(Symbol('comp', op=p[2]),(p[1],p[3]))
 
      def p_comparer(self, p):
@@ -185,11 +189,11 @@ class MathParser(object):
          p[0] = p[1]
 
      def p_comma_list_additive_expr(self, p):
-         'comma-list : additive-expr'
+         'comma-list : comma-item'
          p[0] = p[1]
 
      def p_command_list_list(self, p):
-         '''comma-list : comma-list ',' additive-expr'''
+         '''comma-list : comma-list ',' comma-item'''
          f = self.notation.getf(p[1], Notation.C_LIST)
          if f is None:
              p[0] = self.notation.setf(Notation.C_LIST, [p[1], p[3]])
@@ -282,7 +286,7 @@ class MathParser(object):
            f.props['cdot'] = True
 
      def p_composite_expr_slash(self, p):
-        '''composite-expr : expression '/' expression'''
+        '''composite-expr : expression-list '/' expression'''
         p[0] = self.notation.setf(Notation.SLASH,(p[1],p[3]))
 
 

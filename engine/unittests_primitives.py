@@ -1044,6 +1044,84 @@ class TestSubtermRelax(unittest.TestCase):
                          '(x^{2}+4)(x^{2}-4)=0')
 
 
+class TestRelationSystemsAndProductSlash(unittest.TestCase):
+    def test_comma_system_is_a_list_of_relations(self):
+        from replicator import Replicator
+
+        sym, notation = P.parse_latex('x+y=3,x-y=1')
+        system = notation.getf(sym, Notation.C_LIST)
+        self.assertIsNotNone(system)
+        self.assertEqual(len(system.args), 2)
+        self.assertTrue(all(notation.getf(item, Notation.COMP) is not None
+                            for item in system.args))
+
+        copied_notation = Notation()
+        copied = Replicator(notation, copied_notation)(sym)
+        written = P.write_latex(copied, copied_notation)
+        self.assertTrue(P.same_expression(written, 'x+y=3,x-y=1'))
+
+    def test_scalar_comma_list_is_unchanged(self):
+        sym, notation = P.parse_latex('x,y')
+        comma = notation.getf(sym, Notation.C_LIST)
+        self.assertIsNotNone(comma)
+        self.assertTrue(all(notation.getf(item, Notation.COMP) is None
+                            for item in comma.args))
+        self.assertEqual(P.write_latex(sym, notation), 'x,y')
+
+    def test_product_left_of_slash_parses_and_round_trips(self):
+        for latex in ('n(n-1)/2', 'n*n/2', 'n\\cdot(n-1)/2'):
+            with self.subTest(latex=latex):
+                sym, notation = P.parse_latex(latex)
+                slash = notation.getf(sym, Notation.SLASH)
+                self.assertIsNotNone(slash)
+                self.assertIsNotNone(
+                    notation.getf(slash.args[0], Notation.P_LIST))
+                written = P.write_latex(sym, notation)
+                self.assertTrue(P.same_expression(written, latex))
+
+    def test_natural_parity_exponent_is_usable(self):
+        expr = '(-1)^{n(n-1)/2}'
+        sym, notation = P.parse_latex(expr)
+        self.assertTrue(P.same_expression(P.write_latex(sym, notation), expr))
+        self.assertEqual(
+            Core.equal_exprs(expr, '(-1)^{\\frac{n(n-1)}{2}}')['verdict'],
+            'yes')
+        replaced = Core.substitute(expr, 'n', '4')
+        self.assertEqual(replaced['check']['status'], 'agree')
+        self.assertEqual(Core.evaluate(replaced['result'])['result'], '1.0')
+
+    def test_system_substitution_is_checked_per_relation(self):
+        for system in ('x+y=3,x-y=1',
+                       '\\cases{x+y=3 \\cr x-y=1}'):
+            with self.subTest(system=system):
+                rec = Core.substitute(system, 'x', '3-y')
+                self.assertTrue(rec['ok'])
+                self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_apply_both_sides_maps_over_system(self):
+        comma = Core.apply_both_sides('x+y=3,x-y=1', '-', 'y')
+        cases = Core.apply_both_sides(
+            '\\cases{x+y=3 \\cr x-y=1}', '/', '2')
+        for rec in (comma, cases):
+            self.assertTrue(rec['ok'])
+            self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn(',', comma['result'])
+        self.assertIn('\\cases', cases['result'])
+        symbolic = Core.apply_both_sides('xy=1,x+y=2', '/', 'y')
+        self.assertEqual(symbolic['check']['status'], 'agree')
+        self.assertEqual(symbolic['assumptions'],
+                         [{'text': 'y \\ne 0', 'nonzero': 'y'}])
+
+    def test_non_system_collections_are_not_relations(self):
+        rec = Core.apply_both_sides('x=1,y', '+', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('relation system', rec['error'])
+        piecewise = Core.apply_both_sides(
+            '\\cases{x & x\\ge0 \\cr -x & x\\lt0}', '+', '1')
+        self.assertFalse(piecewise['ok'])
+        self.assertIn('relation system', piecewise['error'])
+
+
 class TestCombinatorialNotation(unittest.TestCase):
     def parse(self, latex):
         notation = Notation()
@@ -1288,6 +1366,13 @@ class TestLedger(unittest.TestCase):
         ledger.record(Core.apply_both_sides('x y = 1', '/', 'y'))
         ledger.save()
         self.assertEqual(len(Ledger(path).assumptions), 1)
+
+    def test_relation_system_step_replays(self):
+        path = os.path.join(tempfile.mkdtemp(), 'system.json')
+        ledger = Ledger(path)
+        ledger.record(Core.apply_both_sides('x+y=3,x-y=1', '-', 'y'))
+        ledger.save()
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
     def test_branch_detection(self):
         path = os.path.join(tempfile.mkdtemp(), 'session.json')

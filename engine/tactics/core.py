@@ -336,6 +336,33 @@ class _ZeroTermDropper(Replicator):
             self.mapsym(sym), Func(Notation.S_LIST, args))
 
 
+def _relation_system_items(sym, notation):
+    r"""Return ``(kind, relation_symbols)`` for a relation collection.
+
+    A comma system is a C_LIST containing only relations.  A cases system is
+    a one-column ``\cases`` array whose every row is a relation; ordinary
+    two-column piecewise cases deliberately remain scalar notation.
+    """
+    comma = notation.getf(sym, Notation.C_LIST)
+    if comma is not None and len(comma.args) >= 2 \
+            and all(notation.getf(item, Notation.COMP) is not None
+                    for item in comma.args):
+        return 'comma', list(comma.args)
+    f = notation.get(sym) if isinstance(sym, Symbol) else None
+    if f is not None and f.sym.name == '\\cases' and f.args \
+            and all(isinstance(row, (list, tuple)) and len(row) == 1
+                    and notation.getf(row[0], Notation.COMP) is not None
+                    for row in f.args):
+        return 'cases', [row[0] for row in f.args]
+    return None
+
+
+def _render_relation_system(kind, relations):
+    if kind == 'comma':
+        return ','.join(relations)
+    return '\\cases{' + ' \\cr '.join(relations) + '}'
+
+
 def substitute(expr, var, value):
     """Replace every free occurrence of `var` in `expr` by `value`.
     Additive terms that become literally zero are dropped."""
@@ -384,6 +411,19 @@ def _substitute_check(expr, result, var, value, samples=8, seed=20260705):
         sp2 = _comp_split(s2, n2)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
+    system1 = _relation_system_items(s1, n1)
+    system2 = _relation_system_items(s2, n2)
+    if system1 is not None or system2 is not None:
+        if system1 is None or system2 is None \
+                or len(system1[1]) != len(system2[1]):
+            return {'status': 'disagree',
+                    'reason': 'relation-system shape changed'}
+        return _merge_check_list([
+            _substitute_check(write_latex(before, n1),
+                              write_latex(after, n2), var, value,
+                              samples=samples, seed=seed)
+            for before, after in zip(system1[1], system2[1])
+        ])
     if sp1 is not None and sp2 is not None:
         return _merge_checks(
             _substitute_check(write_latex(sp1[0], n1),
@@ -443,26 +483,10 @@ def _needs_parens_factor(sym, notation):
                                 Notation.PLUS]) is not None
 
 
-def apply_both_sides(equation, op, arg):
-    """Apply op ∈ {+,-,*,/,^} with argument `arg` to both sides of an
-    equation. Division records the assumption arg ≠ 0."""
-    args = {'equation': equation, 'op': op, 'arg': arg}
-    if op not in _APPLY_OPS:
-        return _error('apply_both_sides', args,
-                      f'op must be one of {_APPLY_OPS}')
-    try:
-        sym, notation = parse_latex(equation)
-        asym, anotation = parse_latex(arg)
-    except PrimitiveError as e:
-        return _error('apply_both_sides', args, str(e))
-    comp = notation.getf(sym, Notation.COMP)
-    if comp is None:
-        return _error('apply_both_sides', args,
-                      'expression is not an equation or inequality')
+def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
     rel = comp.sym.props.get('op')
     if rel not in _SUPPORTED_REL:
-        return _error('apply_both_sides', args,
-                      f'unsupported relation {rel!r}')
+        return None, f'unsupported relation {rel!r}'
     is_ineq = rel in _FLIP_REL
     out_rel = rel
     lhs, rhs = comp.args[0], comp.args[1]
@@ -471,14 +495,6 @@ def apply_both_sides(equation, op, arg):
     arg_s = write_latex(asym, anotation)
 
     assumptions = []
-    # constant analysis of the argument
-    arg_const = None
-    try:
-        rf = to_ratfunc(asym, anotation)
-        if rf.is_const():
-            arg_const = rf.const_value()
-    except (NotInFragment, ZeroDivisionError):
-        pass
 
     def additive(side):
         a = arg_s
@@ -496,12 +512,10 @@ def apply_both_sides(equation, op, arg):
         new_lhs, new_rhs = additive(lhs_s), additive(rhs_s)
     elif op == '*':
         if arg_const == 0:
-            return _error('apply_both_sides', args,
-                          'multiplying both sides by 0 destroys the relation')
+            return None, 'multiplying both sides by 0 destroys the relation'
         if is_ineq:
             if arg_const is None:
-                return _error(
-                    'apply_both_sides', args,
+                return None, (
                     'cannot multiply an inequality by an expression of '
                     'unknown sign; use a constant or split into cases')
             if arg_const < 0:
@@ -513,11 +527,10 @@ def apply_both_sides(equation, op, arg):
         new_rhs = multiplicative(rhs, rhs_s)
     elif op == '/':
         if arg_const == 0:
-            return _error('apply_both_sides', args, 'division by zero')
+            return None, 'division by zero'
         if is_ineq:
             if arg_const is None:
-                return _error(
-                    'apply_both_sides', args,
+                return None, (
                     'cannot divide an inequality by an expression of '
                     'unknown sign; use a constant or split into cases')
             if arg_const < 0:
@@ -528,8 +541,7 @@ def apply_both_sides(equation, op, arg):
         new_rhs = f'\\frac{{{rhs_s}}}{{{arg_s}}}'
     else:  # '^'
         if rel != '=':
-            return _error('apply_both_sides', args,
-                          "op '^' is only supported for '=' relations")
+            return None, "op '^' is only supported for '=' relations"
         if arg_const is not None and arg_const < 0:
             assumptions.append({'text': f'{lhs_s} \\ne 0', 'nonzero': lhs_s})
             assumptions.append({'text': f'{rhs_s} \\ne 0', 'nonzero': rhs_s})
@@ -542,6 +554,64 @@ def apply_both_sides(equation, op, arg):
         new_rhs = f'{_paren(rhs_s)}^{{{arg_s}}}'
 
     result = f'{new_lhs} {out_rel} {new_rhs}'
+    # oracle: each new side must equal op(old side, arg) at sample points
+    c1 = numeric_spot_check(new_lhs, _op_expr(lhs_s, op, arg_s),
+                            assumptions=assumptions)
+    c2 = numeric_spot_check(new_rhs, _op_expr(rhs_s, op, arg_s),
+                            assumptions=assumptions)
+    return {'result': result, 'assumptions': assumptions,
+            'check': _merge_checks(c1, c2)}, None
+
+
+def apply_both_sides(equation, op, arg):
+    """Apply op ∈ {+,-,*,/,^} with argument `arg` to both sides of one
+    relation or every relation in a comma/one-column-cases system. Division
+    records the assumption arg ≠ 0."""
+    args = {'equation': equation, 'op': op, 'arg': arg}
+    if op not in _APPLY_OPS:
+        return _error('apply_both_sides', args,
+                      f'op must be one of {_APPLY_OPS}')
+    try:
+        sym, notation = parse_latex(equation)
+        asym, anotation = parse_latex(arg)
+    except PrimitiveError as e:
+        return _error('apply_both_sides', args, str(e))
+
+    comp = notation.getf(sym, Notation.COMP)
+    system = _relation_system_items(sym, notation)
+    if comp is None and system is None:
+        return _error('apply_both_sides', args,
+                      'expression is not an equation, inequality, or '
+                      'relation system')
+
+    arg_const = None
+    try:
+        rf = to_ratfunc(asym, anotation)
+        if rf.is_const():
+            arg_const = rf.const_value()
+    except (NotInFragment, ZeroDivisionError):
+        pass
+
+    relation_symbols = [sym] if comp is not None else system[1]
+    transformed = []
+    assumptions = []
+    checks = []
+    for index, relation_sym in enumerate(relation_symbols):
+        relation = notation.getf(relation_sym, Notation.COMP)
+        outcome, error = _apply_one_relation(
+            relation, notation, op, asym, anotation, arg_const)
+        if error is not None:
+            if system is not None:
+                error = f'relation {index + 1}: {error}'
+            return _error('apply_both_sides', args, error)
+        transformed.append(outcome['result'])
+        for assumption in outcome['assumptions']:
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+        checks.append(outcome['check'])
+
+    result = (transformed[0] if system is None
+              else _render_relation_system(system[0], transformed))
     try:
         parse_latex(result)
     except PrimitiveError as e:
@@ -549,12 +619,7 @@ def apply_both_sides(equation, op, arg):
                       f'internal: built unparseable result: {e}')
     rec = _result('apply_both_sides', args, equation, result,
                   assumptions=assumptions)
-    # oracle: each new side must equal op(old side, arg) at sample points
-    c1 = numeric_spot_check(new_lhs, _op_expr(lhs_s, op, arg_s),
-                            assumptions=assumptions)
-    c2 = numeric_spot_check(new_rhs, _op_expr(rhs_s, op, arg_s),
-                            assumptions=assumptions)
-    rec['check'] = _merge_checks(c1, c2)
+    rec['check'] = _merge_check_list(checks)
     return rec
 
 
@@ -587,6 +652,15 @@ def _merge_checks(c1, c2):
         return merged
     return {'status': 'skipped',
             'reason': c1.get('reason') or c2.get('reason') or 'partial'}
+
+
+def _merge_check_list(checks):
+    if not checks:
+        return {'status': 'skipped', 'reason': 'no checks'}
+    merged = checks[0]
+    for check in checks[1:]:
+        merged = _merge_checks(merged, check)
+    return merged
 
 
 # ---------------------------------------------------------------------------

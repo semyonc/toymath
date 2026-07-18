@@ -138,7 +138,7 @@ The `Notation` class defines several predefined symbols for common operations:
 | `BINOM` | `\binom` | Binomial coefficient `(n, k)` |
 | `P_LIST` | `p-list` | Product list (multiplication) |
 | `S_LIST` | `s-list` | Sum list (addition) |
-| `C_LIST` | `c-list` | Comma-separated list (function arguments, parameters) |
+| `C_LIST` | `c-list` | Comma-separated list (arguments, parameters, or relation systems) |
 | `A_LIST` | `a-list` | Logical AND list (conjunction) |
 | `O_LIST` | `o-list` | Logical OR list (disjunction) |
 | `SETQ` | `setq` | Assignment |
@@ -243,9 +243,9 @@ enter_and_expr_list       (logical AND: ∧)
   ↓
 enter_not_expr            (negation: ¬)
   ↓
-enter_subformula          (comparisons: =, <, >, etc.)
+enter_subformula          (comparisons and comma-separated relation systems)
   ↓
-enter_comma_list          (comma-separated lists: function arguments, parameters)
+enter_comma_list          (comma-separated relations, arguments, parameters)
   ↓
 enter_additive_expr_list  (sum lists: a + b + c)
   ↓
