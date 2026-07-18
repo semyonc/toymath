@@ -116,12 +116,34 @@ class TestTacticRegistry(unittest.TestCase):
             'rewrite', 'x^2-y^2', 'diff_squares',
             '--direction', 'backward'])
         self.assertEqual(rewrite.direction, 'backward')
+        self.assertIsNone(rewrite.at)
+        at = parser.parse_args([
+            'rewrite', '(x^2-1)(x^2-4)', 'diff_squares', '--at', 'x^2-4'])
+        self.assertEqual(at.at, 'x^2-4')
         assemble = parser.parse_args([
             'limit_assemble', 'L', '1', '0'])
         self.assertEqual(assemble.values, ['1', '0'])
         roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
         self.assertEqual((roots.cmd, roots.expr, roots.var),
                          ('quadratic_roots', 'x^2-1', 'x'))
+
+    def test_rewrite_at_flows_through_agent_and_replay(self):
+        session = agent_do.DoSession()
+        record = tactic_registry.invoke_agent(
+            'rewrite',
+            ['(x^2-1)(x^2-4)', 'diff_squares', 'forward', 'x^2-4'],
+            session)
+        self.assertTrue(record['ok'], record.get('error'))
+        self.assertEqual(record['at'], 'x^{2}-4')
+        self.assertEqual(record['args']['at'], 'x^2-4')
+        replayed = tactic_registry.replay(record['op'], record['args'])
+        self.assertEqual(replayed['result'], record['result'])
+        # records from before the selector replay through the default
+        legacy = tactic_registry.replay('rewrite', {
+            'expr': 'x^2 - 4', 'lemma': 'diff_squares',
+            'direction': 'forward'})
+        self.assertTrue(legacy['ok'])
+        self.assertEqual(legacy['result'], '(x+2)(x-2)')
 
 
 if __name__ == '__main__':

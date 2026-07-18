@@ -585,6 +585,87 @@ class TestNumericPowerRewrite(unittest.TestCase):
         self.assertEqual(r['result'], '(x+2)(x-2)=0')
 
 
+class TestRewriteAtSelector(unittest.TestCase):
+    # gen 41: `at` (target latex or 1-based index) picks among several
+    # matching subterms; default stays first-match
+
+    TWO = '\\frac{x^2-y^2}{x+y} + \\frac{a^2-b^2}{a+b}'
+
+    def test_default_keeps_first_match(self):
+        r = Core.rewrite(self.TWO, 'diff_squares')
+        self.assertEqual(r['at'], 'x^{2}-y^{2}')
+        self.assertEqual(r['matches'], 2)  # wrapper twins not double-counted
+
+    def test_select_second_by_latex(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='a^2-b^2')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['at'], 'a^{2}-b^{2}')
+        self.assertIn('(a+b)(a-b)', r['result'])
+        self.assertIn('x^{2}-y^{2}', r['result'])
+
+    def test_at_compares_modulo_spelling(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='a^{2} - b^{2}')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['at'], 'a^{2}-b^{2}')
+
+    def test_select_occurrence_by_index(self):
+        r = Core.rewrite('(x^2-4)+3(x^2-4)', 'diff_squares', at='2')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '(x^{2}-4)+3(x+2)(x-2)')
+
+    def test_variant_position_behind_structural_match(self):
+        # the base pattern matches elsewhere; `at` still reaches the
+        # numeric-variant position
+        r = Core.rewrite('(a^2-b^2)+(x^2-4)', 'diff_squares', at='x^2-4')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['numeric'], {'b': '2'})
+        self.assertIn('(x+2)(x-2)', r['result'])
+
+    def test_backward_with_index(self):
+        r = Core.rewrite('(x+y)(x-y) + (a+b)(a-b)', 'diff_squares',
+                         'backward', at='2')
+        self.assertEqual(r['at'], '(a+b)(a-b)')
+        self.assertIn('(x+y)(x-y)', r['result'])
+
+    def test_relation_side_selection(self):
+        r = Core.rewrite('x^2-y^2 = a^2-b^2', 'diff_squares', at='2')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['at'], 'a^{2}-b^{2}')
+
+    def test_index_out_of_range_lists_positions(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='9')
+        self.assertFalse(r['ok'])
+        self.assertIn('out of range', r['error'])
+        self.assertIn('1. x^{2}-y^{2}', r['error'])
+        self.assertIn('2. a^{2}-b^{2}', r['error'])
+
+    def test_latex_without_match_lists_positions(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='u^2-v^2')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match at', r['error'])
+        self.assertIn('2. a^{2}-b^{2}', r['error'])
+
+    def test_unparseable_at_refused(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='\\frac{')
+        self.assertFalse(r['ok'])
+        self.assertIn('at:', r['error'])
+
+    def test_at_recorded_in_args_for_replay(self):
+        r = Core.rewrite(self.TWO, 'diff_squares', at='2')
+        self.assertEqual(r['args'].get('at'), '2')
+        again = Core.rewrite(**{'expr': r['args']['expr'],
+                                'lemma_name': r['args']['lemma'],
+                                'direction': r['args']['direction'],
+                                'at': r['args']['at']})
+        self.assertEqual(again['result'], r['result'])
+
+    def test_at_selecting_the_root(self):
+        r = Core.rewrite('x^2 - y^2', 'diff_squares', at='x^2 - y^2')
+        self.assertEqual(r['result'], '(x+y)(x-y)')
+        r = Core.rewrite('x^2 - y^2', 'diff_squares', at='1')
+        self.assertEqual(r['result'], '(x+y)(x-y)')
+
+
 class TestCollectRational(unittest.TestCase):
     def test_collect_num_and_den(self):
         r = Core.collect('\\frac{ax + bx + 1}{x + cx}', 'x')

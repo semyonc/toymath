@@ -281,7 +281,10 @@ TACTICS = (
                (E, _arg('lemma', 'LEMMA', 'registered lemma name'),
                 _arg('direction', 'DIRECTION', 'rewrite direction',
                      choices=('forward', 'backward'), default='forward',
-                     option='--direction'))),
+                     option='--direction'),
+                _arg('at', 'AT', 'target subterm LaTeX or 1-based match '
+                     'index when several subterms match', default=None,
+                     option='--at'))),
     TacticSpec('factor_gcd', 'factor_gcd', 'core',
                'pull out a common factor', core.factor_gcd, (E,)),
     TacticSpec('factor_quadratic', 'factor_quadratic', 'core',

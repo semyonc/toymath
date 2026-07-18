@@ -190,8 +190,11 @@ writer, comparer, and replicator landmines.
   cross-multiplication keeps equality checking sound.
 - Symbolic-sign multiplication/division of inequalities is refused; there is
   no case-split constraint store yet.
-- Rewrite currently selects the first matching subterm unless a tactic adds a
-  future position selector.
+- Rewrite defaults to the first matching subterm; the optional `at` argument
+  (target subterm LaTeX or 1-based match index) selects among several
+  matches, and a failed selection lists the available positions. Match
+  positions count each visible subterm once and include the numeric
+  perfect-power variants of the lemma pattern.
 - Absolute value is a sound opaque atom, but its grammar/table coverage is
   intentionally narrow; floor and ceiling are not modeled.
 - Matrix arithmetic is literal-only and cell-wise: the named tactics add,

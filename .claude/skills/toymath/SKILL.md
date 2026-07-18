@@ -35,6 +35,9 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
 - Use `collect` before dividing by a symbolic coefficient.
 - Use `substitute` plus `evaluate` to check candidate solutions.
 - Use `rewrite` only with a registered lemma; use `lemmas` to discover names.
+  When several subterms match, the first match is rewritten; pass `at` (the
+  target subterm's LaTeX, or a 1-based match index) to pick a different one.
+  A refusal lists the available positions.
 - Use the two named factoring tactics instead of asking for a general factor.
 - Load the `equations` skill when a workflow needs a complete rational root
   result for a quadratic; candidate checks alone are not a solution record.

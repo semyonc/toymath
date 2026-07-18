@@ -24,6 +24,7 @@ from primitives import (
     _contains_free_infinity, _subscript_var, free_symbols,
     _num_agree, numeric_eval, _func_power, _func_arg_span, _sample_point,
     numeric_spot_check, Substitutor, _result, _error, _paren, _is_sum_str,
+    same_expression,
 )
 
 # ---------------------------------------------------------------------------
@@ -1735,9 +1736,12 @@ def _lemma_power_variants(src, params):
     return variants
 
 
-def rewrite(expr, lemma_name, direction='forward'):
-    """Apply a registered equality lemma at the root of the expression."""
+def rewrite(expr, lemma_name, direction='forward', at=None):
+    """Apply a registered equality lemma at the root, or at the subterm
+    selected by `at` (target LaTeX or 1-based match index)."""
     args = {'expr': expr, 'lemma': lemma_name, 'direction': direction}
+    if at is not None:
+        args['at'] = str(at)
     lemma = LEMMAS.get(lemma_name)
     if lemma is None:
         return _error('rewrite', args,
@@ -1753,12 +1757,13 @@ def rewrite(expr, lemma_name, direction='forward'):
     except PrimitiveError as e:
         return _error('rewrite', args, str(e))
 
-    def find_match(pat_src, pat_params, powermap):
-        """(target, subst, numeric_binds, matches) for one pattern; the
-        root is preferred, then subterms in parse order (children precede
-        parents, so the first hit is an innermost match). Wildcards from
-        powermap must bind perfect n-th power monomials, whose roots are
-        returned bound to the original lemma parameter."""
+    def stage_positions(pat_src, pat_params, powermap, stage, seen):
+        """Matches of one pattern in position order: root first, then
+        subterms in parse order (children precede parents, so an inner
+        match precedes its enclosing one). Wildcards from powermap must
+        bind perfect n-th power monomials, whose roots are returned bound
+        to the original lemma parameter. A node already claimed by an
+        earlier stage keeps that stage's binding."""
         pat = comparer.pattern(pat_src,
                                [(p, NotationParam.Any) for p in pat_params])
 
@@ -1773,38 +1778,84 @@ def rewrite(expr, lemma_name, direction='forward'):
                 bound[orig] = root
             return bound
 
-        s = pat.match(sym, notation)
-        if s is not None:
-            v = validate(s)
-            if v is not None:
-                return sym, s, v, 1
-        target, best_s, best_v, matches = None, None, None, 0
-        for node in notation.rel:
+        found = []
+        candidates = [sym] + [node for node in notation.rel if node != sym]
+        for order, node in enumerate(candidates):
+            if node in seen:
+                continue
             s = pat.match(node, notation)
             if s is None:
                 continue
             v = validate(s)
             if v is None:
                 continue
-            matches += 1
-            if target is None:
-                target, best_s, best_v = node, s, v
-        return target, best_s, best_v, matches
+            seen.add(node)
+            found.append({'node': node, 'subst': s, 'numeric': v,
+                          'stage': stage, 'order': order})
+        return found
 
-    target, subst, numeric, matches = find_match(src, lemma.params, {})
-    if subst is None:
-        # numeric fallback: a^n pattern terms may bind perfect n-th power
-        # monomials (x^2 - 4 matches diff_squares with b := 2)
-        for v_src, v_params, v_map in _lemma_power_variants(src,
-                                                            lemma.params):
-            target, subst, numeric, matches = find_match(v_src, v_params,
-                                                         v_map)
-            if subst is not None:
-                break
-    if subst is None:
+    # every match position across the base pattern and its numeric
+    # variants (a^n terms binding perfect n-th power monomials); a node's
+    # binding comes from the earliest stage that matches it
+    seen = set()
+    positions = stage_positions(src, lemma.params, {}, 0, seen)
+    for v_i, (v_src, v_params, v_map) in enumerate(
+            _lemma_power_variants(src, lemma.params)):
+        positions += stage_positions(v_src, v_params, v_map, v_i + 1, seen)
+    # a transparent wrapper and its inner content are ONE position: keep
+    # the inner node (except at the root, which keeps itself)
+    by_node = {p['node'] for p in positions}
+    dropped = set()
+    for p in positions:
+        f = notation.get(p['node'])
+        if (f is None or f.sym not in (Notation.GROUP, Notation.V_GROUP)
+                or not f.args or f.args[0] not in by_node):
+            continue
+        dropped.add(f.args[0] if p['node'] == sym else p['node'])
+    positions = [p for p in positions if p['node'] not in dropped]
+    positions.sort(key=lambda p: p['order'])
+
+    if not positions:
         return _error('rewrite', args,
                       f'expression does not match pattern {src!r} '
                       '(at the root or any subterm)')
+
+    def position_menu():
+        items = [f'{i}. {write_latex(p["node"], notation)}'
+                 for i, p in enumerate(positions[:6], 1)]
+        if len(positions) > 6:
+            items.append('...')
+        return '; '.join(items)
+
+    if at is None:
+        # default keeps first-match behavior: structural bindings first,
+        # then variants, root before subterms within a stage
+        chosen = min(positions, key=lambda p: (p['stage'], p['order']))
+    elif isinstance(at, int) or at.strip().isdigit():
+        index = int(at)
+        if not 1 <= index <= len(positions):
+            return _error(
+                'rewrite', args,
+                f'at index {index} is out of range; '
+                f'{len(positions)} match(es): {position_menu()}')
+        chosen = positions[index - 1]
+    else:
+        try:
+            parse_latex(at)
+        except PrimitiveError as e:
+            return _error('rewrite', args, f'at: {e}')
+        chosen = next(
+            (p for p in positions
+             if same_expression(write_latex(p['node'], notation), at)),
+            None)
+        if chosen is None:
+            return _error(
+                'rewrite', args,
+                f'the lemma does not match at {at!r}; '
+                f'{len(positions)} match(es): {position_menu()}')
+    target, subst, numeric = (chosen['node'], chosen['subst'],
+                              chosen['numeric'])
+    matches = len(positions)
     tsym, tnotation = parse_latex(dst)
     mapping = {}
     for p in lemma.params:
