@@ -38,30 +38,6 @@ class EvalError(Exception):
     pass
 
 
-# ---------------------------------------------------------------------------
-# parse / write helpers
-# ---------------------------------------------------------------------------
-
-_MATRIX_ENV_RE = re.compile(
-    r'\\begin\{(pmatrix|matrix)\}'
-    r'((?:(?!\\begin\{(?:pmatrix|matrix)\}|\\end\{(?:pmatrix|matrix)\}).)*?)'
-    r'\\end\{\1\}', re.DOTALL)
-
-
-def _normalize_matrix_envs(latex):
-    """LaTeX matrix environments -> the grammar's plain-TeX commands:
-    \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} -> \\pmatrix{a & b \\cr c & d}.
-    Innermost-first so nested matrices normalize too."""
-    def repl(m):
-        body = m.group(2).replace('\\\\', ' \\cr ')
-        return f'\\{m.group(1)}{{{body}}}'
-    prev = None
-    while prev != latex:
-        prev = latex
-        latex = _MATRIX_ENV_RE.sub(repl, latex)
-    return latex
-
-
 # Ellipsis commands parse as opaque symbols with no mechanical semantics
 # ("continue the pattern" is a human reading), so every primitive rejects
 # them at the door except the sum_from_ellipsis / prod_from_ellipsis
@@ -81,8 +57,7 @@ def parse_latex(latex, allow_ellipsis=False, command_names=None):
             'or prod_from_ellipsis (factors joined by \\cdot or '
             'juxtaposition) by proposing the explicit \\sum_{k=a}^{b} / '
             '\\prod_{k=a}^{b} form it abbreviates')
-    normalized = _normalize_matrix_envs(latex)
-    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', normalized)
+    normalized = re.sub(r'(?<!\\left)<', ' \\\\lt ', latex)
     normalized = re.sub(r'(?<!\\right)>', ' \\\\gt ', normalized)
     notation = Notation()
     try:
@@ -632,7 +607,10 @@ def _is_func_name(sym, notation):
 # symbolic path — it is the independent leg of the trust design.
 # ---------------------------------------------------------------------------
 
-_ARRAY_EVAL_NAMES = ('\\array', '\\pmatrix', '\\matrix')
+_ARRAY_EVAL_NAMES = (
+    '\\array', '\\pmatrix', '\\matrix', '\\bmatrix', '\\Bmatrix',
+    '\\vmatrix', '\\Vmatrix', '\\smallmatrix',
+)
 
 
 def _num_shape(m):

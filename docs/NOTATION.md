@@ -123,6 +123,26 @@ _n6: p-list [f, _n5]            # Function application as product list
 - `_n5` represents `x` grouped with parentheses
 - `_n6` represents function application as a product of `f` and its argument group
 
+### Example 5: Matrix environments
+
+Standard non-alignment matrix environments normalize before grammar dispatch.
+For example, `\begin{bmatrix}a & b \\ c & d\end{bmatrix}` is stored as:
+
+```text
+_n1: \bmatrix [[a, b], [c, d]]
+```
+
+Rows and columns are nested lists, while the function-symbol name preserves
+the environment kind. `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, and
+`smallmatrix` write back as AMS environments because MathJax does not expose
+equivalent plain-TeX commands. `matrix` and `pmatrix` retain ToyMath's existing
+plain-command canonical output. `cases` uses the same row/column shape but is
+piecewise scalar syntax, not a matrix-valued object.
+
+The shared parser normalization deliberately excludes `array` and starred
+matrix variants: their alignment preambles require explicit notation metadata
+to round-trip without loss.
+
 ## Built-in Symbol Types
 
 The `Notation` class defines several predefined symbols for common operations:

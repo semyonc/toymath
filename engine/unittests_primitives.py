@@ -1221,7 +1221,8 @@ MAT_B = '\\pmatrix{0 & 0 \\cr 1 & 0}'
 
 class TestMatrixParsing(unittest.TestCase):
     # gen 10: \begin{pmatrix}/\begin{matrix} normalize to the grammar's
-    # plain-TeX commands and round-trip through the writer
+    # plain-TeX commands. Gen 38 moves that normalization into the shared
+    # parser and adds the non-alignment AMS matrix environment family.
 
     def test_pmatrix_env(self):
         s, n = P.parse_latex('\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}')
@@ -1237,6 +1238,46 @@ class TestMatrixParsing(unittest.TestCase):
         self.assertEqual(P.write_latex(s, n),
                          '\\pmatrix{\\matrix{1} & 2 \\cr 3 & 4}')
 
+    def test_ams_matrix_env_family(self):
+        for name in ('bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix',
+                     'smallmatrix'):
+            with self.subTest(name=name):
+                source = (f'\\begin{{{name}}}1 & 2 \\\\ 3 & 4'
+                          f'\\end{{{name}}}')
+                s, n = P.parse_latex(source)
+                out = P.write_latex(s, n)
+                self.assertEqual(
+                    out,
+                    f'\\begin{{{name}}} 1 & 2 \\\\ 3 & 4 '
+                    f'\\end{{{name}}}',
+                )
+                s2, n2 = P.parse_latex(out)
+                self.assertEqual(P.write_latex(s2, n2), out)
+
+    def test_plain_bmatrix_command_canonicalizes_to_environment(self):
+        s, n = P.parse_latex('\\bmatrix{1 & 2 \\cr 3 & 4}')
+        self.assertEqual(
+            P.write_latex(s, n),
+            '\\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}',
+        )
+
+    def test_mixed_nested_matrix_environments(self):
+        source = ('\\begin{bmatrix}\\begin{vmatrix}1\\end{vmatrix} & 2 '
+                  '\\\\ 3 & 4\\end{bmatrix}')
+        s, n = P.parse_latex(source)
+        out = P.write_latex(s, n)
+        self.assertIn('\\begin{bmatrix}', out)
+        self.assertIn('\\begin{vmatrix}', out)
+        P.parse_latex(out)
+
+    def test_cases_environment_uses_shared_normalizer(self):
+        s, n = P.parse_latex(
+            '\\begin{cases}x & x>0 \\\\ -x & x<0\\end{cases}')
+        self.assertEqual(
+            P.write_latex(s, n),
+            '\\cases{x & x \\gt 0 \\cr -x & x \\lt 0}',
+        )
+
     def test_plain_tex_form_roundtrips(self):
         s, n = P.parse_latex(MAT_A)
         out = P.write_latex(s, n)
@@ -1249,6 +1290,14 @@ class TestMatrixParsing(unittest.TestCase):
         self.assertTrue(r['ok'])
         self.assertEqual(r['check']['status'], 'agree')
         self.assertIn('\\pmatrix', r['result'])
+
+    def test_substitute_into_bmatrix_cells(self):
+        r = Core.substitute(
+            '\\begin{bmatrix}x & 2x \\\\ 1 & x\\end{bmatrix}',
+            'x', '3')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\begin{bmatrix}', r['result'])
 
 
 class TestNoncommutativeAtoms(unittest.TestCase):
@@ -1330,6 +1379,12 @@ class TestMatrixOracle(unittest.TestCase):
     def test_scaling_vs_addition(self):
         r = Core.equal_exprs(f'2{MAT_A}', f'{MAT_A}+{MAT_A}')
         self.assertEqual(r['verdict'], 'yes')
+
+    def test_vmatrix_is_a_matrix_literal_not_absolute_value(self):
+        expr = '\\begin{vmatrix}1 & 2 \\\\ 3 & 4\\end{vmatrix}'
+        sym, notation = P.parse_latex(expr)
+        self.assertEqual(P.numeric_eval(sym, notation, {}),
+                         [[1.0, 2.0], [3.0, 4.0]])
 
     def test_shape_mismatch_is_no(self):
         r = Core.equal_exprs('\\pmatrix{1 & 2 \\cr 3 & 4}', '\\pmatrix{1 & 2}')

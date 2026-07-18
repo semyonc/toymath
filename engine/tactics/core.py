@@ -773,7 +773,10 @@ _NON_EXPR_OPS = (Notation.COMP, Notation.C_LIST, Notation.O_LIST,
 # matrix/vector objects: array literals and \vec-marked symbols. \cases is
 # excluded on purpose (piecewise scalar). Bare symbols read as scalars until
 # a declaration mechanism exists.
-_MATRIX_FUNCS = frozenset(('\\array', '\\pmatrix', '\\matrix', '\\vec'))
+_MATRIX_FUNCS = frozenset((
+    '\\array', '\\pmatrix', '\\matrix', '\\bmatrix', '\\Bmatrix',
+    '\\vmatrix', '\\Vmatrix', '\\smallmatrix', '\\vec',
+))
 
 
 def _is_matrix_valued(sym, notation):

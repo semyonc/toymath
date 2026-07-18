@@ -156,6 +156,10 @@ Important verified-layer behaviors include:
   than command-shaped symbols; the independent oracle evaluates closed cases
   only on their nonnegative-integer domain, while symbolic algebra keeps them
   as opaque atoms;
+- standard `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`,
+  and `smallmatrix` environments normalize at the shared parser boundary;
+  the delimiter-bearing forms remain dedicated matrix nodes, so vertical-bar
+  matrices are never confused with scalar absolute value;
 - matrix-valued factor runs become ordered noncommutative word atoms, while
   scalar factors remain commutative;
 - rational powers of positive plain-variable bases have a limited Puiseux
@@ -185,6 +189,9 @@ writer, comparer, and replicator landmines.
   intentionally narrow; floor and ceiling are not modeled.
 - Literal matrices have oracle support and scalar-linear algebra, but no
   general matrix multiplication/determinant tactic.
+- Alignment-bearing `array` and starred matrix environments are not accepted;
+  supporting them requires notation and writer metadata for their alignment
+  preambles rather than silently discarding presentation semantics.
 - Relation systems parse and support whole-system substitution and uniform
   both-sides operations, but there is no autonomous elimination, row-combine,
   or general linear-system solver.

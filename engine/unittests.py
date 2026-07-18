@@ -236,6 +236,21 @@ class TestScenario(unittest.TestCase):
             "x^2 \\pmatrix{1 & 2 \\cr 3 & 4}",
         )
 
+    def test_bmatrix_environment_classic_path(self):
+        expr = "\\begin{bmatrix}1 & 2 \\\\ 3 & 4\\end{bmatrix}"
+        notation = Notation()
+        sym = MathParser(notation).parse(expr)
+        self.assertEqual(
+            LaTexWriter(notation)(sym),
+            "\\begin{bmatrix} {1} & {2} \\\\ {3} & {4} \\end{bmatrix}",
+        )
+        self.checkEqual(expr, expr)
+
+    def test_bmatrix_word_order(self):
+        a = "\\begin{bmatrix}1 & 2 \\\\ 3 & 4\\end{bmatrix}"
+        b = "\\begin{bmatrix}0 & 1 \\\\ 1 & 0\\end{bmatrix}"
+        self.checkEqual(f"{a} {b} {a}", f"{a} {b} {a}")
+
     def test_infty_no_cancel(self):
         self.checkEqual("\\infty - \\infty", "\\infty - \\infty")
 

@@ -31,6 +31,11 @@ class LaTexWriter(object):
         '\\array': 'write_array',
         '\\pmatrix': 'write_array',
         '\\matrix': 'write_array',
+        '\\bmatrix': 'write_array',
+        '\\Bmatrix': 'write_array',
+        '\\vmatrix': 'write_array',
+        '\\Vmatrix': 'write_array',
+        '\\smallmatrix': 'write_array',
         '\\cases': 'write_array',
         '\\text': 'write_text',
         '\\textbf': 'write_text',
@@ -268,6 +273,11 @@ class LaTexWriter(object):
                 and not self._probe(sym, "\\array") \
                 and not self._probe(sym, "\\pmatrix") \
                 and not self._probe(sym, "\\matrix") \
+                and not self._probe(sym, "\\bmatrix") \
+                and not self._probe(sym, "\\Bmatrix") \
+                and not self._probe(sym, "\\vmatrix") \
+                and not self._probe(sym, "\\Vmatrix") \
+                and not self._probe(sym, "\\smallmatrix") \
                 and not self._probe(sym, "\\cases"):
             f = self.notation.getf(sym, Notation.REF)
             if f is not None:
@@ -554,15 +564,24 @@ class LaTexWriter(object):
         self.writeString('\\}')
 
     def write_array(self, f):
-        self.writeString(f.sym.name)
-        self.writeString('{')
-        self.write_row_list(f.args)
-        self.writeString('}')
+        name = f.sym.name[1:]
+        if name in ('bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix',
+                    'smallmatrix'):
+            # MathJax supports these as AMS environments, not as the
+            # plain-TeX commands used internally by the notation DAG.
+            self.writeString(f'\\begin{{{name}}}')
+            self.write_row_list(f.args, separator=' \\\\ ')
+            self.writeString(f'\\end{{{name}}}')
+        else:
+            self.writeString(f.sym.name)
+            self.writeString('{')
+            self.write_row_list(f.args)
+            self.writeString('}')
 
-    def write_row_list(self, rows):
+    def write_row_list(self, rows, separator='\\cr'):
         for i, row in enumerate(rows):
             if i > 0:
-                self.writeString('\\cr')
+                self.writeString(separator)
             self.write_col_list(row)
 
     def write_col_list(self, row):

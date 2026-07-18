@@ -252,6 +252,11 @@ if isinstance(n, IntegerValue): ...
   command registry); keep the static table's registry-parity test green when
   adding committed commands.
 - Use a Replicator to copy expressions between notation contexts.
+- Array-family nodes require matching lexer, grammar, writer, and Replicator
+  dispatch. Standard non-alignment environments (`matrix`, `pmatrix`,
+  `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, and `cases`)
+  normalize in `MathParser.parse`; do not extend that normalization to
+  alignment-bearing `array`/starred forms without preserving their preambles.
 - `parser.out` is a gitignored cache; `engine/parsetab.py` is tracked —
   commit it whenever the grammar changes.
 - Rewrite commands are auto-discovered via `register_actions()`; notebook

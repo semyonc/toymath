@@ -41,6 +41,11 @@ class Replicator(object):
         '\\array': 'enter_array',
         '\\pmatrix': 'enter_array',
         '\\matrix': 'enter_array',
+        '\\bmatrix': 'enter_array',
+        '\\Bmatrix': 'enter_array',
+        '\\vmatrix': 'enter_array',
+        '\\Vmatrix': 'enter_array',
+        '\\smallmatrix': 'enter_array',
         '\\cases': 'enter_array'
     }
 
@@ -256,6 +261,21 @@ class Replicator(object):
         if res is not None:
             return res
         res = self._probe(sym, "\\matrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\bmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\Bmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\vmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\Vmatrix")
+        if res is not None:
+            return res
+        res = self._probe(sym, "\\smallmatrix")
         if res is not None:
             return res
         res = self._probe(sym, "\\cases")

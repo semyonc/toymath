@@ -11,6 +11,43 @@ import ply.yacc as yacc
 from lexer import MathLexer
 from notation import Notation, Symbol, Func
 
+
+# These environments carry only their delimiter/presentation choice; unlike
+# array/matrix* they have no alignment preamble to preserve.  Normalize them
+# at the shared parser boundary so the kernel/legacy engine and the verified
+# tactic layer build the same dedicated array nodes.
+_PLAIN_ARRAY_ENVS = (
+    'pmatrix', 'matrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix',
+    'smallmatrix', 'cases',
+)
+_PLAIN_ARRAY_ENV_ALT = '|'.join(re.escape(name) for name in _PLAIN_ARRAY_ENVS)
+_PLAIN_ARRAY_ENV_RE = re.compile(
+    rf'\\begin\{{({_PLAIN_ARRAY_ENV_ALT})\}}'
+    rf'((?:(?!\\begin\{{(?:{_PLAIN_ARRAY_ENV_ALT})\}}|'
+    rf'\\end\{{(?:{_PLAIN_ARRAY_ENV_ALT})\}}).)*?)'
+    rf'\\end\{{\1\}}',
+    re.DOTALL,
+)
+
+
+def _normalize_plain_array_envs(latex):
+     """Turn non-alignment array environments into grammar commands.
+
+     Innermost-first replacement supports mixed nested matrix families.  The
+     alignment-bearing ``array`` and starred matrix variants are deliberately
+     excluded: discarding their preambles would make round-tripping lossy.
+     """
+     def repl(match):
+          body = match.group(2).replace('\\\\', ' \\cr ')
+          return f'\\{match.group(1)}{{{body}}}'
+
+     previous = None
+     while previous != latex:
+          previous = latex
+          latex = _PLAIN_ARRAY_ENV_RE.sub(repl, latex)
+     return latex
+
+
 class MathParser(object):
      tokens = MathLexer.tokens
      literals = MathLexer.literals
@@ -30,6 +67,7 @@ class MathParser(object):
          self.yacc = yacc.yacc(module=self,start='formula')
 
      def parse(self, input):
+         input = _normalize_plain_array_envs(input)
          self.notation.clear()
          try:
              return self.yacc.parse(
@@ -532,7 +570,12 @@ class MathParser(object):
      def p_scalar_array(self, p):
          '''scalar : array '{' row-list '}'
                    | pmatrix '{' row-list '}'
-                   | matrix '{' row-list '}' '''
+                   | matrix '{' row-list '}'
+                   | bmatrix '{' row-list '}'
+                   | Bmatrix '{' row-list '}'
+                   | vmatrix '{' row-list '}'
+                   | Vmatrix '{' row-list '}'
+                   | smallmatrix '{' row-list '}' '''
          p[0] = self.notation.setf(Symbol(p[1]), p[3])
 
      def p_scalar_cases(self, p):
