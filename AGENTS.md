@@ -277,6 +277,12 @@ if isinstance(n, IntegerValue): ...
   instrumentor rides the Agents-SDK tracing pipeline, so `build_model` only
   calls `set_tracing_disabled(True)` when tracing is inactive — enabling it
   with tracing disabled would silently emit nothing.
+- To research a misbehaving do! run from its Langfuse trace, invoke the
+  `langfuse-research` skill (`.claude/skills/langfuse-research/SKILL.md`):
+  re-run with `TOYMATH_OBSERVABILITY=on`, then pull the trace with the
+  official `langfuse` CLI (`langfuse --env .env api traces get <id> --json`)
+  and read the diagnostic signals. Read-only — it never touches the ledger
+  or oracle.
 - `do!` figures need Deno (`brew install deno`) — toggle both off with
   `TOYMATH_SANDBOX=off`. Two backends, deliberately separate processes
   with different grants (see `plot_sandbox.py`):
