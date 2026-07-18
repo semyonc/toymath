@@ -21,6 +21,7 @@ class TestTacticRegistry(unittest.TestCase):
             'integration': 'tactics.integration',
             'limits': 'tactics.limits',
             'finite_operators': 'tactics.finite_operators',
+            'matrices': 'tactics.matrices',
         }
         for spec in tactic_registry.TACTICS:
             self.assertEqual(spec.function.__module__, expected[spec.skill])

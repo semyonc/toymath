@@ -17,6 +17,7 @@ from tactics import equations as Equations
 from tactics import finite_operators as FiniteOperators
 from tactics import integration as Integration
 from tactics import limits as Limits
+from tactics import matrices as Matrices
 from ledger import Ledger
 
 
@@ -3043,6 +3044,173 @@ class TestSubstituteZeroFolding(unittest.TestCase):
     def test_nonzero_values_keep_parens(self):
         rec = Core.substitute('x + x_{1}', 'x', '2')
         self.assertEqual(rec['result'], '(2)+x_{1}')
+
+
+A_LIT = r'\pmatrix{1 & 2 \cr 3 & 4}'
+B_LIT = r'\pmatrix{5 & 6 \cr 7 & 8}'
+A_SYM = r'\pmatrix{a & b \cr c & d}'
+B_SYM = r'\pmatrix{e & f \cr g & h}'
+
+
+class TestMatrixTactics(unittest.TestCase):
+    def _ok(self, rec):
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree', rec['check'])
+        return rec
+
+    def test_add_literal_and_symbolic(self):
+        rec = self._ok(Matrices.mat_add(f'{A_LIT} + {B_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{6 & 8 \cr 10 & 12}')
+        rec = self._ok(Matrices.mat_add(f'{A_SYM} + {B_SYM}'))
+        self.assertEqual(rec['result'],
+                         r'\pmatrix{a+e & b+f \cr c+g & d+h}')
+
+    def test_add_subtraction_and_leading_minus(self):
+        rec = self._ok(Matrices.mat_add(f'{A_LIT} - {B_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{-4 & -4 \cr -4 & -4}')
+        rec = self._ok(Matrices.mat_add(f'-{A_LIT} + {B_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{4 & 4 \cr 4 & 4}')
+
+    def test_add_result_takes_first_family(self):
+        rec = self._ok(Matrices.mat_add(
+            r'\bmatrix{1 & 2 \cr 3 & 4} + ' + B_LIT))
+        self.assertIn('bmatrix', rec['result'])
+
+    def test_add_refusals_steer(self):
+        rec = Matrices.mat_add(r'\pmatrix{1 & 2} + ' + A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('shape mismatch', rec['error'])
+        rec = Matrices.mat_add(f'{A_LIT} + 3')
+        self.assertFalse(rec['ok'])
+        self.assertIn('scalar term', rec['error'])
+        rec = Matrices.mat_add(f'2{A_LIT} + {B_LIT}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('mat_scale', rec['error'])
+        rec = Matrices.mat_add(A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('sum of matrix literals', rec['error'])
+
+    def test_scale_literal_symbolic_and_fraction(self):
+        rec = self._ok(Matrices.mat_scale(f'2 {A_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{2 & 4 \cr 6 & 8}')
+        rec = self._ok(Matrices.mat_scale(f'x {A_SYM}'))
+        self.assertEqual(rec['result'], r'\pmatrix{ax & bx \cr cx & dx}')
+        rec = self._ok(Matrices.mat_scale(r'\frac{1}{2} ' + A_LIT))
+        self.assertIn(r'\frac {1} {2}', rec['result'])
+
+    def test_scale_negation_and_refusals(self):
+        rec = self._ok(Matrices.mat_scale(f'-{A_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{-1 & -2 \cr -3 & -4}')
+        rec = Matrices.mat_scale(A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('no scalar factor', rec['error'])
+        rec = Matrices.mat_scale(f'{A_LIT} {B_LIT}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('mat_mul', rec['error'])
+
+    def test_mul_literal_symbolic_and_rectangular(self):
+        rec = self._ok(Matrices.mat_mul(f'{A_LIT} {B_LIT}'))
+        self.assertEqual(rec['result'], r'\pmatrix{19 & 22 \cr 43 & 50}')
+        rec = self._ok(Matrices.mat_mul(f'{A_SYM} {B_SYM}'))
+        self.assertEqual(rec['result'],
+                         r'\pmatrix{ae+bg & af+bh \cr ce+dg & cf+dh}')
+        rec = self._ok(Matrices.mat_mul(
+            r'\pmatrix{1 & 2 & 3 \cr 4 & 5 & 6} '
+            r'\pmatrix{1 & 2 \cr 3 & 4 \cr 5 & 6}'))
+        self.assertEqual(rec['result'], r'\pmatrix{22 & 28 \cr 49 & 64}')
+
+    def test_mul_keeps_order(self):
+        upper = r'\pmatrix{0 & 1 \cr 0 & 0}'
+        lower = r'\pmatrix{0 & 0 \cr 1 & 0}'
+        ab = self._ok(Matrices.mat_mul(f'{upper} {lower}'))['result']
+        ba = self._ok(Matrices.mat_mul(f'{lower} {upper}'))['result']
+        self.assertEqual(ab, r'\pmatrix{1 & 0 \cr 0 & 0}')
+        self.assertEqual(ba, r'\pmatrix{0 & 0 \cr 0 & 1}')
+
+    def test_mul_refusals_steer(self):
+        rec = Matrices.mat_mul(r'\pmatrix{1 & 2} \pmatrix{1 & 2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('shape mismatch', rec['error'])
+        rec = Matrices.mat_mul(f'2 {A_LIT} {B_LIT}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('mat_scale', rec['error'])
+        rec = Matrices.mat_mul(f'{A_LIT}^2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('explicit two-factor product', rec['error'])
+
+    def test_transpose_spellings_and_shapes(self):
+        want = r'\pmatrix{1 & 3 \cr 2 & 4}'
+        for expr in (A_LIT, f'{A_LIT}^T', A_LIT + '^{T}'):
+            rec = self._ok(Matrices.transpose(expr))
+            self.assertEqual(rec['result'], want)
+        rec = self._ok(Matrices.transpose(
+            r'\pmatrix{1 & 2 & 3 \cr 4 & 5 & 6}'))
+        self.assertEqual(rec['result'],
+                         r'\pmatrix{1 & 4 \cr 2 & 5 \cr 3 & 6}')
+        rec = self._ok(Matrices.transpose(f'{A_SYM}^T'))
+        self.assertEqual(rec['result'], r'\pmatrix{a & c \cr b & d}')
+
+    def test_transpose_refusals(self):
+        rec = Matrices.transpose('x^T')
+        self.assertFalse(rec['ok'])
+        rec = Matrices.transpose(f'{A_LIT}^S')
+        self.assertFalse(rec['ok'])
+        self.assertIn('^T', rec['error'])
+
+    def test_det_literal_symbolic_and_vmatrix(self):
+        self.assertEqual(self._ok(Matrices.det_2x2(A_LIT))['result'], '-2')
+        self.assertEqual(self._ok(Matrices.det_2x2(A_SYM))['result'],
+                         'ad-bc')
+        self.assertEqual(
+            self._ok(Matrices.det_2x2(r'\vmatrix{a & b \cr c & d}'))
+            ['result'], 'ad-bc')
+        self.assertEqual(
+            self._ok(Matrices.det_2x2(r'\pmatrix{1 & 2 \cr 2 & 4}'))
+            ['result'], '0')
+
+    def test_det_refuses_other_shapes(self):
+        rec = Matrices.det_2x2(
+            r'\pmatrix{1 & 2 & 3 \cr 4 & 5 & 6 \cr 7 & 8 & 9}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('2x2', rec['error'])
+        rec = Matrices.det_2x2('x + 1')
+        self.assertFalse(rec['ok'])
+
+    def test_nested_literals_refused(self):
+        rec = Matrices.mat_add(
+            r'\pmatrix{\pmatrix{1 & 2 \cr 3 & 4} & 2 \cr 3 & 4} + '
+            + A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('nested', rec['error'])
+
+    def test_registry_replay_matches(self):
+        import tactic_registry
+        rec = Matrices.mat_mul(f'{A_SYM} {B_SYM}')
+        replayed = tactic_registry.replay(rec['op'], rec['args'])
+        self.assertTrue(replayed['ok'])
+        self.assertEqual(replayed['result'], rec['result'])
+
+
+class TestApplyMatrixArguments(unittest.TestCase):
+    def test_multiply_records_invertibility_not_nonzero(self):
+        rec = Core.apply_both_sides('x = y', '*', A_LIT)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('invertible' in t for t in texts), texts)
+        self.assertFalse(any('\\ne 0' in t for t in texts), texts)
+
+    def test_scalar_multiply_keeps_nonzero_record(self):
+        rec = Core.apply_both_sides('x = y', '*', 'z')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('\\ne 0' in t for t in texts), texts)
+
+    def test_divide_and_power_by_matrix_refuse(self):
+        rec = Core.apply_both_sides('x = y', '/', A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('matrix-valued', rec['error'])
+        rec = Core.apply_both_sides('x = y', '^', A_LIT)
+        self.assertFalse(rec['ok'])
+        self.assertIn('matrix-valued', rec['error'])
 
 
 if __name__ == '__main__':

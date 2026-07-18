@@ -16,6 +16,7 @@ from tactics import equations
 from tactics import finite_operators
 from tactics import integration
 from tactics import limits
+from tactics import matrices
 
 
 _MISSING = object()
@@ -441,6 +442,21 @@ TACTICS = (
     TacticSpec('prod_expand', 'prod_expand', 'finite_operators',
                'write a literal-bounds finite product out factor by '
                'factor', finite_operators.prod_expand, (E,)),
+    TacticSpec('mat_add', 'mat_add', 'matrices',
+               'add/subtract same-shape matrix literals cell by cell',
+               matrices.mat_add, (E,)),
+    TacticSpec('mat_scale', 'mat_scale', 'matrices',
+               'distribute scalar factors into a matrix literal cell '
+               'by cell', matrices.mat_scale, (E,)),
+    TacticSpec('mat_mul', 'mat_mul', 'matrices',
+               'multiply exactly two matrix literals, keeping factor '
+               'order', matrices.mat_mul, (E,)),
+    TacticSpec('transpose', 'transpose', 'matrices',
+               'transpose a matrix literal (accepts the ^T spelling)',
+               matrices.transpose, (E,)),
+    TacticSpec('det_2x2', 'det_2x2', 'matrices',
+               'determinant of a 2x2 matrix literal as a checked scalar',
+               matrices.det_2x2, (E,)),
 )
 
 

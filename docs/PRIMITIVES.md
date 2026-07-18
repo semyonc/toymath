@@ -187,8 +187,14 @@ writer, comparer, and replicator landmines.
   future position selector.
 - Absolute value is a sound opaque atom, but its grammar/table coverage is
   intentionally narrow; floor and ceiling are not modeled.
-- Literal matrices have oracle support and scalar-linear algebra, but no
-  general matrix multiplication/determinant tactic.
+- Matrix arithmetic is literal-only and cell-wise: the named tactics add,
+  scale, multiply (ordered, exactly two factors), transpose, and take 2x2
+  determinants of written-out matrices, delegating each cell to checked
+  scalar algebra and verifying cell placement against an independent
+  whole-matrix numeric comparison. Symbolic matrix declarations, inverses,
+  row operations, and larger determinants have no tactic; multiplying both
+  sides of a relation by a matrix-valued expression records invertibility
+  (not the scalar `!= 0`), and dividing by one is refused.
 - Alignment-bearing `array` and starred matrix environments are not accepted;
   supporting them requires notation and writer metadata for their alignment
   preambles rather than silently discarding presentation semantics.

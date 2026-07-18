@@ -521,11 +521,23 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
             if arg_const < 0:
                 out_rel = _FLIP_REL[rel]
         elif arg_const is None:
-            # if the factor can vanish, the step may introduce solutions
-            assumptions.append({'text': f'{arg_s} \\ne 0', 'nonzero': arg_s})
+            if _is_matrix_valued(asym, anotation):
+                # a nonzero matrix can still be singular; the honest
+                # reversibility record is invertibility, not != 0
+                assumptions.append({
+                    'text': f'{arg_s} \\text{{ is invertible}}',
+                    'display': f'${arg_s}$ is invertible',
+                    'nonzero': arg_s})
+            else:
+                # if the factor can vanish, the step may introduce solutions
+                assumptions.append({'text': f'{arg_s} \\ne 0',
+                                    'nonzero': arg_s})
         new_lhs = multiplicative(lhs, lhs_s)
         new_rhs = multiplicative(rhs, rhs_s)
     elif op == '/':
+        if _is_matrix_valued(asym, anotation):
+            return None, ('dividing both sides by a matrix-valued '
+                          'expression is not supported')
         if arg_const == 0:
             return None, 'division by zero'
         if is_ineq:
@@ -542,6 +554,8 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
     else:  # '^'
         if rel != '=':
             return None, "op '^' is only supported for '=' relations"
+        if _is_matrix_valued(asym, anotation):
+            return None, 'a matrix-valued exponent is not supported'
         if arg_const is not None and arg_const < 0:
             assumptions.append({'text': f'{lhs_s} \\ne 0', 'nonzero': lhs_s})
             assumptions.append({'text': f'{rhs_s} \\ne 0', 'nonzero': rhs_s})
