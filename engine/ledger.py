@@ -29,6 +29,10 @@ def _claim_hash(statement, parent):
     return h.hexdigest()[:7]
 
 
+def _branch_hash(from_step, reason):
+    return _step_hash('branch', from_step, reason)
+
+
 def assumption_markdown(assumption):
     """Markdown/MathJax form of one assumption record. A record carrying a
     `display` field renders prose as prose with inline `$...$` math spans;
@@ -258,6 +262,50 @@ class Ledger(object):
         self.steps.append(step)
         return step
 
+    def record_branch(self, from_step, reason, goal=None):
+        """Record an exploration-only resume marker.
+
+        The marker names an earlier transforming step but carries no result,
+        check evidence, or provenance authority.  It makes an agent's chosen
+        resume point auditable without deleting the abandoned checked steps.
+        """
+        from_step = (from_step or '').strip()
+        reason = (reason or '').strip()
+        if not from_step:
+            raise ValueError('branch marker needs a source step id')
+        if not reason:
+            raise ValueError('branch marker needs a reason')
+        if goal is not None and self.get_claim(goal) is None:
+            raise ValueError(f'unknown goal {goal!r}')
+        source = next((s for s in self.steps if s.get('id') == from_step),
+                      None)
+        if source is None:
+            raise ValueError(f'unknown branch source {from_step!r}')
+        if (source.get('op') not in TRANSFORMING_OPS
+                or source.get('result') is None):
+            raise ValueError(
+                f'branch source {from_step!r} is not a transforming step')
+        if source.get('goal') != goal:
+            raise ValueError(
+                f'branch source {from_step!r} belongs to goal '
+                f'{source.get("goal")!r}, not {goal!r}')
+        n = len(self.steps) + 1
+        step = {
+            'id': f's{n}',
+            'continues': None,
+            'hash': _branch_hash(from_step, reason),
+            'op': 'branch',
+            'args': {'from': from_step, 'reason': reason},
+            'input': None,
+            'result': None,
+            'assumptions': [],
+            'check': {'status': 'note'},
+        }
+        if goal is not None:
+            step['goal'] = goal
+        self.steps.append(step)
+        return step
+
     def _validate_conclusion(self, claim_id, step_ids, steps=None):
         claim = self.get_claim(claim_id)
         if claim is None:
@@ -360,6 +408,39 @@ class Ledger(object):
         seen = {}
         replayed_steps = []
         for step in self.steps:
+            if step['op'] == 'branch':
+                args = step.get('args') or {}
+                from_step = args.get('from')
+                reason = args.get('reason')
+                source = seen.get(from_step)
+                error = None
+                if not isinstance(from_step, str) or not from_step:
+                    error = 'missing source step id'
+                elif not isinstance(reason, str) or not reason.strip():
+                    error = 'missing reason'
+                elif source is None:
+                    error = f'unknown or forward source {from_step!r}'
+                elif (source.get('op') not in TRANSFORMING_OPS
+                      or source.get('result') is None):
+                    error = f'source {from_step!r} is not transforming'
+                elif source.get('goal') != step.get('goal'):
+                    error = (f'source {from_step!r} belongs to goal '
+                             f'{source.get("goal")!r}, not '
+                             f'{step.get("goal")!r}')
+                elif (step.get('input') is not None
+                      or step.get('result') is not None
+                      or step.get('assumptions') != []
+                      or step.get('check') != {'status': 'note'}
+                      or step.get('continues') is not None):
+                    error = 'marker carries transforming fields'
+                elif step.get('hash') != _branch_hash(from_step, reason):
+                    error = 'marker hash mismatch'
+                if error is not None:
+                    return {'status': 'failed', 'step': step.get('id', '?'),
+                            'reason': f'branch marker invalid: {error}'}
+                seen[step['id']] = step
+                replayed_steps.append(step)
+                continue
             if step['op'] == 'comment':
                 seen[step['id']] = step
                 replayed_steps.append(step)
@@ -466,6 +547,14 @@ class Ledger(object):
                 lines.append(f"**{step['id']}** *note* — {text}")
                 lines.append('')
                 continue
+            if step['op'] == 'branch':
+                reason = (step['args']['reason']
+                          .replace('\\', '\\\\').replace('$', '\\$'))
+                lines.append(
+                    f"**{step['id']}** *branch from "
+                    f"`{step['args']['from']}`* — {reason}")
+                lines.append('')
+                continue
             check = step['check'].get('status', '?')
             mark = self._MARKS.get(check, check)
             branch = ('' if step.get('continues') in (True, None)
@@ -519,6 +608,11 @@ class Ledger(object):
             if step['op'] == 'comment':
                 lines.append(f"{step['id']}#{step['hash']} [--] note: "
                              f"{step['args']['text']}")
+                continue
+            if step['op'] == 'branch':
+                lines.append(
+                    f"{step['id']}#{step['hash']} [--] branch from "
+                    f"{step['args']['from']}: {step['args']['reason']}")
                 continue
             check = step['check'].get('status', '?')
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',

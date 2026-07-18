@@ -63,6 +63,8 @@ It has a stable small surface:
 - `load_skill` progressively loads a relevant subject workflow;
 - `run_tactic` invokes an allowlisted registry entry;
 - `comment`, `claim`, `conclude`, and `set_result` manage the ledger/result;
+  giving `comment` an earlier `from_step` records an exploration-only resume
+  marker rather than an ordinary note;
 - `plot` appears only when the optional sandbox is available.
 
 Core algebra/checking guidance is always present. Differentiation, equations,
@@ -141,8 +143,8 @@ python toymath_cli.py tactics --skill integration
 python toymath_cli.py describe integrate_by_parts
 ```
 
-Ledger-control commands (`claim`, `conclude`, `show`, `replay`) remain explicit
-CLI operations rather than math tactics.
+Ledger-control commands (`claim`, `conclude`, `branch`, `show`, `replay`)
+remain explicit CLI operations rather than math tactics.
 
 ## Plotting
 

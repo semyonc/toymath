@@ -64,6 +64,10 @@ def build_parser():
                        help='close a claim from checked step ids')
     p.add_argument('claim_id')
     p.add_argument('step_ids', nargs='+')
+    p = sub.add_parser('branch', parents=[common],
+                       help='record an exploration resume marker')
+    p.add_argument('from_step', help='earlier transforming step id')
+    p.add_argument('reason', help='short reason for abandoning the path')
     p = sub.add_parser('show', parents=[common],
                        help='render the session ledger')
     p.add_argument('--format', choices=['text', 'md'], default='text')
@@ -146,6 +150,22 @@ def main(argv=None):
         ledger.save()
         return emit({'ok': True, 'op': 'conclude', 'claim': claim},
                     args.pretty)
+
+    if args.cmd == 'branch':
+        error = _require_session(args, 'branch')
+        if error:
+            return emit(error, args.pretty)
+        ledger = Ledger(args.session)
+        try:
+            marker = ledger.record_branch(
+                args.from_step, args.reason, goal=args.goal)
+        except ValueError as exc:
+            return emit({'ok': False, 'op': 'branch', 'error': str(exc)},
+                        args.pretty)
+        ledger.save()
+        return emit({'ok': True, 'op': 'branch', 'id': marker['id'],
+                     'from': marker['args']['from'],
+                     'hash': marker['hash']}, args.pretty)
 
     if args.cmd == 'show':
         error = _require_session(args, 'show')

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Registry, progressive-skill, and CLI compatibility tests."""
+import io
 import json
+import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 import agent_do
 import primitives
@@ -126,6 +130,30 @@ class TestTacticRegistry(unittest.TestCase):
         roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
         self.assertEqual((roots.cmd, roots.expr, roots.var),
                          ('quadratic_roots', 'x^2-1', 'x'))
+        branch = parser.parse_args([
+            'branch', 's2', 'try another route', '--session', 'work.json'])
+        self.assertEqual((branch.cmd, branch.from_step, branch.reason),
+                         ('branch', 's2', 'try another route'))
+
+    def test_cli_branch_records_and_replays_marker(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'branch.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'branch', 's1', 'the substitution route stalled',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertEqual((rec['op'], rec['from']), ('branch', 's1'))
+        loaded = Ledger(path)
+        self.assertEqual(loaded.steps[-1]['op'], 'branch')
+        self.assertEqual(loaded.replay()['status'], 'verified')
 
     def test_rewrite_at_flows_through_agent_and_replay(self):
         session = agent_do.DoSession()

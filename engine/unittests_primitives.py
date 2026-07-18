@@ -2292,6 +2292,81 @@ class TestLedgerComment(unittest.TestCase):
             ledger.record_comment('   ')
 
 
+class TestLedgerBranchMarker(unittest.TestCase):
+    def marker_ledger(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        marker = ledger.record_branch(
+            source['id'], 'the substitution route stalled')
+        return ledger, source, marker
+
+    def test_marker_is_structured_non_provenance_and_replays(self):
+        ledger, source, marker = self.marker_ledger()
+        self.assertEqual(marker['op'], 'branch')
+        self.assertEqual(marker['args'], {
+            'from': source['id'],
+            'reason': 'the substitution route stalled',
+        })
+        self.assertIsNone(marker['result'])
+        self.assertEqual(marker['check']['status'], 'note')
+        self.assertEqual(ledger.last_result(), source['result'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        self.assertIn('branch from s1: the substitution route stalled',
+                      ledger.render())
+        self.assertIn('*branch from `s1`*', ledger.render_markdown())
+
+    def test_marker_round_trips_in_a_saved_session(self):
+        path = os.path.join(tempfile.mkdtemp(), 'branch.json')
+        ledger = Ledger(path)
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record_branch(source['id'], 'try the factored route')
+        ledger.save()
+        loaded = Ledger(path)
+        self.assertEqual(loaded.steps[1]['args']['from'], 's1')
+        self.assertEqual(loaded.replay()['status'], 'verified')
+
+    def test_invalid_source_reason_and_goal_are_refused(self):
+        ledger = Ledger()
+        with self.assertRaisesRegex(ValueError, 'unknown branch source'):
+            ledger.record_branch('s999', 'resume')
+        note = ledger.record_comment('ordinary note')
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.record_branch(note['id'], 'resume')
+        note['result'] = 'forged result'
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.record_branch(note['id'], 'resume')
+        note['result'] = None
+        source = ledger.record(Core.expand('(x+1)^2'))
+        with self.assertRaisesRegex(ValueError, 'needs a reason'):
+            ledger.record_branch(source['id'], '  ')
+
+        claim = ledger.record_claim('x=x')
+        with self.assertRaisesRegex(ValueError, 'belongs to goal'):
+            ledger.record_branch(source['id'], 'resume', goal=claim['id'])
+
+    def test_replay_rejects_tampered_source_and_reason(self):
+        ledger, _source, marker = self.marker_ledger()
+        marker['args']['from'] = 's999'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('branch marker invalid', replay['reason'])
+
+        ledger, _source, marker = self.marker_ledger()
+        marker['args']['reason'] = 'silently changed'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('hash mismatch', replay['reason'])
+
+    def test_marker_cannot_close_a_claim(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('x=x')
+        source = ledger.record(Core.expand('x=x'), goal=claim['id'])
+        marker = ledger.record_branch(
+            source['id'], 'try another route', goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.conclude(claim['id'], [marker['id']])
+
+
 TELESCOPING_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left['
                      '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
                      '+\\ldots+\\frac{1}{n(n+1)}\\right]')

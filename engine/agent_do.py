@@ -79,8 +79,10 @@ _DO_RULES = """
 - Use `claim` only for a relation you intend to establish as true, never for
   an equation whose solutions you are seeking. Ordinary calculations and
   root-finding should stay as tactic steps followed by `set_result`.
-- Use comment only for short strategy/branch annotations in plain text. Notes
-  are unverified prose, never steps or results; do not put scratch work there.
+- Use comment only for short strategy annotations in plain text. When
+  abandoning a recorded path and resuming from an earlier result, pass that
+  exact step id as from_step; this records an exploration marker, never
+  mathematical case data or provenance. Do not put scratch work in notes.
 """
 
 _PLOT_RULES = """
@@ -245,10 +247,15 @@ class DoSession(object):
             self.current_goal = claim.get('parent') or claim['id']
         return claim
 
-    def comment(self, text):
-        """Append a narrative note to the ledger and stream it."""
+    def comment(self, text, from_step=None):
+        """Append a narrative note or structured branch marker and stream it."""
         with self._lock:
-            step = self.ledger.record_comment(text, goal=self.current_goal)
+            if from_step:
+                step = self.ledger.record_branch(
+                    from_step, text, goal=self.current_goal)
+            else:
+                step = self.ledger.record_comment(
+                    text, goal=self.current_goal)
             if self.on_step is not None:
                 self.on_step(step)
         return step
@@ -355,18 +362,23 @@ def make_api(session):
         result = tactic_registry.invoke_agent(tactic, arguments, session)
         return json.dumps(result, ensure_ascii=False, default=str)
 
-    def comment(text: str) -> str:
-        """Add a short unverified strategy or branch note to the ledger.
+    def comment(text: str, from_step: str = '') -> str:
+        """Add a short unverified strategy note or exploration marker.
 
         Args:
             text: one or two short plain-text sentences; no scratch work.
+            from_step: earlier transforming step id to resume from, or empty
+                for an ordinary note. This never supplies provenance.
         """
         try:
-            step = session.comment(text)
+            step = session.comment(text, from_step=from_step or None)
         except ValueError as exc:
-            return json.dumps({'ok': False, 'op': 'comment',
+            return json.dumps({'ok': False,
+                               'op': 'branch' if from_step else 'comment',
                                'error': str(exc)}, ensure_ascii=False)
-        reply = {'ok': True, 'op': 'comment', 'id': step['id']}
+        reply = {'ok': True, 'op': step['op'], 'id': step['id']}
+        if step['op'] == 'branch':
+            reply['from'] = step['args']['from']
         if len(text) > 400:
             reply['hint'] = 'keep comments to one or two short sentences'
         return json.dumps(reply, ensure_ascii=False)

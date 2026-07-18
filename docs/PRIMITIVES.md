@@ -108,6 +108,8 @@ The ledger provides:
 - semantic continuity flags between consecutive results;
 - accumulated assumptions;
 - comments that are visible but never usable as provenance;
+- structured exploration markers that name an earlier transforming step and
+  explain why the agent resumed there, while carrying no result or provenance;
 - claims with open, established, or conditional verdicts;
 - replay that re-invokes the registered primitive and compares the result;
 - source validation for tactics that consume earlier ledger results.
@@ -116,6 +118,13 @@ The ledger provides:
 source graph closes the claim. A relation-valued endpoint must itself be
 mechanically true; an equivalent no-op rewrite cannot establish an arbitrary
 relation.
+
+An exploration marker is recorded through `comment(text, from_step=...)` in
+`do!` or the explicit CLI `branch FROM_STEP REASON` control. Replay validates
+that its source is an earlier transforming step in the same goal and that the
+marker was not altered. It remains comment-grade annotation: it cannot close a
+claim, supply a result, or become assembly provenance. The ledger stays
+append-only; checked work on an abandoned path is never deleted.
 
 ### Provenance-aware composition
 

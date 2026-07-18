@@ -111,6 +111,11 @@ class TestPromptBuilder(unittest.TestCase):
         self.assertIn('Never restate ledger steps', p)
         self.assertIn('write image links', p)
 
+    def test_prompt_names_structured_exploration_markers(self):
+        p = agent_do.build_prompt()
+        self.assertIn('exact step id as from_step', p)
+        self.assertIn('never\n  mathematical case data or provenance', p)
+
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
         self.assertIn('root claim\n`c7`', p)
@@ -167,6 +172,26 @@ class TestDoSessionApi(unittest.TestCase):
         res = json.loads(api['set_result']('x = 2'))
         self.assertEqual(res['provenance']['status'], 'unverified')
         self.assertFalse(json.loads(api['comment']('  '))['ok'])
+
+    def test_comment_from_step_records_a_structured_branch_marker(self):
+        seen = []
+        session = DoSession(on_step=seen.append)
+        api = make_api(session)
+        source = json.loads(api['expand']('(x+1)^2'))['step']['id']
+        rec = json.loads(api['comment'](
+            'the substitution route stalled', source))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['op'], 'branch')
+        self.assertEqual(rec['from'], 's1')
+        marker = session.new_steps()[-1]
+        self.assertEqual(marker['args']['reason'],
+                         'the substitution route stalled')
+        self.assertIsNone(marker['result'])
+        self.assertEqual(seen[-1]['op'], 'branch')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        bad = json.loads(api['comment']('resume', 's999'))
+        self.assertFalse(bad['ok'])
+        self.assertEqual(bad['op'], 'branch')
 
     def test_set_result_rejects_detached_conclusion(self):
         session = DoSession()
@@ -1106,9 +1131,26 @@ class TestMathShellDo(unittest.TestCase):
                    'args': {'text': 'strategy note'}, 'input': None,
                    'result': None, 'check': {'status': 'note'},
                    'assumptions': []}
+        branch = {'id': 's2', 'hash': 'h2', 'op': 'branch',
+                  'args': {'from': 's1', 'reason': 'try another route'},
+                  'input': None, 'result': None,
+                  'check': {'status': 'note'}, 'assumptions': []}
         self.assertIsNone(self.shell.render_do_chain([]))
         self.assertIsNone(self.shell.render_do_chain(
-            [comment, self._chain_step('s2', 'expand', '5')]))
+            [comment, branch, self._chain_step('s3', 'expand', '5')]))
+
+    def test_branch_marker_stream_render_is_plain_annotation(self):
+        html = self.shell.render_do_step({
+            'id': 's3', 'hash': 'h3', 'op': 'branch',
+            'args': {'from': 's1',
+                     'reason': 'substitution < increased complexity'},
+            'input': None, 'result': None, 'continues': None,
+            'check': {'status': 'note'}, 'assumptions': [],
+        })
+        self.assertIn('tex2jax_ignore', html)
+        self.assertIn('branch from s1', html)
+        self.assertIn('substitution &lt; increased complexity', html)
+        self.assertNotIn('$', html)
 
     def test_query_only_final_is_rendered_unverified(self):
         result = {'ok': True, 'steps': [], 'assumptions': [],

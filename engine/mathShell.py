@@ -213,6 +213,16 @@ class MathShell(object):
             return (f"<div class=\"tex2jax_ignore\" style=\"color:#666\">"
                     f"<code>{step['id']}</code> "
                     f"<em>{_html.escape(step['args']['text'])}</em></div>")
+        if step['op'] == 'branch':
+            # Exploration topology is annotation, not checked mathematics.
+            # The later presentation generation will fold dead branches; for
+            # now make the explicit source/reason visible as it is recorded.
+            source = _html.escape(step['args']['from'])
+            reason = _html.escape(step['args']['reason'])
+            return (f'<div class="tex2jax_ignore" style="color:#666">'
+                    f'<code>{step["id"]}</code> '
+                    f'<strong>branch from {source}</strong> '
+                    f'&mdash; <em>{reason}</em></div>')
         check = step['check'].get('status', '?')
         mark = self._DO_MARKS.get(check, '?')
         if mark in ('XX', '?'):
@@ -248,7 +258,7 @@ class MathShell(object):
         rows = []
         for step in steps:
             if step.get('result') is None:
-                continue  # comments are strategy notes, not chain links
+                continue  # notes/markers are annotation, not chain links
             check = step['check'].get('status', '?')
             color = self._CHECK_COLORS.get(check, '#c00')
             branch = ('<div style="color:#888;font-size:85%">(branch)'
