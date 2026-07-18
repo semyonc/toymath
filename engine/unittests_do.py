@@ -1086,13 +1086,17 @@ class TestPromptCommandModel(unittest.TestCase):
     def test_repo_commands_load(self):
         import prompt_commands as pc
         reg = pc.load_commands()
-        for name in ('int', 'diff', 'solve', 'expand', 'prove'):
+        for name in ('int', 'diff', 'solve', 'expand', 'prove', 'conv'):
             self.assertIn(name, reg)
         self.assertIsNone(reg['int'].direct)      # LLM tactic tier
         self.assertEqual(reg['diff'].direct, 'differentiate')
         self.assertEqual(reg['expand'].direct, 'expand')
         self.assertTrue(reg['diff'].expr)         # direct implies expr
         self.assertEqual(reg['prove'].mode, 'prove')
+        # conv! is a plain agent command: the verdict must live in the
+        # recorded series_converges step, never in an expr splice
+        self.assertFalse(reg['conv'].expr)
+        self.assertIsNone(reg['conv'].direct)
 
     def test_static_lexer_command_table_matches_committed_registries(self):
         import prompt_commands as pc

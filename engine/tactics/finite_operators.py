@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Finite-sum and finite-product tactics."""
 import random
+from fractions import Fraction
 
 from notation import Notation, Symbol
 
 from primitives import (
-    _ELLIPSIS_NAMES, PrimitiveError, EvalError, parse_latex, write_latex,
+    _ELLIPSIS_NAMES, FRAC_NAMES, PrimitiveError, EvalError, parse_latex,
+    write_latex,
     _big_operator_name, _plain_symbol_name, _binder_info, free_symbols,
     _num_agree, numeric_eval, _sample_point, _result, _error,
     _peel_groups, _int_literal, _strip_limit, _infinity_sign,
@@ -794,3 +796,318 @@ def prod_expand(expr):
     fold it; the literal multiplication loop is the independent check
     leg."""
     return _bigop_expand('prod_expand', '\\prod', expr)
+
+
+def _rational_literal(sym, notation):
+    """The Fraction value of a rational literal (integer, ``\\frac`` of
+    integer literals, or an integer slash), else None."""
+    if isinstance(sym, Symbol):
+        sym = _peel_groups(sym, notation)
+    n = _int_literal(sym, notation)
+    if n is not None:
+        return Fraction(n)
+    if isinstance(sym, Symbol):
+        f = notation.get(sym)
+        if f is not None and (f.sym == Notation.SLASH
+                              or (f.sym.name in FRAC_NAMES
+                                  and len(f.args) == 2)):
+            num = _int_literal(f.args[0], notation)
+            den = _int_literal(f.args[1], notation)
+            if num is not None and den not in (None, 0):
+                return Fraction(num, den)
+    return None
+
+
+_FAMILY_HINT = ('accepted dominating families: a geometric summand '
+                'c r^k with literal rational 0 < r < 1 (also spelled '
+                'c/s^k or with a shifted exponent s^{k-1}), or a power '
+                'summand c/k^p with literal rational p > 1; c a positive '
+                'rational literal')
+
+
+def _bound_power_shift(power, notation, bound):
+    """For an exponent that is the bound variable, or the bound variable
+    plus/minus an integer literal (``k``, ``k+1``, ``k-2``), return the
+    integer shift; None otherwise."""
+    if not isinstance(power, Symbol):
+        return None
+    if _plain_symbol_name(power, notation) == bound:
+        return 0
+    peeled = _peel_groups(power, notation)
+    f = notation.getf(peeled, Notation.S_LIST) \
+        if isinstance(peeled, Symbol) else None
+    if f is None or len(f.args) != 2:
+        return None
+    if _plain_symbol_name(f.args[0], notation) != bound:
+        return None
+    sign = notation.vgetf(f.args[1], [Notation.PLUS, Notation.MINUS])
+    if sign is None:
+        return None
+    j = _int_literal(sign.args[0], notation)
+    if j is None:
+        return None
+    return j if sign.sym == Notation.PLUS else -j
+
+
+def _comparison_family(g_sym, g_notation, bound):
+    """Decompose a dominating summand into ``c * r^bound / bound^p``
+    (positive rational literals); returns ``(c, r, p)`` Fractions or
+    raises PrimitiveError with a steering message.
+
+    This is the SYMBOLIC leg of the comparison test; sampling and the
+    literal partial-sum loop stay on the oracle side."""
+    num, den = [], []
+
+    def collect(sym, into, other):
+        if isinstance(sym, Symbol):
+            sym = _peel_groups(sym, g_notation)
+        if isinstance(sym, Symbol):
+            f = g_notation.get(sym)
+            if f is not None:
+                if f.sym == Notation.MINUS:
+                    raise PrimitiveError(
+                        'the dominating summand must be nonnegative; '
+                        + _FAMILY_HINT)
+                if f.sym == Notation.P_LIST:
+                    for a in f.args:
+                        if (isinstance(a, Symbol)
+                                and g_notation.get(a) is None
+                                and a.name in Notation.styles):
+                            continue
+                        collect(a, into, other)
+                    return
+                if f.sym == Notation.SLASH or (f.sym.name in FRAC_NAMES
+                                               and len(f.args) == 2):
+                    collect(f.args[0], into, other)
+                    collect(f.args[1], other, into)
+                    return
+        into.append(sym)
+
+    collect(g_sym, num, den)
+    c, r, p = Fraction(1), Fraction(1), Fraction(0)
+    for side, items in (('num', num), ('den', den)):
+        for sym in items:
+            lit = _rational_literal(sym, g_notation)
+            if lit is not None:
+                if lit <= 0:
+                    raise PrimitiveError(
+                        'the dominating summand must be positive; '
+                        + _FAMILY_HINT)
+                c = c * lit if side == 'num' else c / lit
+                continue
+            name = _plain_symbol_name(sym, g_notation)
+            if name == bound:
+                if side == 'num':
+                    raise PrimitiveError(
+                        f'a bare factor {bound} grows; ' + _FAMILY_HINT)
+                p += 1
+                continue
+            f = g_notation.getf(sym, Notation.INDEX) \
+                if isinstance(sym, Symbol) else None
+            if f is not None:
+                base, dims = f.args[0], f.args[1]
+                if dims[0] is not None or dims[1] is not None \
+                        or dims[3] is not None:
+                    raise PrimitiveError(
+                        'subscripted factors are not a convergent '
+                        'family; ' + _FAMILY_HINT)
+                power = dims[2]
+                base_lit = _rational_literal(base, g_notation)
+                shift = _bound_power_shift(power, g_notation, bound)
+                if base_lit is not None and shift is not None:
+                    if base_lit <= 0:
+                        raise PrimitiveError(
+                            'the geometric base must be positive; '
+                            + _FAMILY_HINT)
+                    # r^{k+j} = r^{j} * r^{k}: the shift is a constant
+                    factor = base_lit ** shift
+                    if side == 'num':
+                        c, r = c * factor, r * base_lit
+                    else:
+                        c, r = c / factor, r / base_lit
+                    continue
+                base_name = _plain_symbol_name(base, g_notation)
+                power_lit = _rational_literal(power, g_notation)
+                if base_name == bound and power_lit is not None:
+                    q = power_lit if side == 'den' else -power_lit
+                    if q <= 0:
+                        raise PrimitiveError(
+                            f'the power of {bound} must shrink the '
+                            'summand; ' + _FAMILY_HINT)
+                    p += q
+                    continue
+            raise PrimitiveError(
+                'unrecognized dominating factor '
+                f'{write_latex(sym, g_notation)!r}; ' + _FAMILY_HINT)
+    return c, r, p
+
+
+def series_converges(expr, dominating):
+    """Certify absolute convergence of an infinite ``\\sum`` by
+    comparison with an agent-proposed dominating geometric or p-series
+    summand.
+
+    The result is the mechanically supported bound relation
+    ``sum |f| <= T`` for the family's closed tail bound T; domination for
+    every index is recorded as an assumption and spot-checked, and the
+    monotone-convergence inference is recorded, not proved. There is no
+    divergence counterpart: a refusal is never evidence of divergence."""
+    args = {'expr': expr, 'dominating': dominating}
+    try:
+        parts = _bigop_parts(expr, '\\sum', allow_infinite_upper=True)
+    except PrimitiveError as e:
+        message = str(e)
+        if 'series_partial_sums' in message:
+            message = ('only an infinite upper bound is supported; an '
+                       'infinite lower bound has no comparison reading')
+        return _error('series_converges', args, message)
+    if parts['limit'] is not None:
+        return _error('series_converges', args,
+                      'apply series_converges to the bare infinite '
+                      'series, not to a \\lim expression')
+    upper_inf = _infinity_sign(parts['upper'], parts['notation'])
+    if upper_inf is None or upper_inf <= 0:
+        return _error('series_converges', args,
+                      'the sum is finite, so it converges trivially; '
+                      'drive the finite sum tactics instead')
+    k = parts['bound']
+    lo = _int_literal(parts['lower'], parts['notation'])
+    if lo is None:
+        return _error('series_converges', args,
+                      'series lower bound must be an integer literal')
+    try:
+        expr_sym, expr_notation = parse_latex(expr)
+    except PrimitiveError as e:
+        return _error('series_converges', args, str(e))
+    params = free_symbols(expr_sym, expr_notation)
+    if params:
+        return _error('series_converges', args,
+                      'parametric series (free: '
+                      + ', '.join(sorted(params))
+                      + '); substitute values for the parameters first, '
+                      'or drive the value route')
+    try:
+        g_sym, g_notation = parse_latex(dominating)
+    except PrimitiveError as e:
+        return _error('series_converges', args, f'dominating: {e}')
+    g_latex = dominating.strip()
+    try:
+        g_parts = _bigop_parts(dominating, '\\sum',
+                               allow_infinite_upper=True)
+    except PrimitiveError:
+        g_parts = None
+    if g_parts is not None:
+        # agents naturally re-type the whole \sum as the proposal
+        if (g_parts['bound'] != k
+                or not same_expression(g_parts['lower_latex'],
+                                       parts['lower_latex'])):
+            return _error('series_converges', args,
+                          "the dominating \\sum's binder or lower bound "
+                          'differs from the series; pass the bare '
+                          'dominating summand')
+        g_latex = g_parts['summand_latex']
+        g_sym, g_notation = parse_latex(g_latex)
+    stray = free_symbols(g_sym, g_notation) - {k}
+    if stray:
+        return _error('series_converges', args,
+                      'the dominating summand may contain only the bound '
+                      f'variable {k} (stray: ' + ', '.join(sorted(stray))
+                      + ')')
+    try:
+        c, r, p = _comparison_family(g_sym, g_notation, k)
+    except PrimitiveError as e:
+        return _error('series_converges', args, f'dominating: {e}')
+    if r < 1:
+        if p > 0 and lo < 1:
+            return _error('series_converges', args,
+                          'a mixed geometric/power family needs a lower '
+                          'bound of at least 1')
+        tail = c * r ** lo / (1 - r)
+        family = f'geometric (ratio {r})'
+    elif r == 1 and p > 1:
+        if lo < 1:
+            return _error('series_converges', args,
+                          'a p-series comparison needs a lower bound of '
+                          'at least 1')
+        tail = c * p / (p - 1)
+        family = f'p-series (p = {p})'
+    else:
+        return _error('series_converges', args,
+                      f'dominating summand has ratio {r} and power {p}, '
+                      'which is not a convergent family; ' + _FAMILY_HINT)
+    abs_f = f'\\left| {parts["summand_latex"]} \\right|'
+    try:
+        fs, fn = parse_latex(abs_f)
+    except PrimitiveError as e:
+        return _error('series_converges', args,
+                      f'internal: cannot form |summand|: {e}')
+    checked = []
+    for delta in (0, 1, 2, 3, 5, 8, 15, 40):
+        nval = lo + delta
+        try:
+            fv = numeric_eval(fs, fn, {k: float(nval)})
+            gv = numeric_eval(g_sym, g_notation, {k: float(nval)})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if not isinstance(fv, float) or not isinstance(gv, float):
+            continue
+        if fv > gv * (1 + 1e-9) + 1e-12:
+            return _error('series_converges', args,
+                          f'domination fails at {k}={nval}: '
+                          f'|summand| = {fv:g} exceeds the proposed '
+                          f'bound {gv:g}')
+        checked.append(nval)
+    if len(checked) < 4:
+        return _error('series_converges', args,
+                      'the oracle could not evaluate enough sample '
+                      'indices to support the comparison')
+    tail_latex = (str(tail.numerator) if tail.denominator == 1 else
+                  f'\\frac{{{tail.numerator}}}{{{tail.denominator}}}')
+    bound_checked = []
+    for m_val in (lo + 4, lo + 19, lo + 99):
+        partial = _bigop_latex('\\sum', k, parts['lower_latex'],
+                               str(m_val), abs_f)
+        try:
+            ps, pn = parse_latex(partial)
+            val = numeric_eval(ps, pn, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError,
+                PrimitiveError):
+            continue
+        if val > float(tail) * (1 + 1e-9) + 1e-12:
+            return _error('series_converges', args,
+                          f'the literal partial sum at {k}={m_val} '
+                          f'({val:g}) exceeds the tail bound '
+                          f'{float(tail):g}')
+        bound_checked.append(m_val)
+    if not bound_checked:
+        return _error('series_converges', args,
+                      'the literal partial sums could not be evaluated')
+    lhs = _bigop_latex('\\sum', k, parts['lower_latex'], '\\infty', abs_f)
+    result = f'{lhs} \\le {tail_latex}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('series_converges', args,
+                      f'internal: unparseable result: {e}')
+    assumptions = [
+        {'text': (f'{abs_f} \\le {g_latex}\\ \\text{{for every '
+                  f'integer}}\\ {k} \\ge {lo}'),
+         'display': (f'the dominating bound ${abs_f} \\le {g_latex}$ is '
+                     f'assumed for every integer ${k} \\ge {lo}$; it was '
+                     f'spot-checked at {len(checked)} sample indices')},
+        {'text': ('\\text{nondecreasing partial sums bounded above '
+                  'converge}'),
+         'display': ('by monotone convergence the absolute partial sums, '
+                     'bounded by the closed tail value, converge; hence '
+                     'the series converges absolutely')},
+    ]
+    check = {'status': 'agree',
+             'samples': len(checked) + len(bound_checked),
+             'method': ('sampled domination plus literal partial sums '
+                        'vs the closed tail bound '
+                        f'(comparison with the {family})')}
+    return _result('series_converges', args, expr, result,
+                   assumptions=assumptions, check=check,
+                   extra={'convergence': 'absolute', 'family': family,
+                          'tail_bound': tail_latex,
+                          'dominating': g_latex})

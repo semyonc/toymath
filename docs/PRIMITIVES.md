@@ -193,6 +193,11 @@ writer, comparer, and replicator landmines.
 - Infinite sums/products enter only through the definitional
   partial-sums rewrite (value = limit of partial sums, if it exists);
   ellipsis and infinite bounds never become sampled ring variables.
+- Convergence certification is comparison-only and absolute: the recorded
+  step is a bound relation against a geometric or p-series tail, with
+  domination recorded as a spot-checked assumption. There is no
+  divergence or conditional-convergence test; a refusal is never
+  evidence of divergence.
 - Numeric oracle `skipped` means the checker lacks evidence. It must never be
   presented as a counterexample or a successful verification.
 

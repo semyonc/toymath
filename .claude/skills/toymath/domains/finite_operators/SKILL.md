@@ -54,6 +54,26 @@ Goal `\sum_{k=0}^{\infty} (\frac{1}{2})^k`:
 3. Load `limits`: `limit_linearity`, `limit_table` on each piece
    (constant; geometric decay), `limit_assemble` → `2`.
 
+## Convergence
+
+Convergence has two honest routes, in order of preference:
+
+1. **Value route**: `series_partial_sums`, then telescope or a closed
+   form, then the `limits` skill. Exhibiting the value establishes
+   convergence outright.
+2. **Comparison route**: `series_converges` with a dominating summand you
+   propose — geometric `c r^k` with literal `0 < r < 1` (also spelled
+   `c/s^k` or `s^{k-1}`) or p-series `c/k^p` with literal `p > 1`. The
+   recorded step is the bound relation `\sum |f| \le T` for the family's
+   closed tail bound; domination for every index is a recorded,
+   spot-checked assumption, and the verdict is *absolute* convergence.
+   Example: `\sum 1/n!` is certified by proposing `\frac{1}{2^{n-1}}`.
+
+A parametric series is refused — substitute parameter values first. There
+is no divergence tactic and no conditional-convergence test: a refusal is
+never evidence of divergence, and an alternating series that does not
+converge absolutely needs the value route or stays honestly open.
+
 ## Walkthrough: product to factorial ratio
 
 Goal: express `\prod_{k=1}^{n} \frac{2k-1}{2k}` in factorials. Propose the

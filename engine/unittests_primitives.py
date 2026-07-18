@@ -2607,6 +2607,99 @@ class TestGeometricSeriesEndToEnd(unittest.TestCase):
         # the assemble step needs do!-recorded sources to replay; the
         # chain up to the pieces must replay standalone
         self.assertEqual(ledger.replay()['status'], 'verified')
+
+
+SIGNED_SERIES = '\\sum_{n=1}^{\\infty} \\frac{(-1)^{n(n-1)/2}}{2^n}'
+
+
+class TestSeriesConverges(unittest.TestCase):
+    def test_signed_series_dominated_by_geometric(self):
+        rec = FiniteOperators.series_converges(SIGNED_SERIES,
+                                               '\\frac{1}{2^n}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\le 1', rec['result'])
+        self.assertIn('\\left|', rec['result'])
+        self.assertEqual(rec['convergence'], 'absolute')
+        self.assertIn('geometric', rec['family'])
+        self.assertEqual(len(rec['assumptions']), 2)
+        self.assertIn('for every', rec['assumptions'][0]['text'].replace(
+            '\\text{', '').replace('}', ' ').replace('  ', ' '))
+
+    def test_result_is_a_recordable_replayable_step(self):
+        ledger = Ledger()
+        rec = ledger.record(FiniteOperators.series_converges(
+            SIGNED_SERIES, '\\frac{1}{2^n}'))
+        self.assertIn('id', rec)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_p_series_and_rational_p(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{\\sin n}{n^2}',
+            '\\frac{1}{n^2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('p-series', rec['family'])
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n^{3/2}}',
+            '\\frac{1}{n^{3/2}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['tail_bound'], '3')
+
+    def test_geometric_spellings_and_exponent_shift(self):
+        for dom in ('(\\frac{1}{2})^n', '\\frac{1}{2^n}'):
+            rec = FiniteOperators.series_converges(
+                '\\sum_{n=0}^{\\infty} (\\frac{1}{2})^n', dom)
+            self.assertTrue(rec['ok'], rec.get('error'))
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n!}', '\\frac{1}{2^{n-1}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['tail_bound'], '2')
+
+    def test_full_sum_proposal_accepted(self):
+        rec = FiniteOperators.series_converges(
+            SIGNED_SERIES, '\\sum_{n=1}^{\\infty} \\frac{1}{2^n}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+
+    def test_harmonic_and_growing_families_refused(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n}', '\\frac{1}{n}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not a convergent family', rec['error'])
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} 2^n', '2^n')
+        self.assertFalse(rec['ok'])
+
+    def test_domination_violation_refused_with_witness(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n}', '\\frac{1}{2^n}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('domination fails at n=1', rec['error'])
+
+    def test_parametric_series_refused(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=0}^{\\infty} r^n', '(\\frac{1}{2})^n')
+        self.assertFalse(rec['ok'])
+        self.assertIn('parametric', rec['error'])
+
+    def test_finite_sum_refused(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{10} \\frac{1}{2^n}', '\\frac{1}{2^n}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('trivially', rec['error'])
+
+    def test_unrecognized_factor_refused_with_families_named(self):
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n!}', '\\frac{1}{n!}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('geometric', rec['error'])
+        self.assertIn('p > 1', rec['error'])
+
+    def test_refusal_is_never_divergence_evidence(self):
+        # the record shape must not smuggle a verdict on refusal
+        rec = FiniteOperators.series_converges(
+            '\\sum_{n=1}^{\\infty} \\frac{1}{n}', '\\frac{1}{n}')
+        self.assertFalse(rec['ok'])
+        self.assertNotIn('convergence', rec)
+        self.assertNotIn('diverge', rec['error'])
     def test_inverse_sqrt_closes(self):
         rec = Limits.limit_table('\\lim_{n \\to \\infty} ' + WALLIS_UPPER)
         self.assertTrue(rec['ok'], rec.get('error'))

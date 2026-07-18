@@ -18,8 +18,8 @@ class MathLexer(object):
         'add', 'addex', 'clear', 'closure', 'debug', 'dump', 'echo-off',
         'echo-on', 'goal', 'mul', 'mulex', 'rules', 'track',
         # committed notebook commands + dispatcher built-ins
-        'commands', 'diff', 'do', 'expand', 'help', 'int', 'lim', 'prove',
-        'solve',
+        'commands', 'conv', 'diff', 'do', 'expand', 'help', 'int', 'lim',
+        'prove', 'solve',
      })
 
      def __init__(self, command_names=None, **kwargs):

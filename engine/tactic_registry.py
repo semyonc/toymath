@@ -429,6 +429,12 @@ TACTICS = (
                (E, _arg('closed_form', 'CLOSED_FORM',
                         'proposed closed form in the upper-bound '
                         'variable'))),
+    TacticSpec('series_converges', 'series_converges', 'finite_operators',
+               'certify absolute convergence by comparison with a '
+               'geometric or p-series bound',
+               finite_operators.series_converges,
+               (E, _arg('dominating', 'DOMINATING',
+                        'proposed dominating summand (c r^k or c/k^p)'))),
     TacticSpec('sum_expand', 'sum_expand', 'finite_operators',
                'write a literal-bounds finite sum out term by term',
                finite_operators.sum_expand, (E,)),
