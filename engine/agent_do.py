@@ -81,8 +81,9 @@ _DO_RULES = """
   root-finding should stay as tactic steps followed by `set_result`.
 - Use comment only for short strategy annotations in plain text. When
   abandoning a recorded path and resuming from an earlier result, pass that
-  exact step id as from_step; this records an exploration marker, never
-  mathematical case data or provenance. Do not put scratch work in notes.
+  exact step id as from_step, then feed that source result verbatim to the
+  next tactic. This records an exploration edge, never mathematical case data
+  or provenance. Do not put scratch work in notes.
 """
 
 _PLOT_RULES = """
@@ -200,8 +201,10 @@ class DoSession(object):
         self.plot_backend = plot_backend
         self.tikz_backend = tikz_backend
         self.start = len(self.ledger.steps)
+        self.selection_start = len(self.ledger.selections)
         self.result_override = None
         self.result_provenance = None
+        self.result_selection = None
         self.current_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
@@ -215,7 +218,14 @@ class DoSession(object):
         (possibly step-annotated) record."""
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
             with self._lock:
-                step = self.ledger.record(result, goal=self.current_goal)
+                try:
+                    step = self.ledger.record(
+                        result, goal=self.current_goal)
+                except ValueError as exc:
+                    refused = dict(result)
+                    refused['ok'] = False
+                    refused['error'] = str(exc)
+                    return refused
                 result = dict(result)
                 result['step'] = {'id': step['id'], 'hash': step['hash']}
                 if self.on_step is not None:
@@ -227,6 +237,9 @@ class DoSession(object):
 
     def new_claims(self):
         return self.ledger.claims[self.claim_start:]
+
+    def new_selections(self):
+        return self.ledger.selections[self.selection_start:]
 
     def claim(self, statement, parent=None, root=False):
         """Record and focus a claim. Root claims govern prove-mode output."""
@@ -368,7 +381,8 @@ def make_api(session):
         Args:
             text: one or two short plain-text sentences; no scratch work.
             from_step: earlier transforming step id to resume from, or empty
-                for an ordinary note. This never supplies provenance.
+                for an ordinary note. The next tactic must consume that
+                source result; this never supplies mathematical provenance.
         """
         try:
             step = session.comment(text, from_step=from_step or None)
@@ -442,10 +456,19 @@ def make_api(session):
                          'establish it or select an earlier ledger result')
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': error}, ensure_ascii=False)
+        try:
+            with session._lock:
+                session.result_selection = session.ledger.record_selection(
+                    expr, provenance, goal=session.current_goal)
+        except ValueError as exc:
+            return json.dumps({'ok': False, 'op': 'set_result',
+                               'error': str(exc)}, ensure_ascii=False)
         session.result_override = expr
         session.result_provenance = provenance
         return json.dumps({'ok': True, 'op': 'set_result', 'result': expr,
-                           'provenance': provenance}, ensure_ascii=False)
+                           'provenance': provenance,
+                           'selection': session.result_selection['id']},
+                          ensure_ascii=False)
 
     def plot(code: str, caption: str) -> str:
         """Render an unverified matplotlib/seaborn/plotly illustration.
@@ -550,7 +573,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
-    summary[, error]}.
+    branch_topology, abandoned_paths, summary[, error]}.
     `steps` are the ledger steps this run added; `final_result` is the
     cell's chainable value. Figures reach
     `on_plot(caption, [{kind, data, height?}, ...])` where kind is
@@ -634,10 +657,23 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     else:
         final = None
         provenance = None
+    marker_ids = [s['id'] for s in steps if s.get('op') == 'branch']
+    topology = session.ledger.presentation_topology(
+        final_provenance=(None if session.result_selection is not None
+                          else provenance),
+        marker_ids=marker_ids)
+    if provenance and provenance.get('status') == 'unverified':
+        final_assumptions = []
+    elif topology['spine']:
+        final_assumptions = topology['spine_assumptions']
+    else:
+        final_assumptions = list(session.ledger.assumptions)
     out = {'ok': 'err' not in holder, 'steps': steps,
            'claims': session.new_claims(),
-           'assumptions': list(session.ledger.assumptions),
+           'assumptions': final_assumptions,
            'final_result': final, 'final_provenance': provenance,
+           'branch_topology': topology,
+           'abandoned_paths': topology['abandoned_paths'],
            'summary': None}
     if 'err' in holder:
         e = holder['err']

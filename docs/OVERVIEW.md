@@ -64,7 +64,8 @@ It has a stable small surface:
 - `run_tactic` invokes an allowlisted registry entry;
 - `comment`, `claim`, `conclude`, and `set_result` manage the ledger/result;
   giving `comment` an earlier `from_step` records an exploration-only resume
-  marker rather than an ordinary note;
+  marker rather than an ordinary note. Its next checked step persists the
+  presentation edge, while `set_result` persists the selected final spine;
 - `plot` appears only when the optional sandbox is available.
 
 Core algebra/checking guidance is always present. Differentiation, equations,
@@ -81,9 +82,12 @@ Each successful call streams a checked step such as:
 s2#43bdac6 [ok] expand: 2x+3-3 = 7-3  ==>  2x = 4
 ```
 
-All agent cells in a notebook share one ledger. Each cell renders only its new
-slice, and a selected established result becomes addressable as `[[n]]` by a
-later cell.
+All agent cells in a notebook share one ledger. Each cell normally renders its
+new slice (an exploration fold may repeat earlier checked steps named by a new
+marker), and a selected established result becomes addressable as `[[n]]` by a
+later cell. Abandoned exploration routes remain in the append-only artifact
+but collapse behind expandable source/reason summaries; their assumptions do
+not condition the selected final spine.
 
 `prove!` creates a root claim before the model runs. The claim remains visibly
 open until `conclude` receives a connected, goal-owned checked chain. Prose

@@ -13,6 +13,7 @@ Persistence is a plain JSON file so an agent can keep a session across turns.
 import json
 import os
 import hashlib
+import html as _html
 
 from tactic_registry import TRANSFORMING_OPS
 from tactics import core as core_tactics
@@ -29,8 +30,27 @@ def _claim_hash(statement, parent):
     return h.hexdigest()[:7]
 
 
-def _branch_hash(from_step, reason):
+def _legacy_branch_hash(from_step, reason):
+    """Legacy marker hash, retained so saved sessions keep replaying."""
     return _step_hash('branch', from_step, reason)
+
+
+def _branch_hash(from_step, reason):
+    """Current marker hash. Its distinct namespace makes the promised
+    marker->next-transform edge mandatory without invalidating legacy files."""
+    return _step_hash('branch-next', from_step, reason)
+
+
+def _branch_edge_hash(marker_id, from_step, to_step, reason):
+    return _step_hash(
+        'branch-edge', f'{marker_id}|{from_step}|{to_step}', reason)
+
+
+def _selection_hash(result, provenance, goal):
+    payload = json.dumps(provenance, sort_keys=True, ensure_ascii=False,
+                         separators=(',', ':'))
+    return _step_hash('selection', result,
+                      f'{goal or ""}|{payload}')
 
 
 def assumption_markdown(assumption):
@@ -42,6 +62,12 @@ def assumption_markdown(assumption):
     if display is not None:
         return display
     return f"${assumption['text']}$"
+
+
+def _markdown_prose(text):
+    """Keep annotation prose inert in Markdown/MathJax/embedded HTML."""
+    return (_html.escape(str(text), quote=False)
+            .replace('\\', '\\\\').replace('$', '\\$'))
 
 
 def _presentation_free(conclusion):
@@ -69,6 +95,19 @@ def _eq_yes(left, right):
     except Exception:
         return False
     return rec.get('ok') and rec.get('verdict') == 'yes'
+
+
+def _same_expression(left, right):
+    """Shape-level linkage for exploration edges (formatting tolerant).
+
+    An edge says which recorded expression the agent resumed from; numeric or
+    algebraic value equality is too permissive for that topological claim.
+    """
+    import primitives
+    try:
+        return primitives.same_expression(left, right)
+    except Exception:
+        return False
 
 
 def _relation_parts(statement):
@@ -114,7 +153,7 @@ class Ledger(object):
     def __init__(self, path=None):
         self.path = path
         self.data = {'version': LEDGER_VERSION, 'steps': [],
-                     'assumptions': [], 'claims': []}
+                     'assumptions': [], 'claims': [], 'selections': []}
         if path and os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as fh:
                 self.data = json.load(fh)
@@ -129,6 +168,7 @@ class Ledger(object):
                     f'session file version {version} '
                     f'not supported')
             self.data.setdefault('claims', [])
+            self.data.setdefault('selections', [])
 
     @property
     def steps(self):
@@ -141,6 +181,49 @@ class Ledger(object):
     @property
     def claims(self):
         return self.data['claims']
+
+    @property
+    def selections(self):
+        return self.data['selections']
+
+    @staticmethod
+    def _pending_branches_in(steps, goal):
+        """Return unresolved markers for ``goal`` in ledger order.
+
+        This is derived solely from ledger order: the first later
+        transforming step in the same goal resolves a marker.  No hidden
+        mutable branch cursor participates in recording or replay.
+        """
+        pending = []
+        for step in reversed(steps):
+            if step.get('goal') != goal:
+                continue
+            if (step.get('op') in TRANSFORMING_OPS
+                    and step.get('result') is not None):
+                break
+            if step.get('op') == 'branch':
+                pending.append(step)
+        return list(reversed(pending))
+
+    @classmethod
+    def _pending_branch_in(cls, steps, goal):
+        pending = cls._pending_branches_in(steps, goal)
+        return pending[-1] if pending else None
+
+    def _pending_branch(self, goal):
+        return self._pending_branch_in(self.steps, goal)
+
+    @staticmethod
+    def _branch_edge(marker, target):
+        args = marker.get('args') or {}
+        return {
+            'marker': marker.get('id'),
+            'from': args.get('from'),
+            'reason': args.get('reason'),
+            'hash': _branch_edge_hash(
+                marker.get('id'), args.get('from'), target.get('id'),
+                args.get('reason')),
+        }
 
     def get_claim(self, claim_id):
         return next((c for c in self.claims if c['id'] == claim_id), None)
@@ -195,6 +278,18 @@ class Ledger(object):
         if goal is not None and self.get_claim(goal) is None:
             raise ValueError(f'unknown goal {goal!r}')
         n = len(self.steps) + 1
+        pending_branch = self._pending_branch(goal)
+        if pending_branch is not None:
+            source_id = pending_branch['args']['from']
+            source = next((s for s in self.steps
+                           if s.get('id') == source_id), None)
+            if (source is None
+                    or not _same_expression(source.get('result'),
+                                            result.get('input'))):
+                raise ValueError(
+                    f'{result.get("op", "step")} input does not resume '
+                    f'branch marker {pending_branch["id"]} from '
+                    f'{source_id}; use that source result verbatim')
         continues = None
         prev = self.last_result()
         cur = result.get('input')
@@ -230,6 +325,10 @@ class Ledger(object):
             step['solutions'] = list(result['solutions'])
         if goal is not None:
             step['goal'] = goal
+        if pending_branch is not None:
+            # Presentation metadata only.  Mathematical authority still
+            # comes exclusively from this step's registered tactic/check.
+            step['exploration'] = self._branch_edge(pending_branch, step)
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:
@@ -277,6 +376,11 @@ class Ledger(object):
             raise ValueError('branch marker needs a reason')
         if goal is not None and self.get_claim(goal) is None:
             raise ValueError(f'unknown goal {goal!r}')
+        pending = self._pending_branch(goal)
+        if pending is not None:
+            raise ValueError(
+                f'branch marker {pending["id"]} still needs its continuing '
+                'transforming step')
         source = next((s for s in self.steps if s.get('id') == from_step),
                       None)
         if source is None:
@@ -386,6 +490,91 @@ class Ledger(object):
         claim['conclusion'] = conclusion
         return claim
 
+    def _selection_error(self, selection, steps=None):
+        """Return a replay/recording error for a final-result selection.
+
+        A selection records presentation provenance only.  It can point at
+        checked mathematical authority, but can never create that authority.
+        """
+        import primitives
+        steps = self.steps if steps is None else steps
+        result = selection.get('result')
+        provenance = selection.get('provenance')
+        if not isinstance(provenance, dict):
+            return 'selection provenance must be an object'
+        goal = selection.get('goal')
+        if goal is not None and self.get_claim(goal) is None:
+            return f'unknown selection goal {goal!r}'
+        if not isinstance(result, str) or not result.strip():
+            return 'missing selected result'
+        try:
+            primitives.parse_latex(result)
+        except primitives.PrimitiveError as exc:
+            return f'invalid selected result: {exc}'
+        if selection.get('hash') != _selection_hash(
+                result, provenance, goal):
+            return 'selection hash mismatch'
+
+        source = provenance.get('source')
+        status = provenance.get('status')
+        if source == 'ledger':
+            step_id = provenance.get('step')
+            step = next((s for s in steps if s.get('id') == step_id), None)
+            if (step is None or step.get('op') not in TRANSFORMING_OPS
+                    or step.get('result') is None):
+                return f'unknown transforming source {step_id!r}'
+            if status != 'verified':
+                return 'ledger selection must have verified status'
+            if not _eq_yes(result, step['result']):
+                return f'selected result does not match {step_id}'
+            return None
+        if source == 'claim':
+            claim_id = provenance.get('claim')
+            claim = self.get_claim(claim_id)
+            if claim is None or claim.get('verdict') == 'open':
+                return f'unknown or open claim source {claim_id!r}'
+            conclusion = claim.get('conclusion') or {}
+            if status != claim.get('verdict'):
+                return 'claim selection status does not match its verdict'
+            if provenance.get('steps') != conclusion.get('steps'):
+                return 'claim selection steps do not match its conclusion'
+            if provenance.get('method') != conclusion.get('closure'):
+                return 'claim selection method does not match its conclusion'
+            if not _eq_yes(result, conclusion.get('endpoint')):
+                return f'selected result does not match claim {claim_id}'
+            return None
+        if source == 'query-only':
+            if status != 'unverified':
+                return 'query-only selection must be unverified'
+            if provenance.get('step') or provenance.get('claim'):
+                return 'query-only selection cannot cite checked authority'
+            return None
+        return f'unknown selection source {source!r}'
+
+    def record_selection(self, result, provenance, goal=None):
+        """Append the final-result provenance chosen by ``set_result``.
+
+        This separate control record lets a later CLI renderer recover the
+        selected spine even when the chosen result came from an earlier step.
+        It is deliberately not a ledger step and cannot close a claim or feed
+        a provenance-aware tactic.
+        """
+        provenance = dict(provenance or {})
+        selection = {
+            'id': f'r{len(self.selections) + 1}',
+            'result': result,
+            'provenance': provenance,
+        }
+        if goal is not None:
+            selection['goal'] = goal
+        selection['hash'] = _selection_hash(
+            result, provenance, selection.get('goal'))
+        error = self._selection_error(selection)
+        if error is not None:
+            raise ValueError(error)
+        self.selections.append(selection)
+        return selection
+
     def save(self, path=None):
         path = path or self.path
         if not path:
@@ -427,13 +616,29 @@ class Ledger(object):
                     error = (f'source {from_step!r} belongs to goal '
                              f'{source.get("goal")!r}, not '
                              f'{step.get("goal")!r}')
-                elif (step.get('input') is not None
+                else:
+                    pending = self._pending_branches_in(
+                        replayed_steps, step.get('goal'))
+                    current_is_legacy = (step.get('hash')
+                                         == _legacy_branch_hash(
+                                             from_step, reason))
+                    pending_has_new = any(
+                        p.get('hash') != _legacy_branch_hash(
+                            (p.get('args') or {}).get('from'),
+                            (p.get('args') or {}).get('reason'))
+                        for p in pending)
+                    if pending and (not current_is_legacy
+                                    or pending_has_new):
+                        error = 'previous marker has no continuing step'
+                if error is None and (step.get('input') is not None
                       or step.get('result') is not None
                       or step.get('assumptions') != []
                       or step.get('check') != {'status': 'note'}
                       or step.get('continues') is not None):
                     error = 'marker carries transforming fields'
-                elif step.get('hash') != _branch_hash(from_step, reason):
+                elif error is None and step.get('hash') not in (
+                        _branch_hash(from_step, reason),
+                        _legacy_branch_hash(from_step, reason)):
                     error = 'marker hash mismatch'
                 if error is not None:
                     return {'status': 'failed', 'step': step.get('id', '?'),
@@ -445,6 +650,38 @@ class Ledger(object):
                 seen[step['id']] = step
                 replayed_steps.append(step)
                 continue
+            pending_branches = self._pending_branches_in(
+                replayed_steps, step.get('goal'))
+            if pending_branches:
+                for pending_branch in pending_branches:
+                    source_id = pending_branch['args']['from']
+                    source = seen.get(source_id)
+                    if (source is None
+                            or not _same_expression(source.get('result'),
+                                                    step.get('input'))):
+                        return {
+                            'status': 'failed', 'step': step.get('id', '?'),
+                            'reason': (f'branch edge invalid: '
+                                       f'{step.get("id")} does not resume '
+                                       f'{source_id}')}
+                pending_branch = pending_branches[-1]
+                source_id = pending_branch['args']['from']
+                expected_edge = self._branch_edge(pending_branch, step)
+                all_legacy = all(
+                    p.get('hash') == _legacy_branch_hash(
+                        p['args'].get('from'), p['args'].get('reason'))
+                    for p in pending_branches)
+                if step.get('exploration') != expected_edge:
+                    # Legacy ledgers did not persist the target half. Their
+                    # old marker hashes opt into deterministic derivation;
+                    # new markers require the recorded edge.
+                    if not (all_legacy and step.get('exploration') is None):
+                        return {
+                            'status': 'failed', 'step': step.get('id', '?'),
+                            'reason': 'branch edge metadata mismatch'}
+            elif step.get('exploration') is not None:
+                return {'status': 'failed', 'step': step.get('id', '?'),
+                        'reason': 'branch edge has no preceding marker'}
             provenance_error = tactic_registry.validate_provenance(step,
                                                                    seen)
             if provenance_error:
@@ -503,20 +740,201 @@ class Ledger(object):
                 return {'status': 'failed',
                         'claim': claim.get('id', '?'),
                         'reason': f'claim replay failed: {e}'}
+        for index, selection in enumerate(self.selections, 1):
+            if not isinstance(selection, dict):
+                return {'status': 'failed', 'selection': f'r{index}',
+                        'reason': ('final selection invalid: record must be '
+                                   'an object')}
+            if selection.get('id') != f'r{index}':
+                return {'status': 'failed',
+                        'selection': selection.get('id', '?'),
+                        'reason': 'final selection invalid: id mismatch'}
+            error = self._selection_error(selection, steps=replayed_steps)
+            if error is not None:
+                return {'status': 'failed',
+                        'selection': selection.get('id', '?'),
+                        'reason': f'final selection invalid: {error}'}
         return {'status': 'verified', 'steps': len(self.steps),
                 'claims': len(self.claims),
+                'selections': len(self.selections),
                 'open_claims': sum(c.get('verdict') == 'open'
                                    for c in self.claims),
                 'assumptions': self.assumptions}
+
+    def branch_edges(self):
+        """Return the exploration edges encoded by marker/target order.
+
+        New ledgers persist the target half on the transforming step.  The
+        scan remains deterministic so legacy files can derive the same edge.
+        Unresolved end-of-session markers have ``to=None`` and are not errors.
+        """
+        edges = []
+        for index, marker in enumerate(self.steps):
+            if marker.get('op') != 'branch':
+                continue
+            goal = marker.get('goal')
+            target = next((step for step in self.steps[index + 1:]
+                           if (step.get('goal') == goal
+                               and step.get('op') in TRANSFORMING_OPS
+                               and step.get('result') is not None)), None)
+            args = marker.get('args') or {}
+            edges.append({
+                'marker': marker.get('id'),
+                'from': args.get('from'),
+                'to': target.get('id') if target is not None else None,
+                'reason': args.get('reason'),
+                'goal': goal,
+                'kind': 'exploration',
+                'authority': 'annotation',
+                'persisted': bool(target and target.get('exploration')),
+            })
+        return edges
+
+    def presentation_topology(self, final_provenance=None, marker_ids=None):
+        """Derive the selected spine and annotation-only abandoned paths.
+
+        The returned structure is presentation data.  It never participates
+        in claim closure, tactic provenance, or replay authority.
+        """
+        transforms = [s for s in self.steps
+                      if (s.get('op') in TRANSFORMING_OPS
+                          and s.get('result') is not None)]
+        by_id = {s['id']: s for s in self.steps}
+        order = {s['id']: i for i, s in enumerate(self.steps)}
+        edges = self.branch_edges()
+        edge_by_target = {e['to']: e for e in edges if e.get('to')}
+
+        previous_transform = None
+        parents = {}
+        for step in transforms:
+            edge = edge_by_target.get(step['id'])
+            if edge is not None:
+                parents[step['id']] = edge['from']
+            elif step.get('continues') is True:
+                parents[step['id']] = (previous_transform.get('id')
+                                       if previous_transform else None)
+            else:
+                parents[step['id']] = None
+            previous_transform = step
+
+        provenance = final_provenance
+        selection = None
+        if provenance is None and self.selections:
+            selection = self.selections[-1]
+            provenance = selection.get('provenance') or {}
+        targets = []
+        selected_goal = None
+        if provenance:
+            if provenance.get('source') == 'ledger':
+                step_id = provenance.get('step')
+                if step_id in by_id:
+                    targets.append(step_id)
+                    selected_goal = by_id[step_id].get('goal')
+            elif provenance.get('source') == 'claim':
+                claim = self.get_claim(provenance.get('claim'))
+                if claim is not None:
+                    targets.extend((claim.get('conclusion') or {}).get(
+                        'steps') or [])
+                    selected_goal = claim.get('id')
+        elif self.claims:
+            # A conclusion is itself persisted final-spine evidence. Prefer
+            # the newest closed root, then the newest closed subclaim.
+            closed = [c for c in self.claims
+                      if c.get('verdict') != 'open']
+            roots = [c for c in closed if c.get('parent') is None]
+            claim = (roots or closed or [None])[-1]
+            if claim is not None:
+                targets.extend((claim.get('conclusion') or {}).get(
+                    'steps') or [])
+                selected_goal = claim.get('id')
+
+        spine = set()
+
+        def include(step_id):
+            if step_id in spine or step_id not in by_id:
+                return
+            step = by_id[step_id]
+            if step.get('result') is None:
+                return
+            spine.add(step_id)
+            parent = parents.get(step_id)
+            if parent:
+                include(parent)
+            for source_id in _source_ids(step):
+                include(source_id)
+
+        for target in targets:
+            include(target)
+        spine_ids = [s['id'] for s in transforms if s['id'] in spine]
+
+        allowed_markers = (None if marker_ids is None else set(marker_ids))
+        assigned = set()
+        abandoned = []
+
+        def descends_from(step_id, source_id):
+            seen = set()
+            current = step_id
+            while current and current not in seen:
+                if current == source_id:
+                    return True
+                seen.add(current)
+                current = parents.get(current)
+            return False
+
+        for edge in edges:
+            marker_id = edge['marker']
+            if (allowed_markers is not None
+                    and marker_id not in allowed_markers):
+                continue
+            source_id = edge.get('from')
+            if not spine or source_id not in order or marker_id not in order:
+                continue
+            candidates = [
+                step['id'] for step in transforms
+                if (order[source_id] < order[step['id']] < order[marker_id]
+                    and step.get('goal') == edge.get('goal')
+                    and step['id'] not in spine
+                    and step['id'] not in assigned
+                    and descends_from(step['id'], source_id))]
+            if not candidates:
+                continue
+            assigned.update(candidates)
+            abandoned.append({
+                'marker': marker_id,
+                'source': source_id,
+                'continues_at': edge.get('to'),
+                'reason': edge.get('reason'),
+                'steps': candidates,
+            })
+
+        off_spine = [s['id'] for s in transforms if s['id'] not in spine]
+        unclassified = [sid for sid in off_spine if sid not in assigned]
+        spine_assumptions = []
+        for sid in spine_ids:
+            for assumption in by_id[sid].get('assumptions', []):
+                if assumption not in spine_assumptions:
+                    spine_assumptions.append(assumption)
+        return {
+            'selection': selection.get('id') if selection else None,
+            'selected_goal': selected_goal,
+            'edges': edges,
+            'spine': spine_ids,
+            'spine_assumptions': spine_assumptions,
+            'abandoned_paths': abandoned,
+            'unclassified_off_spine': unclassified,
+            'unresolved_markers': [e['marker'] for e in edges
+                                   if e.get('to') is None],
+        }
 
     _MARKS = {'agree': 'verified', 'exact': 'exact',
               'skipped': 'unchecked', 'disagree': 'FAILED',
               'domain-differs': 'DOMAIN DIFFERS'}
 
     def render_markdown(self):
-        """Render the derivation as Markdown with LaTeX math blocks."""
+        """Render Markdown, folding marker-classified off-spine work."""
         title = '# Derivation ledger' if self.claims else '# Verified derivation'
         lines = [title, '']
+        topology = self.presentation_topology()
         for claim in self.claims:
             verdict = claim.get('verdict', 'open').upper()
             conclusion = claim.get('conclusion') or {}
@@ -533,32 +951,57 @@ class Ledger(object):
                 lines.append('*No mechanically checked closing chain has '
                              'been recorded.*')
             lines.append('')
-        if self.assumptions:
-            lines.append('**Valid under the assumptions:** '
-                         + ', '.join(assumption_markdown(a)
-                                     for a in self.assumptions))
+        if self.selections:
+            selected = self.selections[-1]
+            provenance = selected.get('provenance') or {}
+            source = provenance.get('step') or provenance.get('claim')
+            source_note = f' from `{source}`' if source else ''
+            status = provenance.get('status', 'unknown').upper()
+            lines.append(
+                f'**Selected final result `{selected["id"]}`{source_note} '
+                f'— {status}:** '
+                f'${selected["result"]}$')
             lines.append('')
-        for step in self.steps:
+
+        final_assumptions = (topology['spine_assumptions']
+                             if topology['spine'] else self.assumptions)
+        if final_assumptions:
+            label = ('**Selected spine is valid under the assumptions:** '
+                     if topology['spine'] else
+                     '**Valid under the assumptions:** ')
+            lines.append(label + ', '.join(
+                assumption_markdown(a) for a in final_assumptions))
+            lines.append('')
+
+        def render_step(step):
+            out = []
             if step['op'] == 'comment':
-                # notes are prose, never math: keep \ and $ literal so a
-                # Markdown/MathJax renderer cannot typeset them
-                text = (step['args']['text']
-                        .replace('\\', '\\\\').replace('$', '\\$'))
-                lines.append(f"**{step['id']}** *note* — {text}")
-                lines.append('')
-                continue
+                out.append(f"**{step['id']}** *note* — "
+                           f"{_markdown_prose(step['args']['text'])}")
+                out.append('')
+                return out
             if step['op'] == 'branch':
-                reason = (step['args']['reason']
-                          .replace('\\', '\\\\').replace('$', '\\$'))
-                lines.append(
+                edge = next((e for e in topology['edges']
+                             if e['marker'] == step['id']), None)
+                target = (f" to `{edge['to']}`" if edge and edge.get('to')
+                          else '')
+                pending = ('' if target else
+                           ' *(awaiting a continuing step)*')
+                out.append(
                     f"**{step['id']}** *branch from "
-                    f"`{step['args']['from']}`* — {reason}")
-                lines.append('')
-                continue
+                    f"`{step['args']['from']}`{target}*{pending} — "
+                    f"{_markdown_prose(step['args']['reason'])}")
+                out.append('')
+                return out
             check = step['check'].get('status', '?')
             mark = self._MARKS.get(check, check)
-            branch = ('' if step.get('continues') in (True, None)
-                      else ' *(new chain)*')
+            edge = step.get('exploration')
+            if edge:
+                branch = (f' *(resumes from `{edge["from"]}` via '
+                          f'`{edge["marker"]}`)*')
+            else:
+                branch = ('' if step.get('continues') in (True, None)
+                          else ' *(new chain; no exploration edge)*')
             arg_note = ''
             if step['op'] == 'apply_both_sides':
                 a = step['args']
@@ -580,14 +1023,49 @@ class Ledger(object):
                 arg_note = (f" — sources `{src.get('linearity', '?')}` "
                             f"→ `{ids}`")
             goal = (f" → `{step['goal']}`" if step.get('goal') else '')
-            lines.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
-                         f"— *{mark}*{branch}")
-            lines.append('')
-            lines.append(f"$${step['input']} \\;\\Longrightarrow\\; "
-                         f"{step['result']}$$")
+            out.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
+                       f"— *{mark}*{branch}")
+            out.append('')
+            out.append(f"$${step['input']} \\;\\Longrightarrow\\; "
+                       f"{step['result']}$$")
             for a in step['assumptions']:
-                lines.append(f"- assumes {assumption_markdown(a)}")
-            lines.append('')
+                out.append(f"- assumes {assumption_markdown(a)}")
+            out.append('')
+            return out
+
+        paths_by_first = {}
+        folded_steps = set()
+        folded_markers = set()
+        by_id = {s['id']: s for s in self.steps}
+        for path in topology['abandoned_paths']:
+            if not path['steps']:
+                continue
+            paths_by_first[path['steps'][0]] = path
+            folded_steps.update(path['steps'])
+            folded_markers.add(path['marker'])
+
+        for step in self.steps:
+            path = paths_by_first.get(step['id'])
+            if path is not None:
+                count = len(path['steps'])
+                continuing = (f"; resumed as <code>{path['continues_at']}"
+                              f"</code>" if path.get('continues_at') else '')
+                lines.append('<details>')
+                lines.append(
+                    '<summary><strong>Abandoned path from '
+                    f'<code>{path["source"]}</code></strong> — '
+                    f'{_markdown_prose(path["reason"])} '
+                    f'({count} checked step{"s" if count != 1 else ""}'
+                    f'{continuing})</summary>')
+                lines.append('')
+                for path_step_id in path['steps']:
+                    lines.extend(render_step(by_id[path_step_id]))
+                lines.append('</details>')
+                lines.append('')
+                continue
+            if step['id'] in folded_steps or step['id'] in folded_markers:
+                continue
+            lines.extend(render_step(step))
         lines.append(f'*{len(self.steps)} steps; replay with '
                      f'`toymath replay --session <file>`.*')
         return '\n'.join(lines)
@@ -595,6 +1073,8 @@ class Ledger(object):
     def render(self):
         """Terse human/agent-readable summary of the derivation."""
         lines = []
+        topology = self.presentation_topology()
+        edge_by_marker = {e['marker']: e for e in topology['edges']}
         for claim in self.claims:
             verdict = claim.get('verdict', 'open').upper()
             conclusion = claim.get('conclusion') or {}
@@ -610,9 +1090,13 @@ class Ledger(object):
                              f"{step['args']['text']}")
                 continue
             if step['op'] == 'branch':
+                edge = edge_by_marker.get(step['id']) or {}
+                target = (f" to {edge['to']}" if edge.get('to')
+                          else ' (awaiting continuation)')
                 lines.append(
                     f"{step['id']}#{step['hash']} [--] branch from "
-                    f"{step['args']['from']}: {step['args']['reason']}")
+                    f"{step['args']['from']}{target}: "
+                    f"{step['args']['reason']}")
                 continue
             check = step['check'].get('status', '?')
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
@@ -636,7 +1120,20 @@ class Ledger(object):
                     + ', '.join(src.get('values', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
-        if self.assumptions:
-            lines.append('assumptions: '
-                         + '; '.join(a['text'] for a in self.assumptions))
+        visible_assumptions = (topology['spine_assumptions']
+                               if topology['spine'] else self.assumptions)
+        if visible_assumptions:
+            label = ('selected assumptions: ' if topology['spine']
+                     else 'assumptions: ')
+            lines.append(label + '; '.join(
+                a['text'] for a in visible_assumptions))
+        if self.selections:
+            selected = self.selections[-1]
+            provenance = selected.get('provenance') or {}
+            source = provenance.get('step') or provenance.get('claim') or '?'
+            status = provenance.get('status', 'unknown').upper()
+            lines.append(
+                f"SELECT {selected['id']}#{selected['hash']} [{status}] "
+                f"from {source}: "
+                f"{selected['result']}")
         return '\n'.join(lines)

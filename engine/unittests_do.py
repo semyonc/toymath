@@ -114,7 +114,8 @@ class TestPromptBuilder(unittest.TestCase):
     def test_prompt_names_structured_exploration_markers(self):
         p = agent_do.build_prompt()
         self.assertIn('exact step id as from_step', p)
-        self.assertIn('never\n  mathematical case data or provenance', p)
+        self.assertIn('source result verbatim to the\n  next tactic', p)
+        self.assertIn('never mathematical case data\n  or provenance', p)
 
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
@@ -155,6 +156,8 @@ class TestDoSessionApi(unittest.TestCase):
         rec = json.loads(api['set_result']('x = 2'))
         self.assertTrue(rec['ok'])
         self.assertEqual(rec['provenance']['status'], 'unverified')
+        self.assertEqual(rec['selection'], 'r1')
+        self.assertEqual(session.ledger.selections[0]['result'], 'x = 2')
         self.assertEqual(session.result_override, 'x = 2')
         self.assertFalse(json.loads(api['set_result']('\\frac{'))['ok'])
         self.assertEqual(session.result_override, 'x = 2')  # kept
@@ -193,6 +196,30 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertFalse(bad['ok'])
         self.assertEqual(bad['op'], 'branch')
 
+    def test_branch_marker_attaches_to_next_transform(self):
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+1)^2'))
+        json.loads(api['substitute'](first['result'], 'x', '1'))
+        marker = json.loads(api['comment'](
+            'the numeric detour is not the symbolic answer', 's1'))
+        refused = json.loads(api['expand']('(y+1)^2'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('does not resume branch marker', refused['error'])
+        self.assertEqual(len(session.new_steps()), 3)
+        resumed = json.loads(api['factor_quadratic'](
+            first['result'], 'x'))
+        self.assertEqual(resumed['step']['id'], 's4')
+        target = session.ledger.steps[-1]
+        self.assertEqual(target['exploration']['marker'], marker['id'])
+        self.assertEqual(target['exploration']['from'], 's1')
+        selected = json.loads(api['set_result'](resumed['result']))
+        self.assertEqual(selected['selection'], 'r1')
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine'], ['s1', 's4'])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'], ['s2'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
     def test_set_result_rejects_detached_conclusion(self):
         session = DoSession()
         api = make_api(session)
@@ -213,6 +240,8 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(rec['provenance']['status'], 'verified')
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertNotEqual(rec['provenance']['method'], 'exact-result')
+        self.assertEqual(session.ledger.selections[-1]['provenance']['step'],
+                         's1')
 
     def test_set_result_can_select_shared_ledger_result(self):
         ledger = Ledger()
@@ -568,6 +597,53 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_result'], '(x - 3)(x - 2)')
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
+
+    def test_branch_run_returns_spine_and_abandoned_path_summary(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('substitute', {
+                'expr': 'x^{2}+2x+1', 'var': 'x', 'value': '1'}, 'c2')],
+            [tool_call('comment', {
+                'text': 'the numeric detour does not answer the symbolic goal',
+                'from_step': 's1'}, 'c3')],
+            [tool_call('factor_quadratic', {
+                'expr': 'x^{2}+2x+1', 'var': 'x'}, 'c4')],
+            [tool_call('set_result', {'expr': '(x+1)^{2}'}, 'c5')],
+            [message('Used the factored symbolic route.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('explore then factor',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_provenance']['step'], 's4')
+        self.assertEqual(res['branch_topology']['spine'], ['s1', 's4'])
+        self.assertEqual(res['abandoned_paths'], [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'the numeric detour does not answer the symbolic goal',
+            'steps': ['s2'],
+        }])
+        self.assertEqual(ledger.selections[-1]['id'], 'r1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_dead_branch_assumption_is_not_a_final_assumption(self):
+        script = [
+            [tool_call('expand', {'expr': 'xy=1'}, 'c1')],
+            [tool_call('apply', {
+                'equation': 'xy=1', 'op': '/', 'arg': 'y'}, 'c2')],
+            [tool_call('comment', {
+                'text': 'division is unnecessary', 'from_step': 's1'}, 'c3')],
+            [tool_call('apply', {
+                'equation': 'xy=1', 'op': '-', 'arg': '1'}, 'c4')],
+            [tool_call('set_result', {'expr': 'xy-1=0'}, 'c5')],
+            [message('Kept the assumption-free route.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('rearrange without division',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertTrue(ledger.assumptions)
+        self.assertEqual(res['assumptions'], [])
+        self.assertEqual(res['abandoned_paths'][0]['steps'], ['s2'])
 
     def test_set_result_cannot_override_with_detached_value(self):
         script = [
@@ -1120,8 +1196,10 @@ class TestMathShellDo(unittest.TestCase):
         ])
         self.assertIn('verified chain', html)
         for frag in ('<code>s1</code>', '<code>expand</code>',
-                     '$x^{2}+2x+1$', '(branch)', '+1 assum.'):
+                     '$x^{2}+2x+1$', 'new chain; no marker',
+                     '+1 assum.'):
             self.assertIn(frag, html)
+        self.assertNotIn('(branch)', html)
         # check-status colors: agree green, skipped grey
         self.assertIn('#176b2c', html)
         self.assertIn('#888', html)
@@ -1151,6 +1229,48 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('branch from s1', html)
         self.assertIn('substitution &lt; increased complexity', html)
         self.assertNotIn('$', html)
+
+    def test_chain_table_folds_abandoned_path_with_marker_reason(self):
+        first = self._chain_step('s1', 'expand', 'x^{2}+2x+1',
+                                 continues=None)
+        dead = self._chain_step('s2', 'substitute', '4')
+        resumed = self._chain_step('s4', 'factor_quadratic', '(x+1)^{2}',
+                                   continues=False)
+        resumed['exploration'] = {
+            'marker': 's3', 'from': 's1',
+            'reason': 'numeric < detour', 'hash': 'edge',
+        }
+        topology = {'abandoned_paths': [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'numeric < detour', 'steps': ['s2'],
+        }]}
+        html = self.shell.render_do_chain([first, dead, resumed], topology)
+        self.assertIn('<details', html)
+        self.assertIn('abandoned path from s1', html)
+        self.assertIn('numeric &lt; detour', html)
+        self.assertIn('<code>s2</code>', html)  # expandable body retained
+        self.assertIn('resumed from s1 via s3', html)
+        self.assertNotIn('(branch)', html)
+
+    def test_chain_table_can_expand_prior_run_steps_named_by_new_marker(self):
+        first = self._chain_step('s1', 'expand', 'x^{2}+2x+1',
+                                 continues=None)
+        dead = self._chain_step('s2', 'substitute', '4')
+        resumed = self._chain_step('s4', 'factor_quadratic', '(x+1)^{2}',
+                                   continues=False)
+        resumed['exploration'] = {
+            'marker': 's3', 'from': 's1', 'reason': 'old detour',
+            'hash': 'edge',
+        }
+        topology = {'abandoned_paths': [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'old detour', 'steps': ['s2'],
+        }]}
+        html = self.shell.render_do_chain(
+            [resumed], topology, all_steps=[first, dead, resumed])
+        self.assertIn('old detour', html)
+        self.assertIn('<code>s2</code>', html)
+        self.assertIn('<code>s4</code>', html)
 
     def test_query_only_final_is_rendered_unverified(self):
         result = {'ok': True, 'steps': [], 'assumptions': [],

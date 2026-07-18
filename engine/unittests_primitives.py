@@ -11,6 +11,7 @@ from LatexParser import MathParser
 from polyrat import (Poly, RatFunc, NotInFragment, to_ratfunc,
                      ratfunc_to_notation)
 import primitives as P
+import ledger as ledger_module
 from tactics import core as Core
 from tactics import differentiation as Differentiation
 from tactics import equations as Equations
@@ -1551,6 +1552,7 @@ class TestLedger(unittest.TestCase):
         ledger = Ledger(path)
         self.assertEqual(ledger.data['version'], 2)
         self.assertEqual(ledger.claims, [])
+        self.assertEqual(ledger.selections, [])
         self.assertEqual(ledger.replay()['status'], 'verified')
 
 
@@ -1597,6 +1599,25 @@ class TestGoalAwareLedger(unittest.TestCase):
         self.assertEqual(closed['verdict'], 'established')
         self.assertEqual(closed['conclusion']['closure'],
                          'true-relation-endpoint')
+
+    def test_concluded_claim_defines_spine_without_result_selection(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('(x+1)^2 = x^2+2x+1')
+        source = ledger.record(Core.expand('(x+1)^2'), goal=claim['id'])
+        dead = ledger.record(Core.substitute(
+            source['result'], 'x', '1'), goal=claim['id'])
+        marker = ledger.record_branch(
+            source['id'], 'numeric evaluation was not a symbolic chain',
+            goal=claim['id'])
+        ledger.record(Core.expand(source['result']), goal=claim['id'])
+        ledger.conclude(claim['id'], [source['id']])
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['selected_goal'], claim['id'])
+        self.assertEqual(topology['spine'], [source['id']])
+        self.assertEqual(topology['abandoned_paths'][0]['marker'],
+                         marker['id'])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'],
+                         [dead['id']])
 
     def test_claim_must_be_a_relation(self):
         ledger = Ledger()
@@ -2311,7 +2332,8 @@ class TestLedgerBranchMarker(unittest.TestCase):
         self.assertEqual(marker['check']['status'], 'note')
         self.assertEqual(ledger.last_result(), source['result'])
         self.assertEqual(ledger.replay()['status'], 'verified')
-        self.assertIn('branch from s1: the substitution route stalled',
+        self.assertIn('branch from s1 (awaiting continuation): '
+                      'the substitution route stalled',
                       ledger.render())
         self.assertIn('*branch from `s1`*', ledger.render_markdown())
 
@@ -2365,6 +2387,108 @@ class TestLedgerBranchMarker(unittest.TestCase):
             source['id'], 'try another route', goal=claim['id'])
         with self.assertRaisesRegex(ValueError, 'not a transforming step'):
             ledger.conclude(claim['id'], [marker['id']])
+
+    def test_next_transform_persists_edge_and_selection_defines_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        dead = ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(
+            source['id'], 'the numeric detour does not answer the goal')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+        self.assertEqual(resumed['exploration']['from'], source['id'])
+        self.assertFalse(resumed['continues'])  # chronological, not topology
+
+        selection = ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(selection['id'], 'r1')
+        self.assertEqual(topology['spine'], [source['id'], resumed['id']])
+        self.assertEqual(topology['abandoned_paths'], [{
+            'marker': marker['id'], 'source': source['id'],
+            'continues_at': resumed['id'],
+            'reason': 'the numeric detour does not answer the goal',
+            'steps': [dead['id']],
+        }])
+        md = ledger.render_markdown()
+        self.assertIn('<details>', md)
+        self.assertIn('Abandoned path from <code>s1</code>', md)
+        self.assertIn('resumed as <code>s4</code>', md)
+        self.assertIn('**s2**', md)  # checked work stays expandable
+        self.assertIn('Selected final result `r1` from `s4`', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_branch_target_must_resume_source_and_markers_do_not_stack(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        marker = ledger.record_branch(source['id'], 'try another route')
+        with self.assertRaisesRegex(ValueError, 'input does not resume'):
+            ledger.record(Core.expand('(y+1)^2'))
+        with self.assertRaisesRegex(ValueError, 'still needs'):
+            ledger.record_branch(source['id'], 'stack another marker')
+        # A partial saved session with an unresolved marker remains replayable.
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+
+    def test_replay_rejects_tampered_edge_and_selection(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '1'))
+        ledger.record_branch(source['id'], 'discard the value-only route')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        selection = ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        resumed['exploration']['from'] = 's2'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('edge metadata', replay['reason'])
+
+        resumed['exploration'] = ledger._branch_edge(
+            ledger.steps[2], resumed)
+        selection['provenance']['step'] = 's2'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('selection hash mismatch', replay['reason'])
+
+    def test_legacy_marker_without_persisted_target_edge_still_replays(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(source['id'], 'legacy resume')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        marker['hash'] = ledger_module._legacy_branch_hash(
+            source['id'], marker['args']['reason'])
+        resumed.pop('exploration')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        edge = ledger.branch_edges()[0]
+        self.assertEqual((edge['from'], edge['to'], edge['persisted']),
+                         ('s1', 's4', False))
+
+    def test_dead_path_assumptions_do_not_condition_selected_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('xy=1'))
+        dead = ledger.record(Core.apply_both_sides(
+            source['result'], '/', 'y'))
+        self.assertTrue(dead['assumptions'])
+        ledger.record_branch(source['id'], 'division is unnecessary')
+        resumed = ledger.record(Core.apply_both_sides(
+            source['result'], '-', '1'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertTrue(ledger.assumptions)  # artifact preserves dead work
+        self.assertEqual(topology['spine_assumptions'], [])
 
 
 TELESCOPING_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left['

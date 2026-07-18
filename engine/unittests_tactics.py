@@ -155,6 +155,35 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(loaded.steps[-1]['op'], 'branch')
         self.assertEqual(loaded.replay()['status'], 'verified')
 
+    def test_cli_markdown_show_uses_persisted_selection_to_fold_path(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'topology.json')
+        ledger = Ledger(path)
+        source = ledger.record(core.expand('(x+1)^2'))
+        ledger.record(core.substitute(source['result'], 'x', '1'))
+        ledger.record_branch(source['id'], 'numeric detour was not the goal')
+        resumed = ledger.record(core.factor_quadratic(
+            source['result'], 'x'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        ledger.save()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'show', '--format', 'md', '--session', path])
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn('Selected final result `r1` from `s4`', rendered)
+        self.assertIn('<details>', rendered)
+        self.assertIn('numeric detour was not the goal', rendered)
+        self.assertIn('**s2**', rendered)
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
     def test_rewrite_at_flows_through_agent_and_replay(self):
         session = agent_do.DoSession()
         record = tactic_registry.invoke_agent(

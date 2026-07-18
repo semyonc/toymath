@@ -109,7 +109,10 @@ The ledger provides:
 - accumulated assumptions;
 - comments that are visible but never usable as provenance;
 - structured exploration markers that name an earlier transforming step and
-  explain why the agent resumed there, while carrying no result or provenance;
+  explain why the agent resumed there, plus a presentation-only edge to the
+  next transforming step in the same goal;
+- replay-validated final-result selections, stored separately from steps so
+  selecting an earlier result remains visible after a session is reopened;
 - claims with open, established, or conditional verdicts;
 - replay that re-invokes the registered primitive and compares the result;
 - source validation for tactics that consume earlier ledger results.
@@ -121,10 +124,23 @@ relation.
 
 An exploration marker is recorded through `comment(text, from_step=...)` in
 `do!` or the explicit CLI `branch FROM_STEP REASON` control. Replay validates
-that its source is an earlier transforming step in the same goal and that the
-marker was not altered. It remains comment-grade annotation: it cannot close a
-claim, supply a result, or become assembly provenance. The ledger stays
-append-only; checked work on an abandoned path is never deleted.
+that its source is an earlier transforming step in the same goal. The next
+transforming step for that goal must consume the source result; that step
+persists a hash-checked marker/source edge, derived from ledger order rather
+than a hidden mutable cursor. A marker at the end of a partial session remains
+valid but visibly awaits its continuation. Legacy marker files without the
+target half derive the same edge deterministically during replay.
+
+`set_result` appends a separate selection record containing the chosen value
+and its already-validated step or claim provenance. The selection is
+presentation metadata, not a transforming step. A concluded claim or the
+latest selection determines the displayed spine. Markdown and notebook output
+collapse each marker-classified off-spine route behind its source and reason,
+while retaining every checked step in an expandable body; assumptions from a
+dead route do not condition the selected final result. Exploration topology
+remains comment-grade annotation and is deliberately distinct from future
+assumption-bearing mathematical case splits. The ledger stays append-only:
+checked work on an abandoned path is never deleted.
 
 ### Provenance-aware composition
 
