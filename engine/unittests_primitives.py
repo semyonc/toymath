@@ -1631,6 +1631,30 @@ class TestGoalAwareLedger(unittest.TestCase):
         self.assertEqual(again['id'], first['id'])
         self.assertEqual(len(ledger.claims), 1)
 
+    def test_concluded_claim_is_refocused_and_strengthened(self):
+        # A repeated statement must focus the SAME claim even after a
+        # conclusion: a duplicate id would strand every later step under a
+        # goal that can never close the original claim (live 64-turn
+        # livelock). A repeated conclude then replaces the closing chain.
+        ledger = Ledger()
+        claim = ledger.record_claim(self.CLAIM)
+        first = ledger.record(Limits.limit_lhopital(
+            r'\lim_{x \to 0} \frac{e^x-1}{x}'), goal=claim['id'])
+        second = ledger.record(Limits.limit_substitute(first['result']),
+                               goal=claim['id'])
+        ledger.conclude(claim['id'], [first['id'], second['id']])
+        again = ledger.record_claim(self.CLAIM)
+        self.assertEqual(again['id'], claim['id'])
+        self.assertEqual(len(ledger.claims), 1)
+        third = ledger.record(Limits.limit_lhopital(
+            r'\lim_{x \to 0} \frac{e^x-1}{x}'), goal=claim['id'])
+        fourth = ledger.record(Limits.limit_substitute(third['result']),
+                               goal=claim['id'])
+        closed = ledger.conclude(claim['id'], [third['id'], fourth['id']])
+        self.assertEqual(closed['conclusion']['steps'],
+                         [third['id'], fourth['id']])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
     def test_goal_ownership_and_connectivity_are_enforced(self):
         ledger = Ledger()
         claim = ledger.record_claim(r'\lim_{x \to 0} x = 0')

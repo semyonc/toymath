@@ -747,6 +747,52 @@ class TestScriptedAgent(unittest.TestCase):
         rep = ledger.replay()
         self.assertEqual(rep['status'], 'verified', rep.get('reason'))
 
+    def test_prove_mode_reclaim_refocuses_root_and_statement_sets_result(
+            self):
+        # The live n/2^n trap: after a first conditional closure the agent
+        # re-stated the root claim (minting c2, which stole the goal focus
+        # of every later step, so conclude(c1) could never succeed again)
+        # and then passed the claim STATEMENT to set_result (refused; the
+        # selection wants the endpoint). Both moves must now work: the
+        # re-claim focuses c1, a repeated conclude replaces the chain, and
+        # the statement maps to the concluded endpoint.
+        goal = r'\lim_{n \to \infty} \frac{n}{2^n} = 0'
+        start = r'\lim_{n \to \infty} \frac{n}{2^n}'
+        transformed = (r'\lim_{n \to \infty} \frac{1}'
+                       r'{({2}^n) \ln\left (2 \right )}')
+        script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
+            [tool_call('limit_lhopital', {'expr': start}, 'c1')],
+            [tool_call('limit_table', {'expr': transformed}, 'c2')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s1', 's2']}, 'c3')],
+            # the agent re-states the claim hunting for a better chain
+            [tool_call('claim', {'statement': goal}, 'c4')],
+            [tool_call('limit_lhopital', {'expr': start}, 'c5')],
+            [tool_call('limit_table', {'expr': transformed}, 'c6')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s3', 's4']}, 'c7')],
+            [tool_call('set_result', {'expr': goal}, 'c8')],
+            [message('Mechanically checked via l\'Hopital.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('prove the limit', ledger=ledger,
+                              model=ScriptedModel(script), proof_goal=goal)
+        self.assertTrue(res['ok'], res.get('error'))
+        # the re-claim reused c1: one claim, and the late steps kept its goal
+        self.assertEqual(len(res['claims']), 1)
+        self.assertEqual([s.get('goal') for s in res['steps']
+                          if s.get('result') is not None],
+                         ['c1', 'c1', 'c1', 'c1'])
+        self.assertEqual(res['claims'][0]['verdict'], 'conditional')
+        self.assertEqual(res['claims'][0]['conclusion']['steps'],
+                         ['s3', 's4'])
+        # the statement spelling designated the concluded endpoint
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(res['final_provenance']['source'], 'claim')
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
+
     def test_prove_mode_leaves_failed_target_open(self):
         script = [
             [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],

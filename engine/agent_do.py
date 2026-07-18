@@ -138,6 +138,10 @@ a proof: when the checked chain reaches the claim, call `conclude` with
 `set_result`.
 If no available tactic closes the claim, leave it OPEN and give only a short
 description of the missing move. Never bridge the gap with prose.
+Re-stating the statement with `claim` re-focuses `ROOT_CLAIM` (it never
+mints a duplicate), and a repeated `conclude` may replace the closing chain
+with a better one (e.g. fewer assumptions). `set_result` takes the
+concluded endpoint, or the claim statement itself which maps to it.
 """
 
 _FALLBACK_SKILL = """# ToyMath verified derivations
@@ -273,6 +277,32 @@ class DoSession(object):
             if self.on_step is not None:
                 self.on_step(step)
         return step
+
+    def root_statement_endpoint(self, expr):
+        """Map a retyped root-claim statement to its concluded endpoint.
+
+        Agents naturally restate the proved claim when designating the
+        final result; the selection machinery records endpoint values, so
+        accept the statement spelling and answer with the endpoint its
+        conclusion closes to. Returns None when the run has no concluded
+        root claim or ``expr`` is not that claim's statement."""
+        if self.proof_claim_id is None:
+            return None
+        claim = self.ledger.get_claim(self.proof_claim_id)
+        if claim is None or claim.get('verdict') == 'open':
+            return None
+        endpoint = (claim.get('conclusion') or {}).get('endpoint')
+        if not endpoint:
+            return None
+        statement = claim.get('statement') or ''
+        if expr == statement:
+            return endpoint
+        try:
+            if primitives.same_expression(statement, expr):
+                return endpoint
+        except Exception:
+            pass
+        return None
 
     def designate_result(self, expr):
         """Select a chainable value without letting the agent invent a
@@ -441,6 +471,9 @@ def make_api(session):
         except primitives.PrimitiveError as exc:
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': str(exc)}, ensure_ascii=False)
+        mapped = session.root_statement_endpoint(expr)
+        if mapped is not None:
+            expr = mapped
         provenance = session.designate_result(expr)
         if provenance is None:
             if session.proof_claim_id is not None:
@@ -449,8 +482,11 @@ def make_api(session):
                     error = ('root claim is still open; call conclude with '
                              'a mechanically checked closing chain first')
                 else:
+                    endpoint = ((root.get('conclusion') or {})
+                                .get('endpoint'))
                     error = ('value is not the endpoint of the concluded '
-                             f'root claim {session.proof_claim_id}')
+                             f'root claim {session.proof_claim_id}; call '
+                             f'set_result with its endpoint {endpoint!r}')
             else:
                 error = ('value is not mechanically equivalent to any '
                          'result in the shared ledger; use a tactic to '

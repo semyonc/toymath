@@ -247,11 +247,14 @@ class Ledger(object):
             raise ValueError('claim must be a top-level relation')
         if parent is not None and self.get_claim(parent) is None:
             raise ValueError(f'unknown parent claim {parent!r}')
-        # Repeating a formatting variant of the same open claim should focus
+        # Repeating a formatting variant of the same claim should focus
         # the existing goal, not mint another notebook-global claim id.
+        # Concluded claims are deliberately reused too: the statement is
+        # the same proposition, so a repeated conclude may strengthen its
+        # closing chain — a duplicate id would strand every later step
+        # under a goal that can never close the original claim.
         for claim in self.claims:
-            if (claim.get('parent') == parent
-                    and claim.get('verdict') == 'open'):
+            if claim.get('parent') == parent:
                 try:
                     same = (claim.get('statement') == statement
                             or primitives.same_expression(
@@ -431,7 +434,10 @@ class Ledger(object):
             if step.get('goal') != claim_id:
                 raise ValueError(
                     f'{step_id} belongs to goal {step.get("goal")!r}, '
-                    f'not {claim_id}')
+                    f'not {claim_id}; only steps recorded while '
+                    f'{claim_id} is the focused goal can close it — '
+                    f're-state the claim to focus it, then re-run the '
+                    f'closing tactics')
             status = step.get('check', {}).get('status')
             if status not in ('agree', 'exact'):
                 raise ValueError(

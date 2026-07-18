@@ -122,6 +122,12 @@ source graph closes the claim. A relation-valued endpoint must itself be
 mechanically true; an equivalent no-op rewrite cannot establish an arbitrary
 relation.
 
+Re-recording a claim whose statement matches an existing same-parent claim —
+open or concluded — focuses that claim instead of minting a duplicate id, and
+a repeated `conclude` replaces the closing chain (for example with one that
+carries fewer assumptions). In prove mode, `set_result` also accepts the root
+claim's statement and records the concluded endpoint it closes to.
+
 An exploration marker is recorded through `comment(text, from_step=...)` in
 `do!` or the explicit CLI `branch FROM_STEP REASON` control. Replay validates
 that its source is an earlier transforming step in the same goal. The next
