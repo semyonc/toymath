@@ -116,7 +116,10 @@ class TestPromptBuilder(unittest.TestCase):
         p = agent_do.build_prompt()
         self.assertIn('exact step id as from_step', p)
         self.assertIn('source result verbatim to the\n  next tactic', p)
-        self.assertIn('never mathematical case data\n  or provenance', p)
+        self.assertIn('never mathematical case data', p)
+        # the abandon-the-step-itself form (root-anchor gap) is steered too
+        self.assertIn('abandon a recorded step ITSELF', p)
+        self.assertIn("from that step's recorded input", p)
 
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
@@ -2119,6 +2122,48 @@ class TestDirectCommands(unittest.TestCase):
         r(sym)
         self.assertEqual(len(r.direct_records), 1)
         self.assertIn('assumptions', r.direct_records[0])
+
+
+class TestUnknownToolSteering(unittest.TestCase):
+    def test_hallucinated_tool_names_steer_instead_of_killing_the_run(self):
+        # live probe: a strong model called the TACTIC name integrate_table
+        # as a raw tool and the SDK's ModelBehaviorError aborted a run that
+        # already held three green steps. Unknown tool calls must return to
+        # the model as one-turn steering; a tactic-shaped name must point
+        # at run_tactic and the owning skill.
+        captured = []
+
+        class RecordingModel(ScriptedModel):
+            async def get_response(self, system_instructions, input,
+                                   *args, **kwargs):
+                captured.append(input)
+                return await super().get_response(
+                    system_instructions, input, *args, **kwargs)
+
+        script = [
+            [ResponseFunctionToolCall(
+                type='function_call', name='integrate_table',
+                arguments=json.dumps({'expr': 'x', 'var': 'x'}),
+                call_id='b1', id='b1')],
+            [ResponseFunctionToolCall(
+                type='function_call', name='frobnicate',
+                arguments='{}', call_id='b2', id='b2')],
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c3')],
+            [message('recovered')],
+        ]
+        res = run_instruction('misname some tools',
+                              model=RecordingModel(script))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res.get('error'))
+        self.assertEqual([s['op'] for s in res['steps']], ['expand'])
+
+        second = json.dumps(captured[1], default=str)
+        self.assertIn('is a tactic, not a tool', second)
+        self.assertIn('run_tactic', second)
+        self.assertIn('integration', second)
+        third = json.dumps(captured[2], default=str)
+        self.assertIn('does not exist', third)
+        self.assertIn('load_skill, run_tactic, comment', third)
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',

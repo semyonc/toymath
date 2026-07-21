@@ -277,7 +277,9 @@ class MathShell(object):
                     'style="color:#888;font-size:85%">resumed from '
                     f'{_html.escape(edge.get("from", "?"))} via '
                     f'{_html.escape(edge.get("marker", "?"))}</div>')
-            elif step.get('continues') is False:
+            elif step.get('continues') is False and not (
+                    topology and (topology.get('parents')
+                                  or {}).get(step['id'])):
                 lineage = ('<div class="tex2jax_ignore" '
                            'style="color:#888;font-size:85%">'
                            'new chain; no marker</div>')

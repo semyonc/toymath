@@ -2445,6 +2445,103 @@ class TestLedgerBranchMarker(unittest.TestCase):
         self.assertIn('Selected final result `r1` from `s4`', md)
         self.assertEqual(ledger.replay()['status'], 'verified')
 
+    def test_integrand_convention_links_chain_spine_and_renderers(self):
+        # live probe (substitution workflow): integrate_table consumes the
+        # INTEGRAND of the previous \int result — the accepted chaining
+        # convention must be linkage-visible, or a linear derivation loses
+        # its first step from the spine and any upstream assumptions drop
+        # from the final conditions
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        s2 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s3 = ledger.record(Core.substitute(s2['result'], 'u', 'x^2'))
+        self.assertTrue(s2['continues'])
+        self.assertTrue(s3['continues'])
+        ledger.record_selection(s3['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': s3['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['spine'], [s1['id'], s2['id'], s3['id']])
+        self.assertEqual(topology['unclassified_off_spine'], [])
+        self.assertEqual(topology['parents'][s2['id']], s1['id'])
+        self.assertNotIn('new chain', ledger.render_markdown())
+        self.assertNotIn('(branch)', ledger.render())
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_presession_discontinuity_hint_relinks_at_render_time(self):
+        # sessions recorded before the convention was linkage-visible
+        # persist continues=False on honest integrand chains; topology and
+        # the end-of-run renderers re-derive the link while the persisted
+        # hint stays untouched
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        s2 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s2['continues'] = False
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['parents'][s2['id']], s1['id'])
+        self.assertNotIn('new chain', ledger.render_markdown())
+        self.assertFalse(ledger.steps[1]['continues'])
+
+    def test_branch_resume_accepts_operator_body_input(self):
+        # gen45 live refusal class: resuming from an \int-result step with
+        # an integrand-consuming tactic was structurally impossible — the
+        # gate demanded the wrapped result verbatim while the tactic's
+        # interface takes the integrand
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        ledger.record(Integration.integrate_by_parts(
+            '\\cos(u)', 'u', '\\cos(u)', '1'))
+        marker = ledger.record_branch(
+            s1['id'], 'by parts makes the remainder harder')
+        resumed = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+        self.assertEqual(resumed['exploration']['from'], s1['id'])
+        # result-anchored edges stay byte-identical with older sessions
+        self.assertNotIn('anchor', resumed['exploration'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_branch_resume_from_source_input_abandons_the_step_itself(self):
+        # live probe (root-anchor gap): the FIRST checked move was the
+        # dead end; with only a result-anchored resume available, a strong
+        # model manufactured a skipped no-op step to satisfy the gate and
+        # the dead route stayed unclassified. The source step's recorded
+        # INPUT is now a legitimate resume anchor meaning "abandon that
+        # step itself".
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_by_parts(
+            '2x\\cos(x^2)', 'x', '\\cos(x^2)', '2x'))
+        marker = ledger.record_branch(
+            s1['id'], 'by parts raises the degree; restart from the input')
+        resumed = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        self.assertEqual(resumed['exploration']['from'], s1['id'])
+        self.assertEqual(resumed['exploration']['anchor'], 'input')
+        s4 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s5 = ledger.record(Core.substitute(s4['result'], 'u', 'x^2'))
+        ledger.record_selection(s5['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': s5['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['spine'],
+                         [resumed['id'], s4['id'], s5['id']])
+        self.assertIsNone(topology['parents'][resumed['id']])
+        self.assertEqual(topology['abandoned_paths'], [{
+            'marker': marker['id'], 'source': s1['id'],
+            'continues_at': resumed['id'],
+            'reason': 'by parts raises the degree; restart from the input',
+            'steps': [s1['id']],
+            'anchor': 'input',
+        }])
+        self.assertEqual(topology['unclassified_off_spine'], [])
+        md = ledger.render_markdown()
+        self.assertIn('Abandoned path from <code>s1</code>', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
     def test_branch_target_must_resume_source_and_markers_do_not_stack(self):
         ledger = Ledger()
         source = ledger.record(Core.expand('(x+1)^2'))

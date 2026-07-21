@@ -131,9 +131,17 @@ claim's statement and records the concluded endpoint it closes to.
 An exploration marker is recorded through `comment(text, from_step=...)` in
 `do!` or the explicit CLI `branch FROM_STEP REASON` control. Replay validates
 that its source is an earlier transforming step in the same goal. The next
-transforming step for that goal must consume the source result; that step
+transforming step for that goal must consume the source result — modulo the
+wrapper/body convention the primitives already accept in goal gating, so an
+integrand-consuming tactic can resume an `\int`-shaped result — or, to
+abandon the source step itself (for example when the very first checked move
+was the wrong route), it may restart from that step's recorded input; the
+persisted edge then carries an explicit `input` anchor and presentation
+classifies the source step with its own dead route. Either way the step
 persists a hash-checked marker/source edge, derived from ledger order rather
-than a hidden mutable cursor. A marker at the end of a partial session remains
+than a hidden mutable cursor. Step-to-step chain continuity uses the same
+structural convention, so a linear substitution workflow presents as one
+spine. A marker at the end of a partial session remains
 valid but visibly awaits its continuation. Legacy marker files without the
 target half derive the same edge deterministically during replay.
 

@@ -83,8 +83,11 @@ _DO_RULES = """
 - Use comment only for short strategy annotations in plain text. When
   abandoning a recorded path and resuming from an earlier result, pass that
   exact step id as from_step, then feed that source result verbatim to the
-  next tactic. This records an exploration edge, never mathematical case data
-  or provenance. Do not put scratch work in notes.
+  next tactic. To abandon a recorded step ITSELF (e.g. the very first move
+  went the wrong way), pass that step id as from_step and restart the next
+  tactic from that step's recorded input. This records an exploration edge,
+  never mathematical case data or provenance. Do not put scratch work in
+  notes.
 """
 
 _PLOT_RULES = """
@@ -413,7 +416,8 @@ def make_api(session):
             text: one or two short plain-text sentences; no scratch work.
             from_step: earlier transforming step id to resume from, or empty
                 for an ordinary note. The next tactic must consume that
-                source result; this never supplies mathematical provenance.
+                source result — or, to abandon that step itself, its
+                recorded input; this never supplies mathematical provenance.
         """
         try:
             step = session.comment(text, from_step=from_step or None)
@@ -623,7 +627,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     thread with its own asyncio loop, so this is safe to call from the
     Jupyter kernel's event-loop thread.
     """
-    from agents import Agent, Runner
+    from agents import Agent, Runner, RunConfig
     from agents.exceptions import MaxTurnsExceeded
     # Set up tracing before the model is built: build_model consults
     # observability.active() to decide whether to leave Agents-SDK tracing on.
@@ -652,6 +656,25 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                                       if root_claim is not None else 'c1')),
                   tools=make_tools(session),
                   model=model if model is not None else build_model())
+    def _tool_error_message(fargs):
+        # A model naming a TACTIC as a tool must be steered back to
+        # run_tactic in one turn, never abort the whole derivation
+        # (live: a hallucinated `integrate_table` call killed a run
+        # with three green steps).
+        if getattr(fargs, 'kind', None) != 'tool_not_found':
+            return fargs.default_message
+        spec = tactic_registry.BY_NAME.get(fargs.tool_name)
+        if spec is not None:
+            return (f"'{fargs.tool_name}' is a tactic, not a tool. Call "
+                    f"run_tactic with tactic='{fargs.tool_name}' and its "
+                    f"ordered string arguments (load_skill "
+                    f"'{spec.skill}' first if that skill is not loaded).")
+        return (f"Tool '{fargs.tool_name}' does not exist. Use only the "
+                "fixed tools: load_skill, run_tactic, comment, claim, "
+                "conclude, set_result.")
+
+    run_config = RunConfig(tool_not_found_behavior='return_error_to_model',
+                           tool_error_formatter=_tool_error_message)
     holder = {}
     trace_meta = {
         'mode': 'prove' if proof_goal is not None else 'do',
@@ -669,7 +692,8 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             with observability.trace_run(instruction,
                                          metadata=trace_meta) as span:
                 res = asyncio.run(
-                    Runner.run(agent, instruction, max_turns=max_turns))
+                    Runner.run(agent, instruction, max_turns=max_turns,
+                               run_config=run_config))
                 observability.set_output(
                     span, str(res.final_output or '').strip() or None)
                 holder['res'] = res

@@ -110,6 +110,24 @@ def _same_expression(left, right):
         return False
 
 
+def _chain_links(prev_result, cur_input):
+    """Structural step-chaining linkage (wrapper/body tolerant).
+
+    A step continues an earlier result when its input restates it modulo
+    grouping, or when either expression is the big-operator wrapper whose
+    body is the other — the integrand/body convention the primitives
+    already accept in goal gating: `integrate_table` legitimately consumes
+    the integrand of the previous `\\int` result. Structural only; value
+    equality stays too permissive for a topological claim.
+    """
+    import primitives
+    try:
+        return (primitives.covers_goal(cur_input, prev_result)
+                or primitives.covers_goal(prev_result, cur_input))
+    except Exception:
+        return False
+
+
 def _relation_parts(statement):
     """Return (lhs, rhs, relation) for a parsed relation, else None.
     Parses with allow_ellipsis: this only splits a statement into sides
@@ -213,10 +231,9 @@ class Ledger(object):
     def _pending_branch(self, goal):
         return self._pending_branch_in(self.steps, goal)
 
-    @staticmethod
-    def _branch_edge(marker, target):
+    def _branch_edge(self, marker, target):
         args = marker.get('args') or {}
-        return {
+        edge = {
             'marker': marker.get('id'),
             'from': args.get('from'),
             'reason': args.get('reason'),
@@ -224,6 +241,19 @@ class Ledger(object):
                 marker.get('id'), args.get('from'), target.get('id'),
                 args.get('reason')),
         }
+        # Result-anchored resumes stay byte-identical with older sessions.
+        # Only the abandon-the-source-itself form (the target restarts from
+        # the source step's recorded INPUT) marks its anchor; the result
+        # anchor wins when both match, so replay re-derives deterministically.
+        source = next((s for s in self.steps
+                       if s.get('id') == args.get('from')), None)
+        if (source is not None
+                and not _chain_links(source.get('result'),
+                                     target.get('input'))
+                and _chain_links(source.get('input'),
+                                 target.get('input'))):
+            edge['anchor'] = 'input'
+        return edge
 
     def get_claim(self, claim_id):
         return next((c for c in self.claims if c['id'] == claim_id), None)
@@ -287,17 +317,21 @@ class Ledger(object):
             source = next((s for s in self.steps
                            if s.get('id') == source_id), None)
             if (source is None
-                    or not _same_expression(source.get('result'),
-                                            result.get('input'))):
+                    or not (_chain_links(source.get('result'),
+                                         result.get('input'))
+                            or _chain_links(source.get('input'),
+                                            result.get('input')))):
                 raise ValueError(
                     f'{result.get("op", "step")} input does not resume '
                     f'branch marker {pending_branch["id"]} from '
-                    f'{source_id}; use that source result verbatim')
+                    f'{source_id}; consume that source result (or its '
+                    f'operator body) verbatim, or — to abandon that step '
+                    f'itself — restart from its recorded input')
         continues = None
         prev = self.last_result()
         cur = result.get('input')
         if prev is not None and cur is not None:
-            if prev == cur:
+            if prev == cur or _chain_links(prev, cur):
                 continues = True
             else:
                 eq = core_tactics.equal_exprs(prev, cur)
@@ -662,9 +696,12 @@ class Ledger(object):
                 for pending_branch in pending_branches:
                     source_id = pending_branch['args']['from']
                     source = seen.get(source_id)
+                    # mirror of record()'s resume gate: identical comparator
                     if (source is None
-                            or not _same_expression(source.get('result'),
-                                                    step.get('input'))):
+                            or not (_chain_links(source.get('result'),
+                                                 step.get('input'))
+                                    or _chain_links(source.get('input'),
+                                                    step.get('input')))):
                         return {
                             'status': 'failed', 'step': step.get('id', '?'),
                             'reason': (f'branch edge invalid: '
@@ -784,7 +821,7 @@ class Ledger(object):
                                and step.get('op') in TRANSFORMING_OPS
                                and step.get('result') is not None)), None)
             args = marker.get('args') or {}
-            edges.append({
+            edge = {
                 'marker': marker.get('id'),
                 'from': args.get('from'),
                 'to': target.get('id') if target is not None else None,
@@ -793,7 +830,11 @@ class Ledger(object):
                 'kind': 'exploration',
                 'authority': 'annotation',
                 'persisted': bool(target and target.get('exploration')),
-            })
+            }
+            if (target is not None and (target.get('exploration')
+                                        or {}).get('anchor') == 'input'):
+                edge['anchor'] = 'input'
+            edges.append(edge)
         return edges
 
     def presentation_topology(self, final_provenance=None, marker_ids=None):
@@ -814,11 +855,21 @@ class Ledger(object):
         parents = {}
         for step in transforms:
             edge = edge_by_target.get(step['id'])
-            if edge is not None:
+            if edge is not None and edge.get('anchor') == 'input':
+                # the target restarts from the state BEFORE the source
+                # step, so it inherits the source's parent (the source
+                # itself is the abandoned route)
+                parents[step['id']] = parents.get(edge['from'])
+            elif edge is not None:
                 parents[step['id']] = edge['from']
-            elif step.get('continues') is True:
-                parents[step['id']] = (previous_transform.get('id')
-                                       if previous_transform else None)
+            elif previous_transform is not None and (
+                    step.get('continues') is True
+                    # sessions recorded before the chaining convention was
+                    # linkage-visible persist continues=False/None on honest
+                    # body-convention chains; re-derive structurally
+                    or _chain_links(previous_transform.get('result'),
+                                    step.get('input'))):
+                parents[step['id']] = previous_transform.get('id')
             else:
                 parents[step['id']] = None
             previous_transform = step
@@ -895,9 +946,13 @@ class Ledger(object):
             source_id = edge.get('from')
             if not spine or source_id not in order or marker_id not in order:
                 continue
+            # an input-anchored resume abandons the source step itself,
+            # so the source joins its own dead route
+            first = (order[source_id] if edge.get('anchor') == 'input'
+                     else order[source_id] + 1)
             candidates = [
                 step['id'] for step in transforms
-                if (order[source_id] < order[step['id']] < order[marker_id]
+                if (first <= order[step['id']] < order[marker_id]
                     and step.get('goal') == edge.get('goal')
                     and step['id'] not in spine
                     and step['id'] not in assigned
@@ -905,13 +960,16 @@ class Ledger(object):
             if not candidates:
                 continue
             assigned.update(candidates)
-            abandoned.append({
+            path = {
                 'marker': marker_id,
                 'source': source_id,
                 'continues_at': edge.get('to'),
                 'reason': edge.get('reason'),
                 'steps': candidates,
-            })
+            }
+            if edge.get('anchor') == 'input':
+                path['anchor'] = 'input'
+            abandoned.append(path)
 
         off_spine = [s['id'] for s in transforms if s['id'] not in spine]
         unclassified = [sid for sid in off_spine if sid not in assigned]
@@ -926,6 +984,7 @@ class Ledger(object):
             'edges': edges,
             'spine': spine_ids,
             'spine_assumptions': spine_assumptions,
+            'parents': parents,
             'abandoned_paths': abandoned,
             'unclassified_off_spine': unclassified,
             'unresolved_markers': [e['marker'] for e in edges
@@ -1006,7 +1065,9 @@ class Ledger(object):
                 branch = (f' *(resumes from `{edge["from"]}` via '
                           f'`{edge["marker"]}`)*')
             else:
-                branch = ('' if step.get('continues') in (True, None)
+                linked = (step.get('continues') in (True, None)
+                          or topology['parents'].get(step['id']))
+                branch = ('' if linked
                           else ' *(new chain; no exploration edge)*')
             arg_note = ''
             if step['op'] == 'apply_both_sides':
@@ -1107,7 +1168,9 @@ class Ledger(object):
             check = step['check'].get('status', '?')
             mark = {'agree': 'ok', 'exact': 'ok', 'skipped': '??',
                     'disagree': 'XX', 'domain-differs': 'D!'}.get(check, '?')
-            branch = '' if step.get('continues') in (True, None) else ' (branch)'
+            linked = (step.get('continues') in (True, None)
+                      or topology['parents'].get(step['id']))
+            branch = '' if linked else ' (branch)'
             goal = f" -> {step['goal']}" if step.get('goal') else ''
             lines.append(f"{step['id']}#{step['hash']} [{mark}]{branch}{goal} "
                          f"{step['op']}: {step['input']}  ==>  "
