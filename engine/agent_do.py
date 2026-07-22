@@ -22,6 +22,7 @@ import observability
 import primitives
 import tactic_registry
 import tactic_skills
+from model_config import DEFAULT_MODEL, MODEL_VAR
 from tactics import core as core_tactics
 from ledger import Ledger, TRANSFORMING_OPS
 
@@ -33,8 +34,6 @@ except ImportError:  # pragma: no cover - dotenv ships with the kernel env
 
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
-MODEL_VAR = 'OPENROUTER_MODEL'
-DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
 DEFAULT_MAX_TURNS = 64
 
 _SKILL_PATH = os.path.join(
@@ -593,7 +592,7 @@ def make_tools(session):
 # runner
 # ---------------------------------------------------------------------------
 
-def build_model():
+def build_model(model_name=None):
     """OpenRouter-backed chat-completions model for the Agents SDK."""
     key = os.environ.get(API_KEY_VAR)
     if not key:
@@ -608,13 +607,14 @@ def build_model():
     set_tracing_disabled(not observability.active())
     client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
     return OpenAIChatCompletionsModel(
-        model=os.environ.get(MODEL_VAR, DEFAULT_MODEL),
+        model=model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL),
         openai_client=client)
 
 
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
-                    plot_backend=None, proof_goal=None, tikz_backend=None):
+                    plot_backend=None, proof_goal=None, tikz_backend=None,
+                    model_name=None, providers=()):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
@@ -627,7 +627,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     thread with its own asyncio loop, so this is safe to call from the
     Jupyter kernel's event-loop thread.
     """
-    from agents import Agent, Runner, RunConfig
+    from agents import Agent, ModelSettings, Runner, RunConfig
     from agents.exceptions import MaxTurnsExceeded
     # Set up tracing before the model is built: build_model consults
     # observability.active() to decide whether to leave Agents-SDK tracing on.
@@ -655,7 +655,8 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                       proof_claim_id=(root_claim['id']
                                       if root_claim is not None else 'c1')),
                   tools=make_tools(session),
-                  model=model if model is not None else build_model())
+                  model=(model if model is not None
+                         else build_model(model_name=model_name)))
     def _tool_error_message(fargs):
         # A model naming a TACTIC as a tool must be steered back to
         # run_tactic in one turn, never abort the whole derivation
@@ -673,13 +674,24 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                 "fixed tools: load_skill, run_tactic, comment, claim, "
                 "conclude, set_result.")
 
+    provider_order = tuple(providers or ())
+    model_settings = None
+    if provider_order:
+        model_settings = ModelSettings(extra_body={
+            'provider': {
+                'order': list(provider_order),
+                'allow_fallbacks': False,
+            },
+        })
     run_config = RunConfig(tool_not_found_behavior='return_error_to_model',
-                           tool_error_formatter=_tool_error_message)
+                           tool_error_formatter=_tool_error_message,
+                           model_settings=model_settings)
     holder = {}
     trace_meta = {
         'mode': 'prove' if proof_goal is not None else 'do',
-        'model': (os.environ.get(MODEL_VAR, DEFAULT_MODEL)
+        'model': (model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL)
                   if model is None else type(model).__name__),
+        'providers': list(provider_order),
         'max_turns': max_turns,
     }
 

@@ -908,6 +908,34 @@ class TestObservability(unittest.TestCase):
                 agent_do.build_model()
             self.assertEqual(calls, [expected_disabled], is_active)
 
+    def test_build_model_accepts_notebook_override(self):
+        with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
+             mock.patch.object(observability, 'active', return_value=False):
+            built = agent_do.build_model('z-ai/glm-5.2')
+        self.assertEqual(built.model, 'z-ai/glm-5.2')
+
+    def test_provider_order_reaches_model_settings_extra_body(self):
+        settings = []
+
+        class RecordingModel(ScriptedModel):
+            async def get_response(self, system_instructions, input,
+                                   model_settings, *args, **kwargs):
+                settings.append(model_settings)
+                return await super().get_response(
+                    system_instructions, input, model_settings,
+                    *args, **kwargs)
+
+        res = run_instruction(
+            'say hello', model=RecordingModel([[message('hello')]]),
+            providers=('Cerebras', 'Fireworks'))
+        self.assertTrue(res['ok'])
+        self.assertEqual(settings[0].extra_body, {
+            'provider': {
+                'order': ['Cerebras', 'Fireworks'],
+                'allow_fallbacks': False,
+            },
+        })
+
     def test_active_run_emits_one_nested_langfuse_trace(self):
         from agents import set_tracing_disabled
         from openinference.instrumentation.openai_agents import (
@@ -1305,7 +1333,8 @@ class TestMathShellDo(unittest.TestCase):
 
     def test_do_cell_streams_and_chains(self):
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(SOLVE_SCRIPT)):
+                               lambda model_name=None: ScriptedModel(
+                                   SOLVE_SCRIPT)):
             self.shell.exec('do! solve 2x + 3 = 7 for x', 2,
                             add_to_history=True)
         out = self._html()
@@ -1456,6 +1485,69 @@ class TestPromptCommandModel(unittest.TestCase):
         # recorded series_converges step, never in an expr splice
         self.assertFalse(reg['conv'].expr)
         self.assertIsNone(reg['conv'].direct)
+
+    def test_repo_model_endpoint_config(self):
+        import model_config
+        endpoints = model_config.load_model_config()
+        glm = model_config.find_model(endpoints, 'z-ai/glm-5.2')
+        self.assertIsNotNone(glm)
+        self.assertEqual(glm.providers, ('Cerebras', 'Fireworks'))
+
+    def test_model_endpoint_config_validation(self):
+        import model_config
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config('models: []')
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config(
+                'models:\n  - model: a\n    providers: Cerebras')
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config(
+                'models:\n  - model: a\n  - model: a')
+
+    def test_model_command_completion_replaces_only_current_token(self):
+        import model_config
+        endpoints = (
+            model_config.ModelEndpoint('alpha/one', ()),
+            model_config.ModelEndpoint('beta/two', ('Fast', 'Safe')),
+        )
+        code = 'model! be'
+        reply = model_config.complete_model_command(
+            code, len(code), endpoints=endpoints)
+        self.assertEqual(reply['matches'], ['alpha/one', 'beta/two'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'be')
+        self.assertEqual(
+            [item['type'] for item in
+             reply['metadata']['_jupyter_types_experimental']],
+            ['model', 'model'])
+
+    def test_provider_completion_uses_selected_model_and_skips_used(self):
+        import model_config
+        endpoints = (
+            model_config.ModelEndpoint('beta/two', ('Fast', 'Safe')),
+        )
+        code = 'model! beta/two, Fast, S'
+        reply = model_config.complete_model_command(
+            code, len(code), endpoints=endpoints)
+        self.assertEqual(reply['matches'], ['Safe'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'S')
+        self.assertEqual(
+            reply['metadata']['_jupyter_types_experimental'][0]['type'],
+            'provider')
+
+    def test_non_model_command_has_no_model_completions(self):
+        import model_config
+        self.assertIsNone(model_config.complete_model_command(
+            'solve! x = 2', len('solve! x = 2'), endpoints=()))
+
+    def test_kernel_do_complete_routes_to_model_configuration(self):
+        import asyncio
+        from toymathkernel import MathKernel
+        code = 'model! z-ai'
+        reply = asyncio.run(MathKernel.do_complete(None, code, len(code)))
+        self.assertIn('z-ai/glm-5.2', reply['matches'])
+        self.assertEqual(reply['status'], 'ok')
 
     def test_static_lexer_command_table_matches_committed_registries(self):
         import prompt_commands as pc
@@ -1629,10 +1721,56 @@ class TestPromptCommandDispatch(unittest.TestCase):
         out = self._html()
         self.assertIn('notebook commands', out)
         self.assertIn('int', out)
+        self.assertIn('model!', out)
+
+    def test_model_command_sets_configured_routing_for_later_runs(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('model! z-ai/glm-5.2', 1)
+            self.shell.exec('do! Hello', 2)
+        self.assertEqual(box['kwargs']['model_name'], 'z-ai/glm-5.2')
+        self.assertEqual(box['kwargs']['providers'],
+                         ('Cerebras', 'Fireworks'))
+        self.assertIn('fallbacks disabled', self._html())
+
+    def test_model_command_provider_arguments_override_config(self):
+        self.shell.exec('model! z-ai/glm-5.2, Fireworks, Cerebras, Fireworks',
+                        1)
+        self.assertEqual(self.shell.model_name, 'z-ai/glm-5.2')
+        self.assertEqual(self.shell.model_providers,
+                         ('Fireworks', 'Cerebras'))
+
+    def test_model_command_allows_unlisted_model(self):
+        self.shell.exec('model! vendor/custom-model', 1)
+        self.assertEqual(self.shell.model_name, 'vendor/custom-model')
+        self.assertEqual(self.shell.model_providers, ())
+        self.assertIn('default provider routing', self._html())
+
+    def test_model_command_without_arguments_guides_to_completion(self):
+        original = self.shell.model_name
+        self.shell.exec('model!', 1)
+        self.assertEqual(self.shell.model_name, original)
+        self.assertIn('press <kbd>Tab</kbd>', self._html())
+
+    def test_model_change_notifies_frontend_handler(self):
+        changes = []
+        self.shell.model_change_handler = (
+            lambda model, providers: changes.append((model, providers)))
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        self.assertEqual(changes, [
+            ('z-ai/glm-5.2', ('Cerebras', 'Fireworks')),
+        ])
+
+    def test_model_command_rejects_empty_provider(self):
+        original = self.shell.model_name
+        self.shell.exec('model! z-ai/glm-5.2,', 1)
+        self.assertEqual(self.shell.model_name, original)
+        self.assertIn('model! error', self._html())
 
     def test_command_steps_land_in_shared_ledger(self):
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(SOLVE_SCRIPT)):
+                               lambda model_name=None: ScriptedModel(
+                                   SOLVE_SCRIPT)):
             self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
         self.assertEqual(len(self.shell.ledger.steps), 2)
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
@@ -1806,6 +1944,20 @@ class TestExprComposite(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
 
+    def test_composite_agent_run_uses_notebook_model_routing(self):
+        calls = []
+
+        def fake(instruction, **kwargs):
+            calls.append(kwargs)
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
+
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^2', 2, add_to_history=True)
+        self.assertEqual(calls[0]['model_name'], 'z-ai/glm-5.2')
+        self.assertEqual(calls[0]['providers'],
+                         ('Cerebras', 'Fireworks'))
+
     def test_non_expr_command_in_composite_refused(self):
         # solve! is not expr; mixed into a composite it must be refused
         with mock.patch.object(agent_do, 'run_instruction',
@@ -1895,7 +2047,8 @@ class TestExprComposite(unittest.TestCase):
         # the original failing notebook cell, end to end through the shell
         # composite path with a scripted agent (offline)
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(list(LIM_SUM_SCRIPT))):
+                               lambda model_name=None: ScriptedModel(
+                                   list(LIM_SUM_SCRIPT))):
             self.shell.exec('lim! ' + LIM_SUM_EXPR, 1, add_to_history=True)
         html = self._html()
         self.assertNotIn('do! error', html)

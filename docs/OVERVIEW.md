@@ -93,6 +93,42 @@ not condition the selected final spine.
 open until `conclude` receives a connected, goal-owned checked chain. Prose
 cannot substitute for a missing step.
 
+### Selecting the notebook model
+
+`model!` changes the OpenRouter model for subsequent agent-backed cells in the
+current notebook kernel. It does not mutate `.env` or affect another running
+notebook:
+
+```text
+model! z-ai/glm-5.2
+model! z-ai/glm-5.2, Cerebras, Fireworks
+```
+
+Comma-separated provider names set OpenRouter's provider order and disable
+fallbacks. With only a model name, the optional provider order comes from
+`engine/models.yaml`; unlisted model names are also accepted and use
+OpenRouter's default routing. In JupyterLab, type `model! ` (including the
+trailing space) to open the native completion menu populated from that file.
+After a model and comma, the same menu offers its configured providers. The
+extension opens the menu automatically; <kbd>Tab</kbd> or
+<kbd>Ctrl</kbd>+<kbd>Space</kbd> invokes it manually. Running bare `model!`
+shows the current selection and this shortcut.
+
+The selected routing is used by `do!` and model-backed named/inline commands;
+direct primitive commands still make no model call. The notebook toolbar's
+kernel button shows `Toy Math · MODEL` and updates immediately when the
+selection changes. Model selection and its title are local to that notebook's
+kernel.
+
+The editable configuration shape is:
+
+```yaml
+models:
+  - model: anthropic/claude-sonnet-5
+  - model: z-ai/glm-5.2
+    providers: [Cerebras, Fireworks]
+```
+
 ## Notebook command tiers
 
 Saved notebook commands are Markdown templates in `commands/`:
@@ -181,8 +217,22 @@ registered rewrite command.
 uv venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-jupyter kernelspec install kernel_spec --user
+uv pip install --no-deps .
+jupyter kernelspec install kernel_spec --user --name toymath --replace
 jupyter lab
+```
+
+The project install places the prebuilt `@toymath/model-ui` extension in the
+active Jupyter environment; no Node.js build is needed by users. Restart a
+running JupyterLab server after installing or upgrading it. Extension
+developers can rebuild the committed frontend assets with:
+
+```bash
+cd jupyterlab-extension
+npm install
+npm run build
+cd ..
+uv pip install --reinstall --no-deps .
 ```
 
 Agent configuration is read from `.env`:
@@ -221,6 +271,10 @@ engine/tactic_registry.py  authoritative tactic schemas and dispatch
 engine/tactic_skills.py    progressive SKILL.md discovery/rendering
 engine/ledger.py           record, render, claim closure, and replay
 engine/agent_do.py         do! runtime and stable model tool surface
+engine/model_config.py     model! configuration loading and validation
+engine/models.yaml         selectable OpenRouter models/provider orders
+jupyterlab-extension/      TypeScript source for completion/title integration
+labextension/              committed prebuilt JupyterLab extension
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition
 engine/prompt_commands.py  commands/*.md discovery

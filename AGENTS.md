@@ -34,6 +34,8 @@ Two layers coexist:
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
 | `engine/agent_do.py` | `do!` Jupyter endpoint: small stable tool surface (`load_skill`, `run_tactic`, ledger controls) over the tactic registry |
+| `engine/model_config.py`, `engine/models.yaml` | Notebook-local `model!` selection and configured OpenRouter model/provider endpoints |
+| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup and notebook-local live model title; TypeScript source and committed prebuilt bundle |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
 | `engine/plot_sandbox.py` | Sandboxed figure backends for `do!`: Python under Pyodide/Deno (`pyodide_runner.mjs`), TeX under node-tikzjax (`tikz_runner.mjs`) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
@@ -125,7 +127,7 @@ than duplicating an exhaustive tactic manual. `python toymath_cli.py skills`,
 source .venv/bin/activate            # or PYTHONPATH=. to avoid import errors
 
 python console.py                    # console mode
-jupyter notebook                     # kernel mode (LaTeX kernel, registered by toymathkernel.py)
+jupyter notebook                     # kernel mode (install kernel_spec as name `toymath` first)
 python toymath_cli.py expand "(x+1)^2" --session s.json   # agent CLI
 
 uv pip install -r requirements.txt   # dependencies

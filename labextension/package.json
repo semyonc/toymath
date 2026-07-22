@@ -1,0 +1,50 @@
+{
+  "name": "@toymath/model-ui",
+  "version": "0.1.0",
+  "description": "Notebook-local ToyMath model title and completion integration",
+  "keywords": [
+    "jupyter",
+    "jupyterlab-extension",
+    "toymath"
+  ],
+  "homepage": "https://github.com/semyonc/toymath",
+  "bugs": {
+    "url": "https://github.com/semyonc/toymath/issues"
+  },
+  "license": "MIT",
+  "author": "Semyon C",
+  "files": [
+    "lib/**/*.{js,js.map,d.ts}",
+    "style/**/*.{css}"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "style": "style/index.css",
+  "scripts": {
+    "build:lib": "tsc",
+    "build:labextension": "build-labextension --core-path ../.venv/share/jupyter/lab/static . && node scripts/write-install.mjs",
+    "build": "npm run build:lib && npm run build:labextension",
+    "clean": "rimraf lib ../labextension"
+  },
+  "dependencies": {
+    "@jupyterlab/application": "^4.5.10",
+    "@jupyterlab/cells": "^4.5.10",
+    "@jupyterlab/notebook": "^4.5.10",
+    "@jupyterlab/services": "^7.5.10",
+    "@lumino/disposable": "^2.1.5"
+  },
+  "devDependencies": {
+    "@jupyterlab/builder": "^4.5.10",
+    "rimraf": "^6.0.1",
+    "typescript": "~5.9.2"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "../labextension",
+    "_build": {
+      "load": "static/remoteEntry.41932eb8ceb5c40c27ef.js",
+      "extension": "./extension",
+      "style": "./style"
+    }
+  }
+}

@@ -10,6 +10,7 @@ from LatexWriter import LaTexWriter
 from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
+import model_config
 import prompt_commands
 
 from IPython.display import HTML, Javascript
@@ -66,6 +67,11 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
+        # Agent routing is notebook-local: model! changes this shell without
+        # mutating process-wide environment variables or other kernels.
+        self.model_name = model_config.current_model()
+        self.model_providers = ()
+        self.model_change_handler = None
         # commands! reloads the discoverable prompt-command registry.
 
     def _command_names(self):
@@ -117,6 +123,9 @@ class MathShell(object):
         if name in ('commands', 'help'):
             self.show_commands()
             return True
+        if name == 'model':
+            self.exec_model(rest)
+            return True
         if name == 'do':
             # the free-form agent endpoint: rest is the instruction verbatim
             self.exec_do(rest, execution_count, add_to_history)
@@ -160,8 +169,62 @@ class MathShell(object):
             '(add <code>commands/&lt;name&gt;.md</code> files)</div>')
         display(HTML('<div><b>notebook commands</b>' + table
                      + '<div style="color:#888;margin-top:4px">plus '
-                     '<code>do!</code> (free-form instruction) and '
+                     '<code>do!</code> (free-form instruction), '
+                     '<code>model!</code> (agent model), and '
                      '<code>commands!</code> (this list)</div></div>'))
+
+    def _model_status_html(self):
+        providers = self.model_providers
+        if providers:
+            routing = ('providers <code>'
+                       + _html.escape(', '.join(providers))
+                       + '</code>; fallbacks disabled')
+        else:
+            routing = 'OpenRouter default provider routing'
+        return ('<div><strong>agent model:</strong> <code>'
+                + _html.escape(self.model_name) + '</code> &mdash; '
+                + routing + '</div>')
+
+    def _set_model(self, model, providers=()):
+        """Set notebook-local agent routing and render its effective value."""
+        self.model_name = model
+        self.model_providers = tuple(providers)
+        if self.model_change_handler is not None:
+            self.model_change_handler(model, self.model_providers)
+        display(HTML(self._model_status_html()))
+
+    def exec_model(self, arguments):
+        """Handle ``model! [MODEL[, PROVIDER...]]`` for this notebook."""
+        try:
+            endpoints = model_config.load_model_config()
+        except model_config.ModelConfigError as e:
+            display(HTML('<div style="color:#c00">model! error: '
+                         + _html.escape(str(e)) + '</div>'))
+            return
+
+        if arguments:
+            parts = [part.strip() for part in arguments.split(',')]
+            if not parts[0] or any(not part for part in parts[1:]):
+                display(HTML('<div style="color:#c00">model! error: use '
+                             '<code>model! MODEL[, PROVIDER...]</code>'
+                             '</div>'))
+                return
+            model = parts[0]
+            # Explicit providers override the configured provider order. A
+            # bare model name picks up its optional routing from models.yaml.
+            if len(parts) > 1:
+                providers = tuple(dict.fromkeys(parts[1:]))
+            else:
+                endpoint = model_config.find_model(endpoints, model)
+                providers = endpoint.providers if endpoint else ()
+            self._set_model(model, providers)
+            return
+
+        display(HTML(self._model_status_html()
+                     + '<div style="color:#666">Type '
+                     '<code>model! </code> and press <kbd>Tab</kbd> or '
+                     '<kbd>Ctrl</kbd>+<kbd>Space</kbd> to choose from '
+                     '<code>engine/models.yaml</code>.</div>'))
 
     def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False
@@ -477,7 +540,9 @@ class MathShell(object):
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
                                            on_plot=on_plot,
-                                           proof_goal=proof_goal)
+                                           proof_goal=proof_goal,
+                                           model_name=self.model_name,
+                                           providers=self.model_providers)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return
@@ -546,9 +611,14 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail a derivation step
 
+        def run_selected(instruction, **kwargs):
+            kwargs['model_name'] = self.model_name
+            kwargs['providers'] = self.model_providers
+            return agent_do.run_instruction(instruction, **kwargs)
+
         resolver = expr_commands.ExprResolver(
             notation, Notation(), self.commands, self.ledger, on_step,
-            agent_do.run_instruction)
+            run_selected)
         try:
             root = resolver(sym)
         except (expr_commands.ExprCommandError, agent_do.DoAgentError) as e:

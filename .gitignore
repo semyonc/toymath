@@ -15,3 +15,7 @@ CHECKPOINT.md
 ProjectMemory
 .claude/commands/
 *.pdf
+jupyterlab-extension/node_modules/
+jupyterlab-extension/lib/
+build/
+*.egg-info/

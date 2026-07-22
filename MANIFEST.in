@@ -12,7 +12,11 @@ include requirements.txt
 recursive-include kernel_spec *
 
 # Include engine files
-recursive-include engine *.py
+recursive-include engine *.py *.yaml
+recursive-include labextension *.json *.js
+recursive-include jupyterlab-extension *.json *.ts *.css *.mjs *.md
+prune jupyterlab-extension/node_modules
+prune jupyterlab-extension/lib
 
 # Exclude development and cache files
 global-exclude __pycache__
