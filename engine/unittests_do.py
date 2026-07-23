@@ -128,6 +128,9 @@ class TestPromptBuilder(unittest.TestCase):
         self.assertIn('call set_open once', p)
         self.assertIn('it never means no solution exists', p)
         self.assertIn('Never dress the last step up as the answer', p)
+        # math in the reason is $-delimited so the notebook banner
+        # typesets it instead of showing raw backslash commands
+        self.assertIn('with formulas in $...$', p)
 
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
@@ -1492,6 +1495,30 @@ class TestMathShellDo(unittest.TestCase):
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
+
+    def test_do_open_outcome_banner_typesets_dollar_math(self):
+        # the reason's $-delimited math must reach the banner intact and
+        # the banner div must stay MathJax-eligible (unlike note prose,
+        # which is deliberately tex2jax_ignore'd)
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'the missing move is a checked bound for '
+                          '$\\sum_{n=1}^{m} \\frac{1}{n}$'}, 'c2')],
+            [message('Left open.')],
+        ]
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda model_name=None: ScriptedModel(
+                                   script)):
+            self.shell.exec('do! decide something out of reach', 5,
+                            add_to_history=True)
+        out = self._html()
+        self.assertIn('outcome: open', out)
+        self.assertIn('$\\sum_{n=1}^{m} \\frac{1}{n}$', out)
+        self.assertIn('(unverified reason)', out)
+        banner = next(getattr(d, 'data', '') for d in self.displays
+                      if 'outcome: open' in getattr(d, 'data', ''))
+        self.assertNotIn('tex2jax_ignore', banner)
 
     def test_do_missing_backref_fails_fast(self):
         called = []

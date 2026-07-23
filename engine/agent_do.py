@@ -90,7 +90,8 @@ _DO_RULES = """
   it. Do not put scratch work in notes.
 - If every applicable route is exhausted and no ledger value certifiably
   answers the instruction, call set_open once with a short reason naming
-  the exact missing move and what you tried, then stop. Open records that
+  the exact missing move and what you tried, with formulas in $...$, then
+  stop. Open records that
   THIS session certified nothing - it never means no solution exists.
   Never dress the last step up as the answer instead.
 """
@@ -569,7 +570,8 @@ def make_api(session):
 
         Args:
             reason: one or two short sentences naming the exact missing
-                move and what was tried.
+                move and what was tried; wrap each formula in $...$ so
+                the notebook renders it.
         """
         try:
             selection = session.set_open(reason)
