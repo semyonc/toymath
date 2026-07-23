@@ -113,6 +113,11 @@ The ledger provides:
   next transforming step in the same goal;
 - replay-validated final-result selections, stored separately from steps so
   selecting an earlier result remains visible after a session is reopened;
+- a replay-validated run-level open outcome (`set_open` in `do!`, `open` in
+  the CLI) recording, with a capped unverified reason, that a session ended
+  without a certified result; it suppresses any fallback result display and
+  is deliberately vocabulary-guarded: it never asserts that no solution
+  exists;
 - claims with open, established, or conditional verdicts;
 - replay that re-invokes the registered primitive and compares the result;
 - source validation for tactics that consume earlier ledger results.
@@ -147,7 +152,14 @@ target half derive the same edge deterministically during replay.
 
 `set_result` appends a separate selection record containing the chosen value
 and its already-validated step or claim provenance. The selection is
-presentation metadata, not a transforming step. A concluded claim or the
+presentation metadata, not a transforming step. `set_open` is the matching
+terminal control for a run that certifies nothing: it appends an open
+outcome (a selection that selects no value) whose only content is a capped
+reason naming the missing move. It is sound because it claims nothing about
+the mathematics — "this session exhibits no certified result" is decidable
+from the ledger itself — and a later certified selection supersedes it for
+display. An unresolved exploration marker at an open ending is presented as
+left unresolved rather than awaiting continuation. A concluded claim or the
 latest selection determines the displayed spine. Markdown and notebook output
 collapse each marker-classified off-spine route behind its source and reason,
 while retaining every checked step in an expandable body; assumptions from a

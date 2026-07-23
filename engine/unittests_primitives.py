@@ -2612,6 +2612,94 @@ class TestLedgerBranchMarker(unittest.TestCase):
         self.assertEqual(topology['spine_assumptions'], [])
 
 
+class TestLedgerOpenOutcome(unittest.TestCase):
+    def test_open_outcome_records_selects_nothing_and_replays(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        outcome = ledger.record_open(
+            'no tactic covers the goal shape; a checked lower-bound '
+            'relation is the missing move')
+        self.assertEqual(outcome['id'], 'r1')
+        self.assertIsNone(outcome['result'])
+        self.assertEqual(outcome['provenance']['status'], 'open')
+        self.assertEqual(outcome['provenance']['source'], 'open')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        with self.assertRaisesRegex(ValueError, 'needs a reason'):
+            ledger.record_open('   ')
+
+    def test_open_outcome_never_carries_authority_on_replay(self):
+        ledger = Ledger()
+        step = ledger.record(Core.expand('(x+1)^2'))
+        outcome = ledger.record_open('stalled')
+        # hash-consistent tampering must still fail the semantic checks:
+        # an open outcome can neither select a value nor cite authority
+        for tamper in (
+                {'result': step['result']},
+                {'provenance': {'status': 'open', 'source': 'open',
+                                'reason': 'stalled', 'step': step['id']}},
+                {'provenance': {'status': 'verified', 'source': 'open',
+                                'reason': 'stalled'}},
+                {'provenance': {'status': 'open', 'source': 'open',
+                                'reason': ''}}):
+            tampered = dict(outcome)
+            tampered.update(tamper)
+            tampered['hash'] = ledger_module._selection_hash(
+                tampered.get('result'), tampered['provenance'],
+                tampered.get('goal'))
+            ledger.selections[-1] = tampered
+            replay = ledger.replay()
+            self.assertEqual(replay['status'], 'failed', tamper)
+            self.assertIn('final selection invalid', replay['reason'])
+        # plain mutation without re-hashing fails on the hash itself
+        ledger.selections[-1] = dict(outcome)
+        ledger.selections[-1]['provenance'] = {
+            'status': 'open', 'source': 'open', 'reason': 'edited'}
+        self.assertEqual(ledger.replay()['status'], 'failed')
+
+    def test_open_ending_renders_unresolved_marker_and_banner(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '3'))
+        ledger.record_branch(source['id'], 'the detour went nowhere')
+        ledger.record_open('the goal needs a tactic this session lacks')
+        md = ledger.render_markdown()
+        self.assertIn('**Outcome `r1` — OPEN:** no certified result', md)
+        self.assertIn('*(unverified reason)*', md)
+        self.assertIn('left unresolved; outcome recorded open', md)
+        self.assertNotIn('awaiting a continuing step', md)
+        text = ledger.render()
+        self.assertIn('(unresolved; outcome open)', text)
+        self.assertIn('OPEN r1#', text)
+        self.assertNotIn('SELECT', text)
+
+    def test_trailing_open_outcome_keeps_earlier_certified_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        dead = ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(
+            source['id'], 'the numeric detour does not answer the goal')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        ledger.record_open('a later cell stalled on a new goal')
+        topology = ledger.presentation_topology()
+        # the session-level spine still belongs to the certified selection
+        self.assertEqual(topology['spine'], [source['id'], resumed['id']])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'],
+                         [dead['id']])
+        self.assertEqual(topology['selection'], 'r2')
+        # an explicitly passed open provenance stays literal: no spine
+        literal = ledger.presentation_topology(
+            final_provenance={'status': 'open', 'source': 'open',
+                              'reason': 'stalled'},
+            marker_ids=[marker['id']])
+        self.assertEqual(literal['spine'], [])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
 TELESCOPING_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left['
                      '\\frac{1}{1 \\cdot 2}+\\frac{1}{2 \\cdot 3}'
                      '+\\ldots+\\frac{1}{n(n+1)}\\right]')

@@ -85,8 +85,14 @@ _DO_RULES = """
   next tactic. To abandon a recorded step ITSELF (e.g. the very first move
   went the wrong way), pass that step id as from_step and restart the next
   tactic from that step's recorded input. This records an exploration edge,
-  never mathematical case data or provenance. Do not put scratch work in
-  notes.
+  never mathematical case data or provenance. Pass from_step ONLY when the
+  very next tactic resumes there; ordinary notes and summaries must omit
+  it. Do not put scratch work in notes.
+- If every applicable route is exhausted and no ledger value certifiably
+  answers the instruction, call set_open once with a short reason naming
+  the exact missing move and what you tried, then stop. Open records that
+  THIS session certified nothing - it never means no solution exists.
+  Never dress the last step up as the answer instead.
 """
 
 _PLOT_RULES = """
@@ -212,6 +218,7 @@ class DoSession(object):
         self.result_override = None
         self.result_provenance = None
         self.result_selection = None
+        self.open_selection = None
         self.current_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
@@ -271,14 +278,55 @@ class DoSession(object):
         """Append a narrative note or structured branch marker and stream it."""
         with self._lock:
             if from_step:
-                step = self.ledger.record_branch(
-                    from_step, text, goal=self.current_goal)
+                pending = self.ledger._pending_branch(self.current_goal)
+                if pending is not None and from_step == pending['id']:
+                    # the note annotates the pending marker itself — the
+                    # agent meant a plain comment, not a second marker
+                    # (markers do not stack); live agents hit this shape
+                    step = self.ledger.record_comment(
+                        text, goal=self.current_goal)
+                else:
+                    step = self.ledger.record_branch(
+                        from_step, text, goal=self.current_goal)
             else:
                 step = self.ledger.record_comment(
                     text, goal=self.current_goal)
             if self.on_step is not None:
                 self.on_step(step)
         return step
+
+    def set_open(self, reason):
+        """Record a replay-validated run-level OPEN outcome.
+
+        Sound because it claims nothing about the mathematics: "this
+        session exhibits no certified result" is ledger-decidable.  The
+        vocabulary is deliberately the claim layer's "open" — never a
+        statement that no solution exists."""
+        reason = (reason or '').strip()
+        if not reason:
+            raise ValueError(
+                'set_open needs a short reason naming the exact missing '
+                'move')
+        if self.result_override is not None:
+            raise ValueError(
+                'this run already designated a certified result; the '
+                'outcome is not open')
+        if self.open_selection is not None:
+            raise ValueError(
+                f'open outcome already recorded '
+                f'({self.open_selection["id"]}); stop, or continue only '
+                'to certify a result')
+        if self.proof_claim_id is not None:
+            root = self.ledger.get_claim(self.proof_claim_id)
+            if root is not None and root.get('verdict') != 'open':
+                raise ValueError(
+                    f'root claim {self.proof_claim_id} is concluded; call '
+                    'set_result with its endpoint')
+        with self._lock:
+            selection = self.ledger.record_open(
+                _cap_prove_summary(reason), goal=self.current_goal)
+            self.open_selection = selection
+        return selection
 
     def root_statement_endpoint(self, expr):
         """Map a retyped root-claim statement to its concluded endpoint.
@@ -427,6 +475,9 @@ def make_api(session):
         reply = {'ok': True, 'op': step['op'], 'id': step['id']}
         if step['op'] == 'branch':
             reply['from'] = step['args']['from']
+        elif from_step:
+            reply['hint'] = ('from_step named the pending marker; recorded '
+                             'as a plain note — markers do not stack')
         if len(text) > 400:
             reply['hint'] = 'keep comments to one or two short sentences'
         return json.dumps(reply, ensure_ascii=False)
@@ -510,6 +561,25 @@ def make_api(session):
                            'selection': session.result_selection['id']},
                           ensure_ascii=False)
 
+    def set_open(reason: str) -> str:
+        """Record that this run ends OPEN: no certified result.
+
+        Only for exhausted routes — never a substitute for trying the
+        applicable tactics, and never a claim that no solution exists.
+
+        Args:
+            reason: one or two short sentences naming the exact missing
+                move and what was tried.
+        """
+        try:
+            selection = session.set_open(reason)
+        except ValueError as exc:
+            return json.dumps({'ok': False, 'op': 'set_open',
+                               'error': str(exc)}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'set_open', 'outcome': 'open',
+                           'selection': selection['id']},
+                          ensure_ascii=False)
+
     def plot(code: str, caption: str) -> str:
         """Render an unverified matplotlib/seaborn/plotly illustration.
 
@@ -557,6 +627,7 @@ def make_api(session):
         'claim': claim,
         'conclude': conclude,
         'set_result': set_result,
+        'set_open': set_open,
     }
     if session.plot_backend is not None:
         api['plot'] = plot
@@ -580,7 +651,7 @@ def make_tools(session):
     from agents import function_tool
     api = make_api(session)
     names = ['load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
-             'set_result']
+             'set_result', 'set_open']
     if session.plot_backend is not None:
         names.append('plot')
     if session.tikz_backend is not None:
@@ -672,7 +743,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     f"'{spec.skill}' first if that skill is not loaded).")
         return (f"Tool '{fargs.tool_name}' does not exist. Use only the "
                 "fixed tools: load_skill, run_tactic, comment, claim, "
-                "conclude, set_result.")
+                "conclude, set_result, set_open.")
 
     provider_order = tuple(providers or ())
     model_settings = None
@@ -733,6 +804,12 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             'steps': root_claim['conclusion']['steps'],
             'method': root_claim['conclusion']['closure'],
         }
+    elif session.open_selection is not None:
+        # the agent recorded a run-level open outcome: no certified
+        # result exists, so no fallback value may masquerade as one
+        final = None
+        provenance = dict(session.open_selection.get('provenance') or {})
+        provenance['selection'] = session.open_selection['id']
     elif root_claim is not None:
         final = None
         provenance = {
@@ -781,7 +858,8 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         summary = str(holder['res'].final_output or '').strip()
         open_claims = any((c.get('verdict') or 'open') == 'open'
                           for c in out['claims'])
-        if proof_goal is not None or open_claims:
+        if (proof_goal is not None or open_claims
+                or session.open_selection is not None):
             # an open claim must stay visibly unfinished: prose can never
             # substitute for the missing chain, in prove! or plain do!
             summary = _cap_prove_summary(summary)

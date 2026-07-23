@@ -417,7 +417,9 @@ class Ledger(object):
         if pending is not None:
             raise ValueError(
                 f'branch marker {pending["id"]} still needs its continuing '
-                'transforming step')
+                'transforming step; markers do not stack — record a plain '
+                'comment (no from_step) for a note, or run the continuing '
+                'tactic first')
         source = next((s for s in self.steps if s.get('id') == from_step),
                       None)
         if source is None:
@@ -545,6 +547,28 @@ class Ledger(object):
         goal = selection.get('goal')
         if goal is not None and self.get_claim(goal) is None:
             return f'unknown selection goal {goal!r}'
+        source = provenance.get('source')
+        status = provenance.get('status')
+        if source == 'open':
+            # A run-level open outcome selects nothing: it records only
+            # that the session exhibited no certified result when it
+            # ended. It never asserts a mathematical nonexistence and can
+            # neither cite nor create checked authority.
+            if result is not None:
+                return 'open outcome cannot carry a selected result'
+            if status != 'open':
+                return 'open outcome must have open status'
+            reason = provenance.get('reason')
+            if not isinstance(reason, str) or not reason.strip():
+                return 'open outcome needs a reason'
+            if len(reason) > 400:
+                return 'open outcome reason exceeds the narrative cap'
+            if provenance.get('step') or provenance.get('claim'):
+                return 'open outcome cannot cite checked authority'
+            if selection.get('hash') != _selection_hash(
+                    result, provenance, goal):
+                return 'selection hash mismatch'
+            return None
         if not isinstance(result, str) or not result.strip():
             return 'missing selected result'
         try:
@@ -555,8 +579,6 @@ class Ledger(object):
                 result, provenance, goal):
             return 'selection hash mismatch'
 
-        source = provenance.get('source')
-        status = provenance.get('status')
         if source == 'ledger':
             step_id = provenance.get('step')
             step = next((s for s in steps if s.get('id') == step_id), None)
@@ -614,6 +636,19 @@ class Ledger(object):
             raise ValueError(error)
         self.selections.append(selection)
         return selection
+
+    def record_open(self, reason, goal=None):
+        """Append a run-level OPEN outcome: as of this record the session
+        exhibits no certified result.
+
+        The record claims nothing about the mathematics — the vocabulary
+        is the claim layer's "open", never "no solution exists" — so its
+        validity is ledger-decidable on replay.  A later certified
+        selection supersedes it for display; the abandoned reasons stay
+        in the append-only record."""
+        provenance = {'status': 'open', 'source': 'open',
+                      'reason': (reason or '').strip()}
+        return self.record_selection(None, provenance, goal=goal)
 
     def save(self, path=None):
         path = path or self.path
@@ -879,6 +914,16 @@ class Ledger(object):
         if provenance is None and self.selections:
             selection = self.selections[-1]
             provenance = selection.get('provenance') or {}
+            if provenance.get('source') == 'open':
+                # an open outcome selects nothing; an earlier certified
+                # selection (or a concluded claim below) still owns the
+                # displayed spine. An explicitly passed open provenance
+                # stays literal: that run's own render has no spine.
+                provenance = next(
+                    ((s.get('provenance') or {})
+                     for s in reversed(self.selections)
+                     if (s.get('provenance') or {}).get('source') != 'open'),
+                    None)
         targets = []
         selected_goal = None
         if provenance:
@@ -1016,17 +1061,27 @@ class Ledger(object):
                 lines.append('*No mechanically checked closing chain has '
                              'been recorded.*')
             lines.append('')
+        ended_open = bool(self.selections and (self.selections[-1].get(
+            'provenance') or {}).get('source') == 'open')
         if self.selections:
             selected = self.selections[-1]
             provenance = selected.get('provenance') or {}
-            source = provenance.get('step') or provenance.get('claim')
-            source_note = f' from `{source}`' if source else ''
-            status = provenance.get('status', 'unknown').upper()
-            lines.append(
-                f'**Selected final result `{selected["id"]}`{source_note} '
-                f'— {status}:** '
-                f'${selected["result"]}$')
-            lines.append('')
+            if ended_open:
+                lines.append(
+                    f'**Outcome `{selected["id"]}` — OPEN:** no certified '
+                    'result in this session. '
+                    f'{_markdown_prose(provenance.get("reason", ""))} '
+                    '*(unverified reason)*')
+                lines.append('')
+            else:
+                source = provenance.get('step') or provenance.get('claim')
+                source_note = f' from `{source}`' if source else ''
+                status = provenance.get('status', 'unknown').upper()
+                lines.append(
+                    f'**Selected final result `{selected["id"]}`'
+                    f'{source_note} — {status}:** '
+                    f'${selected["result"]}$')
+                lines.append('')
 
         final_assumptions = (topology['spine_assumptions']
                              if topology['spine'] else self.assumptions)
@@ -1051,7 +1106,9 @@ class Ledger(object):
                 target = (f" to `{edge['to']}`" if edge and edge.get('to')
                           else '')
                 pending = ('' if target else
-                           ' *(awaiting a continuing step)*')
+                           (' *(left unresolved; outcome recorded open)*'
+                            if ended_open else
+                            ' *(awaiting a continuing step)*'))
                 out.append(
                     f"**{step['id']}** *branch from "
                     f"`{step['args']['from']}`{target}*{pending} — "
@@ -1142,6 +1199,8 @@ class Ledger(object):
         lines = []
         topology = self.presentation_topology()
         edge_by_marker = {e['marker']: e for e in topology['edges']}
+        ended_open = bool(self.selections and (self.selections[-1].get(
+            'provenance') or {}).get('source') == 'open')
         for claim in self.claims:
             verdict = claim.get('verdict', 'open').upper()
             conclusion = claim.get('conclusion') or {}
@@ -1159,7 +1218,8 @@ class Ledger(object):
             if step['op'] == 'branch':
                 edge = edge_by_marker.get(step['id']) or {}
                 target = (f" to {edge['to']}" if edge.get('to')
-                          else ' (awaiting continuation)')
+                          else (' (unresolved; outcome open)' if ended_open
+                                else ' (awaiting continuation)'))
                 lines.append(
                     f"{step['id']}#{step['hash']} [--] branch from "
                     f"{step['args']['from']}{target}: "
@@ -1199,10 +1259,16 @@ class Ledger(object):
         if self.selections:
             selected = self.selections[-1]
             provenance = selected.get('provenance') or {}
-            source = provenance.get('step') or provenance.get('claim') or '?'
-            status = provenance.get('status', 'unknown').upper()
-            lines.append(
-                f"SELECT {selected['id']}#{selected['hash']} [{status}] "
-                f"from {source}: "
-                f"{selected['result']}")
+            if ended_open:
+                lines.append(
+                    f"OPEN {selected['id']}#{selected['hash']} no certified "
+                    f"result: {provenance.get('reason', '')}")
+            else:
+                source = (provenance.get('step') or provenance.get('claim')
+                          or '?')
+                status = provenance.get('status', 'unknown').upper()
+                lines.append(
+                    f"SELECT {selected['id']}#{selected['hash']} [{status}] "
+                    f"from {source}: "
+                    f"{selected['result']}")
         return '\n'.join(lines)

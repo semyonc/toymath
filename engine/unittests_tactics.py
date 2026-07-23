@@ -89,9 +89,11 @@ class TestTacticRegistry(unittest.TestCase):
 
     def test_runtime_tool_surface_is_constant_and_small(self):
         tools = agent_do.make_tools(agent_do.DoSession())
+        # seven fixed non-plot tools: six since gen 27 plus the run-level
+        # open-outcome control. Tactic growth must never grow this list.
         self.assertEqual([tool.name for tool in tools], [
             'load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
-            'set_result'])
+            'set_result', 'set_open'])
         prompt = agent_do.build_prompt()
         payload_chars = len(prompt)
         payload_chars += sum(len(json.dumps(tool.params_json_schema,
@@ -154,6 +156,32 @@ class TestTacticRegistry(unittest.TestCase):
         loaded = Ledger(path)
         self.assertEqual(loaded.steps[-1]['op'], 'branch')
         self.assertEqual(loaded.replay()['status'], 'verified')
+
+    def test_cli_open_records_replayable_open_outcome(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'open.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'open', 'a checked lower-bound tactic is missing',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertEqual((rec['op'], rec['id']), ('open', 'r1'))
+        loaded = Ledger(path)
+        self.assertIsNone(loaded.selections[-1]['result'])
+        self.assertEqual(loaded.selections[-1]['provenance']['status'],
+                         'open')
+        self.assertEqual(loaded.replay()['status'], 'verified')
+        shown = io.StringIO()
+        with redirect_stdout(shown):
+            toymath_cli.main(['show', '--session', path])
+        self.assertIn('OPEN r1#', shown.getvalue())
 
     def test_cli_markdown_show_uses_persisted_selection_to_fold_path(self):
         from ledger import Ledger

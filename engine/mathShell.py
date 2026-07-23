@@ -565,6 +565,15 @@ class MathShell(object):
                             for a in res['assumptions'])
             display(HTML(f'<div style="color:#888">assumptions: '
                          f'{asm}</div>'))
+        open_prov = res.get('final_provenance') or {}
+        if not res.get('final_result') and open_prov.get('source') == 'open':
+            # run-level open outcome: no certified result exists, and no
+            # fallback value may stand in for one
+            display(HTML(
+                '<div style="color:#b00020"><strong>outcome: open — no '
+                'certified result in this session.</strong> '
+                + _html.escape(open_prov.get('reason', ''))
+                + ' <em>(unverified reason)</em></div>'))
         if res['final_result']:
             provenance = res.get('final_provenance') or {}
             if provenance.get('status') == 'unverified':

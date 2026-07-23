@@ -120,6 +120,14 @@ class TestPromptBuilder(unittest.TestCase):
         # the abandon-the-step-itself form (root-anchor gap) is steered too
         self.assertIn('abandon a recorded step ITSELF', p)
         self.assertIn("from that step's recorded input", p)
+        # from_step is only for resume intent; notes must omit it
+        self.assertIn('Pass from_step ONLY when the', p)
+
+    def test_prompt_steers_open_outcome_with_naming_guard(self):
+        p = agent_do.build_prompt()
+        self.assertIn('call set_open once', p)
+        self.assertIn('it never means no solution exists', p)
+        self.assertIn('Never dress the last step up as the answer', p)
 
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
@@ -223,6 +231,66 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(topology['spine'], ['s1', 's4'])
         self.assertEqual(topology['abandoned_paths'][0]['steps'], ['s2'])
         self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_pending_marker_note_downgrades_and_refusal_steers(self):
+        # live conv! trace shape: 5 of 8 comment calls died against the
+        # pending-marker gate because the refusal never named the repair
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+1)^2'))
+        json.loads(api['substitute'](first['result'], 'x', '1'))
+        marker = json.loads(api['comment']('detour went nowhere', 's1'))
+        self.assertEqual(marker['op'], 'branch')
+        # a note whose from_step names the pending marker ITSELF is the
+        # observed misuse: record the plain note the agent meant
+        note = json.loads(api['comment']('status: routes exhausted',
+                                         marker['id']))
+        self.assertTrue(note['ok'])
+        self.assertEqual(note['op'], 'comment')
+        self.assertIn('markers do not stack', note['hint'])
+        # any other from_step while a marker is pending names both repairs
+        refused = json.loads(api['comment']('analysis note', 's1'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('plain comment (no from_step)', refused['error'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_set_open_records_open_outcome(self):
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['expand']('(x+1)^2'))
+        self.assertFalse(json.loads(api['set_open'](' '))['ok'])
+        rec = json.loads(api['set_open']('missing: a checked lower bound'))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['outcome'], 'open')
+        self.assertEqual(rec['selection'], 'r1')
+        outcome = session.ledger.selections[-1]
+        self.assertIsNone(outcome['result'])
+        self.assertEqual(outcome['provenance']['status'], 'open')
+        dup = json.loads(api['set_open']('again'))
+        self.assertFalse(dup['ok'])
+        self.assertIn('already recorded', dup['error'])
+        self.assertEqual(session.new_steps()[-1]['op'], 'expand')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_set_open_refused_after_designation_and_recovery_after_open(
+            self):
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+2)^2'))
+        json.loads(api['set_result'](first['result']))
+        refused = json.loads(api['set_open']('stalled'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('already designated', refused['error'])
+        # and the reverse order recovers: set_result supersedes set_open
+        other = DoSession()
+        api2 = make_api(other)
+        step = json.loads(api2['expand']('(x+3)^2'))
+        self.assertTrue(json.loads(api2['set_open']('thought stuck'))['ok'])
+        recovered = json.loads(api2['set_result'](step['result']))
+        self.assertTrue(recovered['ok'], recovered.get('error'))
+        self.assertEqual([s['id'] for s in other.ledger.selections],
+                         ['r1', 'r2'])
+        self.assertEqual(other.ledger.replay()['status'], 'verified')
 
     def test_set_result_rejects_detached_conclusion(self):
         session = DoSession()
@@ -602,6 +670,52 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
 
+    def test_set_open_suppresses_last_step_fallback(self):
+        # the conv! pseudo-answer: a run that certified nothing used to
+        # hand the cell its last checked step as a "verified" result
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'no tactic covers the goal shape'}, 'c2')],
+            [message('Left open: the checked split answers nothing yet.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('decide the undecidable',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['status'], 'open')
+        self.assertEqual(res['final_provenance']['source'], 'open')
+        self.assertEqual(res['final_provenance']['reason'],
+                         'no tactic covers the goal shape')
+        self.assertEqual(res['final_provenance']['selection'], 'r1')
+        # prose stays subordinate to the recorded outcome
+        self.assertTrue(res.get('summary_unverified'))
+        self.assertEqual(res['branch_topology']['spine'], [])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_set_open_closes_out_unresolved_marker_visibly(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('comment', {'text': 'wrong route',
+                                   'from_step': 's1'}, 'c2')],
+            [tool_call('set_open', {
+                'reason': 'the resume needs a tactic this run lacks'},
+                'c3')],
+            [message('open')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('explore', model=ScriptedModel(script),
+                              ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['branch_topology']['unresolved_markers'],
+                         ['s2'])
+        md = ledger.render_markdown()
+        self.assertIn('left unresolved; outcome recorded open', md)
+        self.assertNotIn('awaiting a continuing step', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
     def test_branch_run_returns_spine_and_abandoned_path_summary(self):
         script = [
             [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
@@ -811,6 +925,38 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['claims'][0]['verdict'], 'open')
         self.assertIsNone(res['final_result'])
         self.assertEqual(res['final_provenance']['status'], 'open')
+
+    def test_prove_mode_set_open_refines_reason_and_respects_conclusion(
+            self):
+        # with the root still open, set_open records the agent's specific
+        # missing move instead of the generic no-closing-chain reason
+        script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
+            [tool_call('limit_table', {
+                'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'no tactic relates the table value to the '
+                          'claimed sequence'}, 'c2')],
+            [message('Left open.')],
+        ]
+        res = run_instruction(
+            'try the proof', model=ScriptedModel(script),
+            proof_goal=r'\lim_{n \to \infty} \frac{n}{2^n} = 0')
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['claims'][0]['verdict'], 'open')
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['source'], 'open')
+        self.assertIn('no tactic relates', res['final_provenance']['reason'])
+        # a concluded root refuses the open outcome and names the repair
+        session = DoSession()
+        api = make_api(session)
+        session.claim(r'\lim_{n \to \infty} \frac{1}{n} = 0', root=True)
+        json.loads(api['limit_table'](r'\lim_{n \to \infty} \frac{1}{n}'))
+        json.loads(api['conclude']('c1', ['s1']))
+        refused = json.loads(api['set_open']('stalled'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('concluded', refused['error'])
+        self.assertIn('set_result', refused['error'])
 
     def test_open_claim_caps_plain_do_summary(self):
         # even outside prove!, prose must not dominate an open claim
