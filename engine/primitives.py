@@ -762,6 +762,8 @@ def numeric_eval(sym, notation, env):
                 raise EvalError('absolute value of a matrix')
             return abs(v)
         return numeric_eval(f.args[0], notation, env)
+    if op in (Notation.PAIR, Notation.COLLECTION):
+        raise EvalError(f'{op.name} is a typed result, not a scalar value')
     if op == Notation.MINUS:
         return _num_neg(numeric_eval(f.args[0], notation, env))
     if op == Notation.S_LIST:
@@ -890,8 +892,11 @@ def _func_power(sym, notation):
 
 
 def _is_group(sym, notation):
+    # An ordered pair immediately after a function head is one complete
+    # argument object (f(x,y)), even though PAIR is semantic and never
+    # transparent to normal form.
     return notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
-                                Notation.S_GROUP]) is not None
+                                Notation.S_GROUP, Notation.PAIR]) is not None
 
 
 def _func_arg_span(args, i, notation, is_head):

@@ -116,6 +116,8 @@ class Notation(object):
     NOLIMITS = Symbol('nolimits')
     FACTORIAL = Symbol('factorial')
     BINOM = Symbol('\\binom')
+    PAIR = Symbol('pair')
+    COLLECTION = Symbol('collection')
     REF = Symbol('backref')
     PRIME = Symbol('prime')
     PLUS = Symbol('+')

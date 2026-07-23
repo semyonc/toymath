@@ -127,6 +127,7 @@ class MathLexer(object):
         'smallmatrix',
         'cr',
         'cases',
+        'collection',
         'in',
         'Bbb',
         'to',

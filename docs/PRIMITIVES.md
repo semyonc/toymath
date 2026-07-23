@@ -199,6 +199,12 @@ Important verified-layer behaviors include:
   than one comparison with a comma-valued right side; one-column `\cases`
   is also recognized as a system, and whole-system substitution/apply merge
   independently checked per-relation steps;
+- finite escaped-brace collections and exactly two parenthesized items are
+  first-class `COLLECTION` and ordered `PAIR` nodes, so complete values such
+  as `\{(-1,2),(1,-2)\}` survive parse/write, graph replication, normal-form
+  comparison, and notebook `[[n]]` history; they deliberately have no set
+  algebra or scalar numeric-oracle meaning, while bare `x,y` remains the
+  existing command/system `C_LIST`;
 - maximal non-fragment subtrees become opaque atoms so rational algebra can
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol

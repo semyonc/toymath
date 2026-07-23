@@ -1480,6 +1480,26 @@ class TestMathShellDo(unittest.TestCase):
         resolved = self.shell.resolve_backrefs('[[3]]')
         primitives.parse_latex(resolved)
 
+    def test_typed_collection_survives_history_snapshot(self):
+        import primitives
+        from notation import Notation
+
+        latex = '\\{(-1,2),(1,-2)\\}'
+        sym = self.shell.parser.parse(latex)
+        rendered = self.shell.output(
+            sym, self.shell.parsedNotation, 48, True)
+        self.assertEqual(rendered, latex)
+
+        # A later parse clears parsedNotation in place. The private history
+        # snapshot must retain both the collection and its pair children.
+        self.shell.parser.parse('z')
+        resolved = self.shell.resolve_backrefs('[[48]]')
+        chained, notation = primitives.parse_latex(resolved)
+        collection = notation.getf(chained, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertTrue(all(notation.getf(item, Notation.PAIR) is not None
+                            for item in collection.args))
+
     def test_do_cell_streams_and_chains(self):
         with mock.patch.object(agent_do, 'build_model',
                                lambda model_name=None: ScriptedModel(

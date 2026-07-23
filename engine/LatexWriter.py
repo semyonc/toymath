@@ -23,6 +23,8 @@ class LaTexWriter(object):
         '\\sqrt': 'write_sqrt',
         'factorial': 'write_factorial',
         '\\binom': 'write_binom',
+        'pair': 'write_pair',
+        'collection': 'write_collection',
         '\\buildrel': 'write_buildrel',
         'group': 'write_group',
         'vgroup': 'write_vgroup',
@@ -263,6 +265,8 @@ class LaTexWriter(object):
                 and not self._probe(sym, "sgroup") \
                 and not self._probe(sym, "factorial") \
                 and not self._probe(sym, "\\binom") \
+                and not self._probe(sym, "pair") \
+                and not self._probe(sym, "collection") \
                 and not self._probe(sym, "func") \
                 and not self._probe(sym, "\\text") \
                 and not self._probe(sym, "\\textbf") \
@@ -361,6 +365,27 @@ class LaTexWriter(object):
         self.writeString('\\binom')
         self.write_binom_item(f.args[0])
         self.write_binom_item(f.args[1])
+
+    def write_pair(self, f):
+        self.writeString('(')
+        for i, item in enumerate(f.args):
+            if i:
+                self.writeString(',')
+            self.write_subformula(item)
+        self.writeString(')')
+
+    def write_collection(self, f):
+        # Escaped braces are delimiters, not control words. Writing them
+        # directly avoids the generic control-word spacer turning the stable
+        # result spelling into ``\{ x,y \}``.
+        self.output.write('\\{')
+        self.last_value = '{'
+        for i, item in enumerate(f.args):
+            if i:
+                self.writeString(',')
+            self.write_subformula(item)
+        self.output.write('\\}')
+        self.last_value = '}'
 
     def write_index(self, f):
         dims = f.args[1]

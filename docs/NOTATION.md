@@ -123,7 +123,28 @@ _n6: p-list [f, _n5]            # Function application as product list
 - `_n5` represents `x` grouped with parentheses
 - `_n6` represents function application as a product of `f` and its argument group
 
-### Example 5: Matrix environments
+### Example 5: Typed finite collections and ordered pairs
+
+Finite collection braces and exactly two parenthesized comma items carry
+semantic node types rather than transparent grouping:
+
+```text
+\{(-1,2),(1,-2)\}
+
+_n1: pair (-1, 2)
+_n2: pair (1, -2)
+_n3: collection (_n1, _n2)
+```
+
+`PAIR` preserves coordinate order. `COLLECTION` preserves written item order
+for stable rendering and provenance, but the notation layer does not infer
+set equality, membership, deduplication, or numeric semantics. A top-level
+`x,y` remains `C_LIST`; `(x,y,z)` remains a grouped `C_LIST`; and
+`\{x|P(x)\}` retains the existing `S_GROUP` set-builder shape. Standard
+`\left\{...\right\}` / `\left(...\right)` spellings normalize to the same
+typed nodes.
+
+### Example 6: Matrix environments
 
 Standard non-alignment matrix environments normalize before grammar dispatch.
 For example, `\begin{bmatrix}a & b \\ c & d\end{bmatrix}` is stored as:
@@ -156,6 +177,8 @@ The `Notation` class defines several predefined symbols for common operations:
 | `INDEX` | `index` | Indexing/subscript |
 | `FACTORIAL` | `factorial` | Postfix factorial `(operand,)` |
 | `BINOM` | `\binom` | Binomial coefficient `(n, k)` |
+| `PAIR` | `pair` | Ordered pair `(first, second)` |
+| `COLLECTION` | `collection` | Finite escaped-brace collection `(item, ...)` |
 | `P_LIST` | `p-list` | Product list (multiplication) |
 | `S_LIST` | `s-list` | Sum list (addition) |
 | `C_LIST` | `c-list` | Comma-separated list (arguments, parameters, or relation systems) |

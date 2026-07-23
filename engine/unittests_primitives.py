@@ -1231,6 +1231,80 @@ class TestRelationSystemsAndProductSlash(unittest.TestCase):
         self.assertIn('relation system', piecewise['error'])
 
 
+class TestTypedCollectionsAndPairs(unittest.TestCase):
+    def test_stationary_points_have_first_class_nodes(self):
+        from replicator import Replicator
+
+        latex = '\\{(-1,2),(1,-2)\\}'
+        sym, notation = P.parse_latex(latex)
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 2)
+        self.assertTrue(all(notation.getf(item, Notation.PAIR) is not None
+                            for item in collection.args))
+
+        copied_notation = Notation()
+        copied = Replicator(notation, copied_notation)(sym)
+        written = P.write_latex(copied, copied_notation)
+        self.assertEqual(written, latex)
+        self.assertEqual(P._normal_form(written), P._normal_form(latex))
+
+    def test_collection_can_hold_a_pair_relation(self):
+        sym, notation = P.parse_latex('\\{(x,y)=(2,1)\\}')
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 1)
+        relation = notation.getf(collection.args[0], Notation.COMP)
+        self.assertIsNotNone(relation)
+        self.assertIsNotNone(notation.getf(relation.args[0], Notation.PAIR))
+        self.assertIsNotNone(notation.getf(relation.args[1], Notation.PAIR))
+
+    def test_collection_variants_and_empty_collection_round_trip(self):
+        cases = (
+            ('\\{\\}', '\\{\\}'),
+            ('\\{x\\}', '\\{x\\}'),
+            ('\\{x,y\\}', '\\{x,y\\}'),
+            ('\\left\\{x,y\\right\\}', '\\{x,y\\}'),
+            ('\\{|x|\\}', '\\{|x|\\}'),
+            ('\\{|x|,|y|\\}', '\\{|x|,|y|\\}'),
+            ('\\{\\{1,2\\},3\\}', '\\{\\{1,2\\},3\\}'),
+        )
+        for source, canonical in cases:
+            with self.subTest(source=source):
+                sym, notation = P.parse_latex(source)
+                self.assertIsNotNone(
+                    notation.getf(sym, Notation.COLLECTION))
+                self.assertEqual(P.write_latex(sym, notation), canonical)
+                self.assertTrue(P.same_expression(source, canonical))
+
+    def test_pair_is_distinct_from_comma_syntax(self):
+        pair, pair_notation = P.parse_latex('(x,y)')
+        self.assertIsNotNone(pair_notation.getf(pair, Notation.PAIR))
+        left_pair, left_notation = P.parse_latex(
+            '\\left(x,y\\right)')
+        self.assertIsNotNone(left_notation.getf(
+            left_pair, Notation.PAIR))
+
+        triple, triple_notation = P.parse_latex('(x,y,z)')
+        triple_group = triple_notation.getf(triple, Notation.GROUP)
+        self.assertIsNotNone(triple_group)
+        self.assertIsNotNone(triple_notation.getf(
+            triple_group.args[0], Notation.C_LIST))
+
+        self.assertFalse(P.same_expression('(x,y)', 'x,y'))
+        self.assertFalse(P.same_expression('\\{x,y\\}', 'x,y'))
+
+    def test_set_builder_keeps_its_existing_node(self):
+        sym, notation = P.parse_latex('\\{x|x\\gt0\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.S_GROUP))
+        self.assertIsNone(notation.getf(sym, Notation.COLLECTION))
+
+    def test_scalar_tactics_refuse_typed_results(self):
+        rec = Core.expand('\\{x,y\\}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an expression', rec['error'])
+
+
 class TestCombinatorialNotation(unittest.TestCase):
     def parse(self, latex):
         notation = Notation()

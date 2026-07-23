@@ -190,6 +190,8 @@ def create_actions():
 | INDEX | `(base, (sub, sup_l, power, sup_r))` | `x^2` → `(x, (None, None, 2, None))` |
 | FACTORIAL | `(operand,)` | `n!` → `(n,)` |
 | BINOM | `(upper, lower)` | `\binom{n}{k}` → `(n, k)` |
+| PAIR | `(first, second)` | `(x,y)` → `(x, y)` |
+| COLLECTION | `(item1, item2, ...)` | `\{(-1,2),(1,-2)\}` |
 | P_LIST | `(factor1, factor2, ...)` | `xy` → `(x, y)` |
 | S_LIST | `(term1, +term2, ...)` | `x+y` → `(x, +y)` |
 | GROUP | `(inner,)` with `br` prop | `{x}` → `(x,)` br="{}" |
