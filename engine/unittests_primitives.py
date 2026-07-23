@@ -3539,6 +3539,28 @@ class TestGoalCoverage(unittest.TestCase):
         self.assertTrue(P.covers_goal(canon, parens))
         self.assertTrue(P.covers_goal(braces, canon))
 
+    def test_covers_goal_bare_integrand_vs_textbook_integral(self):
+        # live int! failure: the first step consumed the BARE integrand of
+        # a textbook goal whose denominator is parenthesized; the goal
+        # link must compare integrand-to-integrand, brackets stripped
+        bare = '\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}'
+        goal = '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'
+        self.assertTrue(P.covers_goal(bare, goal))
+        self.assertTrue(P.covers_goal(goal, bare))
+        self.assertFalse(P.covers_goal('\\frac{1}{x^{1/2}}', goal))
+
+    def test_covers_goal_peels_emitter_parens_around_sum_integrand(self):
+        # the \int emitter parenthesizes sum integrands as pure syntax
+        # protection; the linearity/assemble input is the bare sum
+        wrapped = '\\int \\left(6u^2-6u+6-\\frac{6}{u+1}\\right) \\, d u'
+        plain = '6u^2-6u+6-\\frac{6}{u+1}'
+        self.assertTrue(P.covers_goal(plain, wrapped))
+        self.assertTrue(P.covers_goal(wrapped, plain))
+        # semantic brackets are never stripped: |x| is not x
+        self.assertFalse(P.covers_goal('\\int |x| \\, d x',
+                                       '\\int x \\, d x'))
+        self.assertFalse(P.covers_goal('|x|', '\\int x \\, d x'))
+
     def test_covers_goal_bare_integrand_of_textbook_goal(self):
         # agents legitimately restate a textbook-form goal by its bare
         # integrand (integrate_rewrite accepts one); the phantom dx in

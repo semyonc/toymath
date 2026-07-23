@@ -1540,6 +1540,79 @@ class TestMathShellDo(unittest.TestCase):
                       if 'outcome: open' in getattr(d, 'data', ''))
         self.assertNotIn('tex2jax_ignore', banner)
 
+    def test_int_composite_closes_across_substitution_chain(self):
+        # the reported live cell (gemini, trace-replayed): u = x^{1/6}
+        # substitution, polynomial division, linearity, assemble, back-
+        # substitution, expand — every step green, set_result accepted,
+        # and the goal-chain gate then refused the splice because its
+        # step hops used strict spelling identity across \int boundaries
+        def rt(tactic, arguments, cid):
+            return ResponseFunctionToolCall(
+                type='function_call', name='run_tactic',
+                arguments=json.dumps({'tactic': tactic,
+                                      'arguments': arguments}),
+                call_id=cid, id=cid)
+
+        calls = [
+            tool_call('load_skill', {'skill': 'integration'}, 'c0'),
+            rt('integrate_substitute',
+               ['\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}', 'x',
+                'x^{\\frac{1}{6}}', 'u', '\\frac{6u^5}{u^3+u^2}'], 'c1'),
+            rt('integrate_rewrite',
+               ['\\frac{6u^5}{u^3+u^2}', 'u', '\\frac{6u^3}{u+1}'], 'c2'),
+            rt('integrate_rewrite',
+               ['\\frac{6u^3}{u+1}', 'u', '6u^2-6u+6-\\frac{6}{u+1}'],
+               'c3'),
+            rt('integrate_linearity',
+               ['6u^2-6u+6-\\frac{6}{u+1}', 'u'], 'c4'),
+            rt('integrate_power_rule', ['6u^2', 'u'], 'c5'),
+            rt('substitute', ['2u^{3} + C', 'C', '0'], 'c6'),
+            rt('integrate_power_rule', ['6u', 'u'], 'c7'),
+            rt('substitute', ['3u^{2} + C', 'C', '0'], 'c8'),
+            rt('integrate_power_rule', ['6', 'u'], 'c9'),
+            rt('substitute', ['6u + C', 'C', '0'], 'c10'),
+            rt('integrate_substitute',
+               ['\\frac{6}{u+1}', 'u', 'u+1', 'v', '\\frac{6}{v}'], 'c11'),
+            rt('integrate_table', ['\\frac{6}{v}', 'v'], 'c12'),
+            rt('substitute',
+               ['6 \\ln\\left(v\\right) + C', 'v', 'u+1'], 'c13'),
+            rt('substitute',
+               ['6 \\ln\\left ((u+1) \\right )+C', 'C', '0'], 'c14'),
+            rt('integrate_assemble',
+               ['s4', 's6', 's8', 's10', 's14'], 'c15'),
+            rt('substitute',
+               ['\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+                '\\left(6u\\right) - '
+                '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C',
+                'u', 'x^{\\frac{1}{6}}'], 'c16'),
+            rt('expand',
+               ['\\left (2(x^{\\frac {1} {6}})^{3}\\right )- '
+                '\\left (3(x^{\\frac {1} {6}})^{2}\\right )+ '
+                '\\left (6(x^{\\frac {1} {6}}) \\right )- '
+                '\\left (6 \\ln\\left (((x^{\\frac {1} {6}})+1) \\right )'
+                ' \\right )+C'], 'c17'),
+            tool_call('set_result', {'expr':
+                '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+C'
+                '+6x^{\\frac {1} {6}}'
+                '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )'}, 'c18'),
+        ]
+        turns = [[c] for c in calls]
+        turns.append([message('The indefinite integral is set.')])
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda model_name=None: ScriptedModel(
+                                   turns)):
+            self.shell.exec(
+                'int! \\int \\frac {dx} (x^{\\frac 1 2} + x^{\\frac 1 3})',
+                6, add_to_history=True)
+        out = self._html()
+        self.assertNotIn('did not close', out)
+        self.assertNotIn('do! error', out)
+        # 17 replayed steps plus the composite glue check
+        self.assertEqual(len(self.shell.ledger.steps), 18)
+        self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
+        chained = self.shell.resolve_backrefs('[[6]]')
+        self.assertIn('\\ln', chained)
+
     def test_do_missing_backref_fails_fast(self):
         called = []
         with mock.patch.object(agent_do, 'run_instruction',
@@ -2286,6 +2359,36 @@ class TestChainsToGoal(unittest.TestCase):
     def test_no_steps_rejected(self):
         import expr_commands as ec
         self.assertFalse(ec._chains_to_goal([], 's1', 'x'))
+
+    def test_integral_boundary_hops_accepted(self):
+        # the live int! chain shape: rewrite results are \int-wrapped
+        # while the next inputs are their bare integrands, and assemble
+        # consumes the linearity input. Linkage inherits the ledger's
+        # chaining convention; strict spelling identity broke every
+        # honest hop across an \int boundary.
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}',
+             '\\int \\frac{6u^5}{u^3+u^2} \\, d u'),
+            ('\\frac{6u^5}{u^3+u^2}',
+             '\\int \\left(6u^2-6u+6-\\frac{6}{u+1}\\right) \\, d u'),
+            ('6u^2-6u+6-\\frac{6}{u+1}',
+             '2u^{3}-3u^{2}+6u-6 \\ln\\left ((u+1) \\right )+C'),
+            ('2u^{3}-3u^{2}+6u-6 \\ln\\left ((u+1) \\right )+C',
+             '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+6x^{\\frac {1} {6}}'
+             '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )+C'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's4',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+        # a linearity PIECE still cannot stand in for the whole
+        self.assertFalse(ec._chains_to_goal(
+            self._steps(('6u^2-6u+6-\\frac{6}{u+1}',
+                         '\\int 6u^{2} \\, d u - \\int 6u \\, d u '
+                         '+ \\int 6 \\, d u - \\int \\frac {6} {u+1} '
+                         '\\, d u'),
+                        ('6u^2', '2u^{3} + C')),
+            's2',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
 
 
 class TestDirectCommands(unittest.TestCase):

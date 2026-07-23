@@ -282,14 +282,21 @@ class ExprResolver(Replicator):
 
 def _chains_to_goal(steps, final_id, goal_latex):
     """True when the run's final step is connected to the goal expression
-    by an unbroken input==result chain of this run's recorded steps.
+    by an unbroken chain of this run's recorded steps.
 
     Guards the last-transform fallback in `run_instruction`: a sub-run that
     verified steps about *pieces* of the goal (or something else entirely)
     must not have its last intermediate spliced in as the command's value.
-    Linkage is structural identity (no oracle): agents pass recorded
-    strings verbatim, and value-equality would be too permissive here."""
+    Linkage is structural (no oracle) and inherits the ledger's chaining
+    convention (`_chain_links`): an integrand/body-consuming step continues
+    its big-operator-shaped predecessor, exactly as the primitives accept
+    in goal gating — bare value-equality stays too permissive here, and a
+    strict spelling match breaks every honest `\\int`-boundary hop (live:
+    a fully green substitution/assemble chain was refused because the
+    rewrite results are `\\int`-wrapped while the next inputs are their
+    integrands)."""
     import primitives
+    from ledger import _chain_links
     transforming = [s for s in steps if s.get('result') is not None]
     if not transforming:
         return False
@@ -305,7 +312,7 @@ def _chains_to_goal(steps, final_id, goal_latex):
         for s in transforming:
             if s['id'] == cur['id']:
                 break
-            if primitives.same_expression(s['result'], cur_input):
+            if _chain_links(s['result'], cur_input):
                 prev = s
         cur = prev
     return False

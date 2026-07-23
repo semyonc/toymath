@@ -218,7 +218,7 @@ def _operator_body_latex(latex):
         return None
     try:
         body, _var, _point, _direction = _strip_limit(sym, notation)
-        return write_latex(body, notation)
+        return write_latex(_peel_groups(body, notation), notation)
     except PrimitiveError:
         pass
     inner = _peel_groups(sym, notation)
@@ -235,7 +235,7 @@ def _operator_body_latex(latex):
         return None
     body = (info['body'][0] if len(info['body']) == 1 else
             notation.setf(Notation.P_LIST, tuple(info['body'])))
-    return write_latex(body, notation)
+    return write_latex(_peel_groups(body, notation), notation)
 
 
 def _integral_parts_latex(latex):
@@ -287,7 +287,9 @@ def _integral_parts_latex(latex):
         return None
     if integrand is None:
         return None
-    return var, write_latex(integrand, notation)
+    # the emitter parenthesizes sum/negative integrands as pure `\int`
+    # syntax protection; the integrand itself is the peeled body
+    return var, write_latex(_peel_groups(integrand, notation), notation)
 
 
 def covers_goal(input_latex, goal_latex):
@@ -295,10 +297,37 @@ def covers_goal(input_latex, goal_latex):
     modulo grouping, one is a big-operator wrapper whose body is the
     other (agents legitimately wrap a bare integrand/body goal in its
     ``\\int``/``\\lim`` binder, or state the body of a wrapped goal), or
-    both are indefinite integrals in the same variable with structurally
-    identical integrands (the textbook ``\\int \\frac{dx}{g}`` and the
-    canonical ``\\int \\frac{1}{g} \\, dx`` are one integral)."""
+    the two are one integral integrand-to-integrand — both written as
+    indefinite integrals in the same variable, or one written bare (the
+    textbook ``\\int \\frac{dx}{g}``, the canonical
+    ``\\int \\frac{1}{g} \\, dx``, and the bare integrand
+    ``\\frac{1}{g}`` all restate one another).
+
+    Integrand comparisons use the all-bracket-stripped discipline (`||`
+    and other semantic brackets are preserved): the textbook spelling
+    necessarily parenthesizes its denominator, and the `\\int` emitter
+    parenthesizes sum/negative bodies as pure syntax protection."""
     if same_expression(input_latex, goal_latex):
+        return True
+
+    def stripped_eq(left, right):
+        try:
+            return (_all_bracket_normal_form(left)
+                    == _all_bracket_normal_form(right))
+        except PrimitiveError:
+            return False
+
+    in_parts = _integral_parts_latex(input_latex)
+    goal_parts = _integral_parts_latex(goal_latex)
+    if (in_parts is not None and goal_parts is not None
+            and in_parts[0] == goal_parts[0]
+            and stripped_eq(in_parts[1], goal_parts[1])):
+        return True
+    if (in_parts is not None and goal_parts is None
+            and stripped_eq(in_parts[1], goal_latex)):
+        return True
+    if (goal_parts is not None and in_parts is None
+            and stripped_eq(goal_parts[1], input_latex)):
         return True
     body = _operator_body_latex(input_latex)
     if body is not None and same_expression(body, goal_latex):
@@ -306,19 +335,7 @@ def covers_goal(input_latex, goal_latex):
     goal_body = _operator_body_latex(goal_latex)
     if goal_body is not None and same_expression(input_latex, goal_body):
         return True
-    in_parts = _integral_parts_latex(input_latex)
-    if in_parts is None:
-        return False
-    goal_parts = _integral_parts_latex(goal_latex)
-    if goal_parts is None or in_parts[0] != goal_parts[0]:
-        return False
-    # integrands compare with ALL transparent grouping stripped (atom-identity
-    # discipline): the textbook form necessarily parenthesizes its denominator
-    try:
-        return (_all_bracket_normal_form(in_parts[1])
-                == _all_bracket_normal_form(goal_parts[1]))
-    except PrimitiveError:
-        return False
+    return False
 
 
 def _all_bracket_normal_form(latex):
