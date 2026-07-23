@@ -111,19 +111,27 @@ def _same_expression(left, right):
 
 
 def _chain_links(prev_result, cur_input):
-    """Structural step-chaining linkage (wrapper/body tolerant).
+    """Structural step-chaining linkage (wrapper/body/respelling tolerant).
 
     A step continues an earlier result when its input restates it modulo
-    grouping, or when either expression is the big-operator wrapper whose
+    grouping, when either expression is the big-operator wrapper whose
     body is the other — the integrand/body convention the primitives
     already accept in goal gating: `integrate_table` legitimately consumes
-    the integrand of the previous `\\int` result. Structural only; value
-    equality stays too permissive for a topological claim.
+    the integrand of the previous `\\int` result — or when the two are
+    bracket respellings of one structure (live: agents retype the
+    assemble result without its decorative per-piece `\\left(...\\right)`
+    wrappers). The all-bracket normal form re-encodes child boundaries,
+    so `(a+b)c` never links `a+bc`, and semantic brackets like `|...|`
+    are preserved. Structural only; value equality stays too permissive
+    for a topological claim.
     """
     import primitives
     try:
-        return (primitives.covers_goal(cur_input, prev_result)
-                or primitives.covers_goal(prev_result, cur_input))
+        if (primitives.covers_goal(cur_input, prev_result)
+                or primitives.covers_goal(prev_result, cur_input)):
+            return True
+        return (primitives._all_bracket_normal_form(prev_result)
+                == primitives._all_bracket_normal_form(cur_input))
     except Exception:
         return False
 

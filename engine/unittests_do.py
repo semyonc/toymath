@@ -2390,6 +2390,37 @@ class TestChainsToGoal(unittest.TestCase):
             's2',
             '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
 
+    def test_bracket_respelling_hop_accepted(self):
+        # second live model, same cell: the agent retyped the assemble
+        # result WITHOUT its decorative per-piece \left(...\right)
+        # wrappers before back-substituting. Bracket respellings of one
+        # structure must chain; a binding CHANGE must not.
+        import expr_commands as ec
+        from ledger import _chain_links
+        self.assertTrue(_chain_links(
+            '\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+            '\\left(6u\\right) - '
+            '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C',
+            '2u^{3} - 3u^{2} + 6u - 6 \\ln\\left ((u+1) \\right ) + C'))
+        # the stripper re-encodes child boundaries: dropping LOAD-BEARING
+        # parens is a different expression, not a respelling
+        self.assertFalse(_chain_links('(a+b)c', 'a+bc'))
+        self.assertFalse(_chain_links('|x|', 'x'))
+        steps = self._steps(
+            ('\\frac{1}{x^{1/2}+x^{1/3}}',
+             '\\int \\left(6u^2 - 6u + 6 - \\frac{6}{u+1}\\right) \\, d u'),
+            ('6u^2 - 6u + 6 - \\frac{6}{u+1}',
+             '\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+             '\\left(6u\\right) - '
+             '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C'),
+            ('2u^{3} - 3u^{2} + 6u - 6 \\ln\\left ((u+1) \\right ) + C',
+             '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+C'
+             '+6x^{\\frac {1} {6}}'
+             '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's3',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+
 
 class TestDirectCommands(unittest.TestCase):
     """The zero-token tier (gen 16): a `direct: <primitive>` command IS one
