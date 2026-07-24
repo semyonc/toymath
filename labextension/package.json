@@ -1,6 +1,7 @@
 {
   "name": "@toymath/model-ui",
   "version": "0.1.0",
+  "type": "module",
   "description": "Notebook-local ToyMath model title and completion integration",
   "keywords": [
     "jupyter",
@@ -24,7 +25,8 @@
     "build:lib": "tsc",
     "build:labextension": "build-labextension --core-path ../.venv/share/jupyter/lab/static . && node scripts/write-install.mjs",
     "build": "npm run build:lib && npm run build:labextension",
-    "clean": "rimraf lib ../labextension"
+    "clean": "rimraf lib ../labextension",
+    "test": "node --test test/*.test.ts"
   },
   "dependencies": {
     "@jupyterlab/application": "^4.5.10",
@@ -42,7 +44,7 @@
     "extension": true,
     "outputDir": "../labextension",
     "_build": {
-      "load": "static/remoteEntry.41932eb8ceb5c40c27ef.js",
+      "load": "static/remoteEntry.c43f01843814fb0e26fe.js",
       "extension": "./extension",
       "style": "./style"
     }

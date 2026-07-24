@@ -7,6 +7,8 @@ import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { IDisposable } from '@lumino/disposable';
 
+import { closeCommSafely } from './comm_lifecycle';
+
 const COMM_TARGET = 'toymath.model';
 const TOYMATH_KERNEL = 'toymath';
 
@@ -77,7 +79,7 @@ function readModelMessage(msg: KernelMessage.ICommMsgMsg): IModelState | null {
 }
 
 function connectPanel(panel: NotebookPanel, state: IPanelState): void {
-  state.comm?.close();
+  closeCommSafely(state.comm);
   state.comm = null;
   state.model = null;
 
@@ -181,7 +183,7 @@ function attachPanel(
         window.clearTimeout(state.completionTimer);
         state.completionTimer = null;
       }
-      state.comm?.close();
+      closeCommSafely(state.comm);
       state.comm = null;
     }
   };
