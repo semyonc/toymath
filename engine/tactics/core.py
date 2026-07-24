@@ -783,7 +783,7 @@ class _AtomStore(object):
 
 
 _NON_EXPR_OPS = (Notation.COMP, Notation.C_LIST, Notation.O_LIST,
-                 Notation.A_LIST)
+                 Notation.A_LIST, Notation.PAIR, Notation.COLLECTION)
 
 # matrix/vector objects: array literals and \vec-marked symbols. \cases is
 # excluded on purpose (piecewise scalar). Bare symbols read as scalars until

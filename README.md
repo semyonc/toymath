@@ -85,7 +85,10 @@ LLM call.
 ## Surfaces
 
 - **Jupyter:** `do!` accepts a free-form instruction; `[[n]]` chains results
-  across cells; steps stream into a notebook-wide ledger.
+  across cells; steps stream into a notebook-wide ledger. `model!` selects the
+  notebook-local OpenRouter model from `engine/models.yaml` (or accepts
+  `model! MODEL, PROVIDER...`); native completion opens after `model! ` and
+  the toolbar title tracks the active selection.
 - **Named commands:** `name!` loads reusable instructions from `commands/*.md`.
 - **Inline composition:** `{name! expression}` embeds checked sub-derivations
   inside a larger expression.
@@ -112,7 +115,8 @@ cd toymath
 uv venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-jupyter kernelspec install kernel_spec --user
+uv pip install --no-deps .             # installs the prebuilt Lab extension
+jupyter kernelspec install kernel_spec --user --name toymath --replace
 
 # Required only for do! and prompt commands
 echo 'OPEN_ROUTER=sk-or-...' >> .env
@@ -127,6 +131,8 @@ Pick the **Toy Math** kernel. Console mode is also available with
 
 - [Project overview](docs/OVERVIEW.md) — architecture, interfaces, commands,
   setup, testing, and repository map
+- [JupyterLab extension](jupyterlab-extension/README.md) — build and install
+  the native `model!` completion and live model-title integration.
 - [Verified primitives](docs/PRIMITIVES.md) — trust model, oracle, tactics, and
   ledger format
 - [Notation graph](docs/NOTATION.md) — DAG representation and traversal

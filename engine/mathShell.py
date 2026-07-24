@@ -10,6 +10,7 @@ from LatexWriter import LaTexWriter
 from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
+import model_config
 import prompt_commands
 
 from IPython.display import HTML, Javascript
@@ -66,6 +67,11 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
+        # Agent routing is notebook-local: model! changes this shell without
+        # mutating process-wide environment variables or other kernels.
+        self.model_name = model_config.current_model()
+        self.model_providers = ()
+        self.model_change_handler = None
         # commands! reloads the discoverable prompt-command registry.
 
     def _command_names(self):
@@ -117,6 +123,9 @@ class MathShell(object):
         if name in ('commands', 'help'):
             self.show_commands()
             return True
+        if name == 'model':
+            self.exec_model(rest)
+            return True
         if name == 'do':
             # the free-form agent endpoint: rest is the instruction verbatim
             self.exec_do(rest, execution_count, add_to_history)
@@ -160,8 +169,62 @@ class MathShell(object):
             '(add <code>commands/&lt;name&gt;.md</code> files)</div>')
         display(HTML('<div><b>notebook commands</b>' + table
                      + '<div style="color:#888;margin-top:4px">plus '
-                     '<code>do!</code> (free-form instruction) and '
+                     '<code>do!</code> (free-form instruction), '
+                     '<code>model!</code> (agent model), and '
                      '<code>commands!</code> (this list)</div></div>'))
+
+    def _model_status_html(self):
+        providers = self.model_providers
+        if providers:
+            routing = ('providers <code>'
+                       + _html.escape(', '.join(providers))
+                       + '</code>; fallbacks disabled')
+        else:
+            routing = 'OpenRouter default provider routing'
+        return ('<div><strong>agent model:</strong> <code>'
+                + _html.escape(self.model_name) + '</code> &mdash; '
+                + routing + '</div>')
+
+    def _set_model(self, model, providers=()):
+        """Set notebook-local agent routing and render its effective value."""
+        self.model_name = model
+        self.model_providers = tuple(providers)
+        if self.model_change_handler is not None:
+            self.model_change_handler(model, self.model_providers)
+        display(HTML(self._model_status_html()))
+
+    def exec_model(self, arguments):
+        """Handle ``model! [MODEL[, PROVIDER...]]`` for this notebook."""
+        try:
+            endpoints = model_config.load_model_config()
+        except model_config.ModelConfigError as e:
+            display(HTML('<div style="color:#c00">model! error: '
+                         + _html.escape(str(e)) + '</div>'))
+            return
+
+        if arguments:
+            parts = [part.strip() for part in arguments.split(',')]
+            if not parts[0] or any(not part for part in parts[1:]):
+                display(HTML('<div style="color:#c00">model! error: use '
+                             '<code>model! MODEL[, PROVIDER...]</code>'
+                             '</div>'))
+                return
+            model = parts[0]
+            # Explicit providers override the configured provider order. A
+            # bare model name picks up its optional routing from models.yaml.
+            if len(parts) > 1:
+                providers = tuple(dict.fromkeys(parts[1:]))
+            else:
+                endpoint = model_config.find_model(endpoints, model)
+                providers = endpoint.providers if endpoint else ()
+            self._set_model(model, providers)
+            return
+
+        display(HTML(self._model_status_html()
+                     + '<div style="color:#666">Type '
+                     '<code>model! </code> and press <kbd>Tab</kbd> or '
+                     '<kbd>Ctrl</kbd>+<kbd>Space</kbd> to choose from '
+                     '<code>engine/models.yaml</code>.</div>'))
 
     def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False
@@ -213,6 +276,16 @@ class MathShell(object):
             return (f"<div class=\"tex2jax_ignore\" style=\"color:#666\">"
                     f"<code>{step['id']}</code> "
                     f"<em>{_html.escape(step['args']['text'])}</em></div>")
+        if step['op'] == 'branch':
+            # Exploration topology is annotation, not checked mathematics.
+            # The later presentation generation will fold dead branches; for
+            # now make the explicit source/reason visible as it is recorded.
+            source = _html.escape(step['args']['from'])
+            reason = _html.escape(step['args']['reason'])
+            return (f'<div class="tex2jax_ignore" style="color:#666">'
+                    f'<code>{step["id"]}</code> '
+                    f'<strong>branch from {source}</strong> '
+                    f'&mdash; <em>{reason}</em></div>')
         check = step['check'].get('status', '?')
         mark = self._DO_MARKS.get(check, '?')
         if mark in ('XX', '?'):
@@ -222,7 +295,13 @@ class MathShell(object):
             style = ' style="color:#b65c00"'
         else:
             style = ''
-        branch = '' if step.get('continues') in (True, None) else ' (branch)'
+        edge = step.get('exploration') or {}
+        if edge:
+            branch = (f' (resumes from {_html.escape(edge.get("from", "?"))}'
+                      f' via {_html.escape(edge.get("marker", "?"))})')
+        else:
+            branch = ('' if step.get('continues') in (True, None)
+                      else ' (new chain; no marker)')
         note = ''
         if step['op'] == 'apply_both_sides':
             a = step['args']
@@ -240,20 +319,35 @@ class MathShell(object):
                      'skipped': '#888', 'domain-differs': '#b65c00',
                      'disagree': '#c00'}
 
-    def render_do_chain(self, steps):
+    def render_do_chain(self, steps, topology=None, all_steps=None):
         """End-of-run summary table of a run's verified chain, generated
         from the ledger records themselves — the agent is told never to
         retype it. Returns None when a table would add nothing (fewer
-        than two transforming steps)."""
-        rows = []
-        for step in steps:
-            if step.get('result') is None:
-                continue  # comments are strategy notes, not chain links
+        than two transforming steps). Marker-classified dead paths become
+        collapsed, expandable rows instead of bare branch labels."""
+        transforming = [s for s in steps if s.get('result') is not None]
+        all_transforming = [
+            s for s in (all_steps if all_steps is not None else steps)
+            if s.get('result') is not None]
+
+        def result_cells(step, nested=False):
             check = step['check'].get('status', '?')
             color = self._CHECK_COLORS.get(check, '#c00')
-            branch = ('<div style="color:#888;font-size:85%">(branch)'
-                      '</div>'
-                      if step.get('continues') is False else '')
+            edge = step.get('exploration') or {}
+            if edge:
+                lineage = (
+                    '<div class="tex2jax_ignore" '
+                    'style="color:#888;font-size:85%">resumed from '
+                    f'{_html.escape(edge.get("from", "?"))} via '
+                    f'{_html.escape(edge.get("marker", "?"))}</div>')
+            elif step.get('continues') is False and not (
+                    topology and (topology.get('parents')
+                                  or {}).get(step['id'])):
+                lineage = ('<div class="tex2jax_ignore" '
+                           'style="color:#888;font-size:85%">'
+                           'new chain; no marker</div>')
+            else:
+                lineage = ''
             note = ''
             if step['op'] == 'apply_both_sides':
                 a = step['args']
@@ -264,17 +358,75 @@ class MathShell(object):
                          f'{len(step["assumptions"])} assum.</span>')
             cell = 'padding:2px 12px 2px 0;text-align:left;' \
                    'vertical-align:top'
-            rows.append(
+            if nested:
+                return (
+                    '<div style="display:grid;grid-template-columns:'
+                    '5em 11em minmax(12em,1fr) 9em;column-gap:12px;'
+                    'padding:2px 0">'
+                    f'<div><code>{step["id"]}</code>{lineage}</div>'
+                    f'<div><code>{_html.escape(step["op"])}{note}</code>'
+                    '</div>'
+                    f'<div>${step["result"]}$</div>'
+                    f'<div style="color:{color}">{check}{assum}</div>'
+                    '</div>')
+            return (
                 '<tr>'
                 f'<td style="{cell}"><code>{step["id"]}</code>'
-                f'{branch}</td>'
+                f'{lineage}</td>'
                 f'<td style="{cell}"><code>'
                 f'{_html.escape(step["op"])}{note}</code></td>'
                 f'<td style="{cell}">${step["result"]}$</td>'
                 f'<td style="{cell};color:{color}">{check}{assum}</td>'
                 '</tr>')
-        if len(rows) < 2:
+
+        topology = topology or {}
+        paths_by_insertion = {}
+        folded = set()
+        current_ids = {s['id'] for s in transforming}
+        all_ids = {s['id'] for s in all_transforming}
+        for path in topology.get('abandoned_paths') or []:
+            ids = [sid for sid in path.get('steps', [])
+                   if sid in all_ids]
+            if not ids:
+                continue
+            insertion = next((sid for sid in ids if sid in current_ids), None)
+            if insertion is None and path.get('continues_at') in current_ids:
+                insertion = path['continues_at']
+            paths_by_insertion.setdefault(insertion, []).append(
+                dict(path, steps=ids))
+            folded.update(sid for sid in ids if sid in current_ids)
+        if len(transforming) < 2 and not paths_by_insertion:
             return None
+        by_id = {s['id']: s for s in all_transforming}
+        rows = []
+
+        def path_row(path):
+            count = len(path['steps'])
+            target = (f'; resumed as {path["continues_at"]}'
+                      if path.get('continues_at') else '')
+            body = ''.join(result_cells(by_id[sid], nested=True)
+                           for sid in path['steps'])
+            cell = ('padding:3px 12px 3px 0;text-align:left;'
+                    'vertical-align:top')
+            return (
+                f'<tr><td colspan="4" style="{cell}">'
+                '<details><summary><span class="tex2jax_ignore">'
+                '<strong>abandoned path from '
+                f'{_html.escape(path["source"])}</strong> &mdash; '
+                f'{_html.escape(path["reason"])} '
+                f'({count} checked step{"s" if count != 1 else ""}'
+                f'{_html.escape(target)})</span></summary>'
+                f'{body}</details></td></tr>')
+
+        for step in transforming:
+            for path in paths_by_insertion.pop(step['id'], []):
+                rows.append(path_row(path))
+            if step['id'] in folded:
+                continue
+            rows.append(result_cells(step))
+        for paths in paths_by_insertion.values():
+            for path in paths:
+                rows.append(path_row(path))
         head = 'padding:2px 12px 2px 0;text-align:left;' \
                'border-bottom:1px solid #8884'
         header = ('<tr>'
@@ -283,7 +435,7 @@ class MathShell(object):
                   + '</tr>')
         return ('<div style="margin-top:4px"><strong>verified chain'
                 '</strong> <span style="color:#888">&mdash; rendered '
-                'from the ledger</span></div>'
+                'from the selected ledger spine</span></div>'
                 '<table style="border-collapse:collapse">'
                 + header + ''.join(rows) + '</table>')
 
@@ -388,7 +540,9 @@ class MathShell(object):
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
                                            on_plot=on_plot,
-                                           proof_goal=proof_goal)
+                                           proof_goal=proof_goal,
+                                           model_name=self.model_name,
+                                           providers=self.model_providers)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return
@@ -396,7 +550,9 @@ class MathShell(object):
             self._do_error(res.get('error', 'agent failed'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
-        chain = self.render_do_chain(res.get('steps') or [])
+        chain = self.render_do_chain(
+            res.get('steps') or [], res.get('branch_topology'),
+            all_steps=self.ledger.steps)
         if chain:
             display(HTML(chain))
         if res.get('summary'):
@@ -409,6 +565,15 @@ class MathShell(object):
                             for a in res['assumptions'])
             display(HTML(f'<div style="color:#888">assumptions: '
                          f'{asm}</div>'))
+        open_prov = res.get('final_provenance') or {}
+        if not res.get('final_result') and open_prov.get('source') == 'open':
+            # run-level open outcome: no certified result exists, and no
+            # fallback value may stand in for one
+            display(HTML(
+                '<div style="color:#b00020"><strong>outcome: open — no '
+                'certified result in this session.</strong> '
+                + _html.escape(open_prov.get('reason', ''))
+                + ' <em>(unverified reason)</em></div>'))
         if res['final_result']:
             provenance = res.get('final_provenance') or {}
             if provenance.get('status') == 'unverified':
@@ -455,9 +620,14 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail a derivation step
 
+        def run_selected(instruction, **kwargs):
+            kwargs['model_name'] = self.model_name
+            kwargs['providers'] = self.model_providers
+            return agent_do.run_instruction(instruction, **kwargs)
+
         resolver = expr_commands.ExprResolver(
             notation, Notation(), self.commands, self.ledger, on_step,
-            agent_do.run_instruction)
+            run_selected)
         try:
             root = resolver(sym)
         except (expr_commands.ExprCommandError, agent_do.DoAgentError) as e:

@@ -12,5 +12,6 @@ When no value route closes, apply `series_converges` with a dominating
 geometric (`c r^k`, `r < 1`) or p-series (`c/k^p`, `p > 1`) proposal; its
 recorded bound relation and assumptions are the verdict, and "converges
 absolutely" may be reported only from that recorded step. There is no
-divergence tactic: when nothing applies, report the exact missing move
-honestly; never conclude convergence or divergence in prose.
+divergence tactic: when nothing applies, record the open outcome with
+`set_open`, naming the exact missing move; never conclude convergence or
+divergence in prose.

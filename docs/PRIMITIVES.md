@@ -108,6 +108,16 @@ The ledger provides:
 - semantic continuity flags between consecutive results;
 - accumulated assumptions;
 - comments that are visible but never usable as provenance;
+- structured exploration markers that name an earlier transforming step and
+  explain why the agent resumed there, plus a presentation-only edge to the
+  next transforming step in the same goal;
+- replay-validated final-result selections, stored separately from steps so
+  selecting an earlier result remains visible after a session is reopened;
+- a replay-validated run-level open outcome (`set_open` in `do!`, `open` in
+  the CLI) recording, with a capped unverified reason, that a session ended
+  without a certified result; it suppresses any fallback result display and
+  is deliberately vocabulary-guarded: it never asserts that no solution
+  exists;
 - claims with open, established, or conditional verdicts;
 - replay that re-invokes the registered primitive and compares the result;
 - source validation for tactics that consume earlier ledger results.
@@ -116,6 +126,47 @@ The ledger provides:
 source graph closes the claim. A relation-valued endpoint must itself be
 mechanically true; an equivalent no-op rewrite cannot establish an arbitrary
 relation.
+
+Re-recording a claim whose statement matches an existing same-parent claim —
+open or concluded — focuses that claim instead of minting a duplicate id, and
+a repeated `conclude` replaces the closing chain (for example with one that
+carries fewer assumptions). In prove mode, `set_result` also accepts the root
+claim's statement and records the concluded endpoint it closes to.
+
+An exploration marker is recorded through `comment(text, from_step=...)` in
+`do!` or the explicit CLI `branch FROM_STEP REASON` control. Replay validates
+that its source is an earlier transforming step in the same goal. The next
+transforming step for that goal must consume the source result — modulo the
+wrapper/body convention the primitives already accept in goal gating, so an
+integrand-consuming tactic can resume an `\int`-shaped result — or, to
+abandon the source step itself (for example when the very first checked move
+was the wrong route), it may restart from that step's recorded input; the
+persisted edge then carries an explicit `input` anchor and presentation
+classifies the source step with its own dead route. Either way the step
+persists a hash-checked marker/source edge, derived from ledger order rather
+than a hidden mutable cursor. Step-to-step chain continuity uses the same
+structural convention, so a linear substitution workflow presents as one
+spine. A marker at the end of a partial session remains
+valid but visibly awaits its continuation. Legacy marker files without the
+target half derive the same edge deterministically during replay.
+
+`set_result` appends a separate selection record containing the chosen value
+and its already-validated step or claim provenance. The selection is
+presentation metadata, not a transforming step. `set_open` is the matching
+terminal control for a run that certifies nothing: it appends an open
+outcome (a selection that selects no value) whose only content is a capped
+reason naming the missing move. It is sound because it claims nothing about
+the mathematics — "this session exhibits no certified result" is decidable
+from the ledger itself — and a later certified selection supersedes it for
+display. An unresolved exploration marker at an open ending is presented as
+left unresolved rather than awaiting continuation. A concluded claim or the
+latest selection determines the displayed spine. Markdown and notebook output
+collapse each marker-classified off-spine route behind its source and reason,
+while retaining every checked step in an expandable body; assumptions from a
+dead route do not condition the selected final result. Exploration topology
+remains comment-grade annotation and is deliberately distinct from future
+assumption-bearing mathematical case splits. The ledger stays append-only:
+checked work on an abandoned path is never deleted.
 
 ### Provenance-aware composition
 
@@ -148,6 +199,12 @@ Important verified-layer behaviors include:
   than one comparison with a comma-valued right side; one-column `\cases`
   is also recognized as a system, and whole-system substitution/apply merge
   independently checked per-relation steps;
+- finite escaped-brace collections and exactly two parenthesized items are
+  first-class `COLLECTION` and ordered `PAIR` nodes, so complete values such
+  as `\{(-1,2),(1,-2)\}` survive parse/write, graph replication, normal-form
+  comparison, and notebook `[[n]]` history; they deliberately have no set
+  algebra or scalar numeric-oracle meaning, while bare `x,y` remains the
+  existing command/system `C_LIST`;
 - maximal non-fragment subtrees become opaque atoms so rational algebra can
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol

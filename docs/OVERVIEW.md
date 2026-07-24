@@ -63,6 +63,9 @@ It has a stable small surface:
 - `load_skill` progressively loads a relevant subject workflow;
 - `run_tactic` invokes an allowlisted registry entry;
 - `comment`, `claim`, `conclude`, and `set_result` manage the ledger/result;
+  giving `comment` an earlier `from_step` records an exploration-only resume
+  marker rather than an ordinary note. Its next checked step persists the
+  presentation edge, while `set_result` persists the selected final spine;
 - `plot` appears only when the optional sandbox is available.
 
 Core algebra/checking guidance is always present. Differentiation, equations,
@@ -79,13 +82,52 @@ Each successful call streams a checked step such as:
 s2#43bdac6 [ok] expand: 2x+3-3 = 7-3  ==>  2x = 4
 ```
 
-All agent cells in a notebook share one ledger. Each cell renders only its new
-slice, and a selected established result becomes addressable as `[[n]]` by a
-later cell.
+All agent cells in a notebook share one ledger. Each cell normally renders its
+new slice (an exploration fold may repeat earlier checked steps named by a new
+marker), and a selected established result becomes addressable as `[[n]]` by a
+later cell. Abandoned exploration routes remain in the append-only artifact
+but collapse behind expandable source/reason summaries; their assumptions do
+not condition the selected final spine.
 
 `prove!` creates a root claim before the model runs. The claim remains visibly
 open until `conclude` receives a connected, goal-owned checked chain. Prose
 cannot substitute for a missing step.
+
+### Selecting the notebook model
+
+`model!` changes the OpenRouter model for subsequent agent-backed cells in the
+current notebook kernel. It does not mutate `.env` or affect another running
+notebook:
+
+```text
+model! z-ai/glm-5.2
+model! z-ai/glm-5.2, Cerebras, Fireworks
+```
+
+Comma-separated provider names set OpenRouter's provider order and disable
+fallbacks. With only a model name, the optional provider order comes from
+`engine/models.yaml`; unlisted model names are also accepted and use
+OpenRouter's default routing. In JupyterLab, type `model! ` (including the
+trailing space) to open the native completion menu populated from that file.
+After a model and comma, the same menu offers its configured providers. The
+extension opens the menu automatically; <kbd>Tab</kbd> or
+<kbd>Ctrl</kbd>+<kbd>Space</kbd> invokes it manually. Running bare `model!`
+shows the current selection and this shortcut.
+
+The selected routing is used by `do!` and model-backed named/inline commands;
+direct primitive commands still make no model call. The notebook toolbar's
+kernel button shows `Toy Math · MODEL` and updates immediately when the
+selection changes. Model selection and its title are local to that notebook's
+kernel.
+
+The editable configuration shape is:
+
+```yaml
+models:
+  - model: anthropic/claude-sonnet-5
+  - model: z-ai/glm-5.2
+    providers: [Cerebras, Fireworks]
+```
 
 ## Notebook command tiers
 
@@ -141,8 +183,8 @@ python toymath_cli.py tactics --skill integration
 python toymath_cli.py describe integrate_by_parts
 ```
 
-Ledger-control commands (`claim`, `conclude`, `show`, `replay`) remain explicit
-CLI operations rather than math tactics.
+Ledger-control commands (`claim`, `conclude`, `branch`, `show`, `replay`)
+remain explicit CLI operations rather than math tactics.
 
 ## Plotting
 
@@ -175,8 +217,22 @@ registered rewrite command.
 uv venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-jupyter kernelspec install kernel_spec --user
+uv pip install --no-deps .
+jupyter kernelspec install kernel_spec --user --name toymath --replace
 jupyter lab
+```
+
+The project install places the prebuilt `@toymath/model-ui` extension in the
+active Jupyter environment; no Node.js build is needed by users. Restart a
+running JupyterLab server after installing or upgrading it. Extension
+developers can rebuild the committed frontend assets with:
+
+```bash
+cd jupyterlab-extension
+npm install
+npm run build
+cd ..
+uv pip install --reinstall --no-deps .
 ```
 
 Agent configuration is read from `.env`:
@@ -185,7 +241,18 @@ Agent configuration is read from `.env`:
 OPEN_ROUTER=sk-or-...
 OPENROUTER_MODEL=anthropic/claude-sonnet-5
 TOYMATH_SANDBOX=auto
+# optional Langfuse tracing of do! runs (off unless set to on/1/true)
+TOYMATH_OBSERVABILITY=off
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```
+
+With `TOYMATH_OBSERVABILITY=on`, each do! run is exported to Langfuse as one
+trace (agent turns, LLM generations with token usage and latency, and every
+trusted-primitive tool call) via the OpenInference instrumentor. Tracing is
+observability only — it never touches the ledger or the numeric oracle, and a
+Langfuse outage is downgraded to a logged warning so the derivation still runs.
 
 The normal test suite is offline; live OpenRouter and plot probes are opt-in:
 
@@ -204,6 +271,10 @@ engine/tactic_registry.py  authoritative tactic schemas and dispatch
 engine/tactic_skills.py    progressive SKILL.md discovery/rendering
 engine/ledger.py           record, render, claim closure, and replay
 engine/agent_do.py         do! runtime and stable model tool surface
+engine/model_config.py     model! configuration loading and validation
+engine/models.yaml         selectable OpenRouter models/provider orders
+jupyterlab-extension/      TypeScript source for completion/title integration
+labextension/              committed prebuilt JupyterLab extension
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition
 engine/prompt_commands.py  commands/*.md discovery

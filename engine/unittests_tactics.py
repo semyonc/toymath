@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Registry, progressive-skill, and CLI compatibility tests."""
+import io
 import json
+import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 import agent_do
 import primitives
@@ -85,9 +89,11 @@ class TestTacticRegistry(unittest.TestCase):
 
     def test_runtime_tool_surface_is_constant_and_small(self):
         tools = agent_do.make_tools(agent_do.DoSession())
+        # seven fixed non-plot tools: six since gen 27 plus the run-level
+        # open-outcome control. Tactic growth must never grow this list.
         self.assertEqual([tool.name for tool in tools], [
             'load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
-            'set_result'])
+            'set_result', 'set_open'])
         prompt = agent_do.build_prompt()
         payload_chars = len(prompt)
         payload_chars += sum(len(json.dumps(tool.params_json_schema,
@@ -126,6 +132,85 @@ class TestTacticRegistry(unittest.TestCase):
         roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
         self.assertEqual((roots.cmd, roots.expr, roots.var),
                          ('quadratic_roots', 'x^2-1', 'x'))
+        branch = parser.parse_args([
+            'branch', 's2', 'try another route', '--session', 'work.json'])
+        self.assertEqual((branch.cmd, branch.from_step, branch.reason),
+                         ('branch', 's2', 'try another route'))
+
+    def test_cli_branch_records_and_replays_marker(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'branch.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'branch', 's1', 'the substitution route stalled',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertEqual((rec['op'], rec['from']), ('branch', 's1'))
+        loaded = Ledger(path)
+        self.assertEqual(loaded.steps[-1]['op'], 'branch')
+        self.assertEqual(loaded.replay()['status'], 'verified')
+
+    def test_cli_open_records_replayable_open_outcome(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'open.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'open', 'a checked lower-bound tactic is missing',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertEqual((rec['op'], rec['id']), ('open', 'r1'))
+        loaded = Ledger(path)
+        self.assertIsNone(loaded.selections[-1]['result'])
+        self.assertEqual(loaded.selections[-1]['provenance']['status'],
+                         'open')
+        self.assertEqual(loaded.replay()['status'], 'verified')
+        shown = io.StringIO()
+        with redirect_stdout(shown):
+            toymath_cli.main(['show', '--session', path])
+        self.assertIn('OPEN r1#', shown.getvalue())
+
+    def test_cli_markdown_show_uses_persisted_selection_to_fold_path(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'topology.json')
+        ledger = Ledger(path)
+        source = ledger.record(core.expand('(x+1)^2'))
+        ledger.record(core.substitute(source['result'], 'x', '1'))
+        ledger.record_branch(source['id'], 'numeric detour was not the goal')
+        resumed = ledger.record(core.factor_quadratic(
+            source['result'], 'x'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        ledger.save()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'show', '--format', 'md', '--session', path])
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn('Selected final result `r1` from `s4`', rendered)
+        self.assertIn('<details>', rendered)
+        self.assertIn('numeric detour was not the goal', rendered)
+        self.assertIn('**s2**', rendered)
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
     def test_rewrite_at_flows_through_agent_and_replay(self):
         session = agent_do.DoSession()

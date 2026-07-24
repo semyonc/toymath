@@ -29,6 +29,13 @@ _PLAIN_ARRAY_ENV_RE = re.compile(
     re.DOTALL,
 )
 
+_ESCAPED_SET_RE = re.compile(
+    r'(?<!\\left)\\\{((?:(?!\\\{|\\\}).)*?)(?<!\\right)\\\}',
+    re.DOTALL,
+)
+_SET_BUILDER_OPEN = '\x01'
+_SET_BUILDER_CLOSE = '\x02'
+
 
 def _normalize_plain_array_envs(latex):
      """Turn non-alignment array environments into grammar commands.
@@ -46,6 +53,64 @@ def _normalize_plain_array_envs(latex):
           previous = latex
           latex = _PLAIN_ARRAY_ENV_RE.sub(repl, latex)
      return latex
+
+
+def _top_level_bar_count(body):
+     """Count vertical bars outside ordinary delimiter nesting.
+
+     Escaped braces are overloaded in TeX: an even number of top-level bars
+     denotes a finite collection (including absolute-value elements), while
+     an odd extra bar retains ToyMath's existing set-builder spelling.
+     """
+     stack = []
+     pairs = {')': '(', ']': '[', '}': '{',
+              _SET_BUILDER_CLOSE: _SET_BUILDER_OPEN}
+     i = 0
+     count = 0
+     while i < len(body):
+          ch = body[i]
+          if ch == '\\':
+               # Control words do not contribute delimiter characters.
+               # A following raw delimiter from \left( / \right) is handled
+               # on its next iteration.
+               j = i + 1
+               while j < len(body) and body[j].isalpha():
+                    j += 1
+               if j > i + 1:
+                    i = j
+                    continue
+          if ch in ('(', '[', '{', _SET_BUILDER_OPEN):
+               stack.append(ch)
+          elif ch in pairs:
+               if stack and stack[-1] == pairs[ch]:
+                    stack.pop()
+          elif ch == '|' and not stack:
+               count += 1
+          i += 1
+     return count
+
+
+def _normalize_collection_literals(latex):
+     r"""Lower standard ``\{...\}`` collection syntax to an unambiguous
+     internal grammar command.
+
+     Collection commas and the existing bare/set-builder vertical-bar grammar
+     otherwise create LALR conflicts. Innermost escaped braces are classified
+     first; private sentinels protect retained set-builders while an enclosing
+     collection is classified, then restore their original spelling.
+     """
+     def repl(match):
+          body = match.group(1)
+          if _top_level_bar_count(body) % 2:
+               return _SET_BUILDER_OPEN + body + _SET_BUILDER_CLOSE
+          return '\\collection{' + body + '}'
+
+     while True:
+          latex, count = _ESCAPED_SET_RE.subn(repl, latex)
+          if count == 0:
+               break
+     return latex.replace(_SET_BUILDER_OPEN, '\\{').replace(
+         _SET_BUILDER_CLOSE, '\\}')
 
 
 class MathParser(object):
@@ -68,6 +133,7 @@ class MathParser(object):
 
      def parse(self, input):
          input = _normalize_plain_array_envs(input)
+         input = _normalize_collection_literals(input)
          self.notation.clear()
          try:
              return self.yacc.parse(
@@ -528,12 +594,26 @@ class MathParser(object):
 
      def p_scalar_group(self, p):
          '''scalar : '(' comma-list ')' '''
-         p[0] = self.notation.setf(Notation.GROUP,(p[2],), br='()')
+         items = self._comma_items(p[2])
+         if len(items) == 2:
+             p[0] = self.notation.setf(Notation.PAIR, tuple(items))
+         else:
+             p[0] = self.notation.setf(
+                 Notation.GROUP, (p[2],), br='()')
          
      def p_scalar_quoted_group(self, p):
          '''scalar : '`' '(' comma-list ')' '''
          p[0] = self.notation.setf(Notation.GROUP,(p[3],), br='()', quoted=True)
          
+     def p_scalar_collection(self, p):
+         '''scalar : collection '{' comma-list '}' '''
+         p[0] = self.notation.setf(
+             Notation.COLLECTION, tuple(self._comma_items(p[3])))
+
+     def p_scalar_collection_empty(self, p):
+         '''scalar : collection '{' '}' '''
+         p[0] = self.notation.setf(Notation.COLLECTION, ())
+
      def p_scalar_group_b(self, p):
          '''scalar : LBR expression RBR '''
          p[0] = self.notation.setf(Notation.S_GROUP, (p[2],), br='{}')
@@ -548,7 +628,16 @@ class MathParser(object):
 
      def p_scalar_vgroup(self, p):
         '''scalar : left open subformula right close'''
-        p[0] = self.notation.setf(Notation.V_GROUP, (p[3],), br=p[2]+p[5])
+        br = p[2] + p[5]
+        items = self._comma_items(p[3])
+        if br == '()' and len(items) == 2:
+            p[0] = self.notation.setf(Notation.PAIR, tuple(items))
+        elif br == '\\{\\}':
+            p[0] = self.notation.setf(
+                Notation.COLLECTION, tuple(items))
+        else:
+            p[0] = self.notation.setf(
+                Notation.V_GROUP, (p[3],), br=br)
 
      def p_scalar_vgroup_a(self, p):
         '''scalar : left '|' subformula right '|' '''
@@ -599,6 +688,18 @@ class MathParser(object):
          '''column-list : column-list '&' subformula'''
          p[1].append(p[3])
          p[0] = p[1]
+
+     def _comma_items(self, sym):
+         """Items carried by comma syntax, without leaking C_LIST as type.
+
+         A bare top-level comma list remains the legacy C_LIST used for
+         command arguments and relation systems. Delimiter productions call
+         this helper only when their delimiters provide the semantic type:
+         parentheses for exactly two ordered items, escaped braces for a
+         finite collection.
+         """
+         f = self.notation.getf(sym, Notation.C_LIST)
+         return list(f.args) if f is not None else [sym]
 
      # Error rule for syntax errors
      def p_error(self, p):

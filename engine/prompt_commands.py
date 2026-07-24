@@ -32,7 +32,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # names that name the dispatcher's own built-ins; a file cannot shadow them
-RESERVED = frozenset(('do', 'commands', 'help'))
+RESERVED = frozenset(('do', 'commands', 'help', 'model'))
 
 _NAME_RE = re.compile(r'^[A-Za-z_]\w*$')
 _PLACEHOLDER = '$ARGUMENTS'

@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import agent_do
+import observability
 import plot_sandbox
 import tactic_registry
 from tactics import core as core_tactics
@@ -111,6 +112,26 @@ class TestPromptBuilder(unittest.TestCase):
         self.assertIn('Never restate ledger steps', p)
         self.assertIn('write image links', p)
 
+    def test_prompt_names_structured_exploration_markers(self):
+        p = agent_do.build_prompt()
+        self.assertIn('exact step id as from_step', p)
+        self.assertIn('source result verbatim to the\n  next tactic', p)
+        self.assertIn('never mathematical case data', p)
+        # the abandon-the-step-itself form (root-anchor gap) is steered too
+        self.assertIn('abandon a recorded step ITSELF', p)
+        self.assertIn("from that step's recorded input", p)
+        # from_step is only for resume intent; notes must omit it
+        self.assertIn('Pass from_step ONLY when the', p)
+
+    def test_prompt_steers_open_outcome_with_naming_guard(self):
+        p = agent_do.build_prompt()
+        self.assertIn('call set_open once', p)
+        self.assertIn('it never means no solution exists', p)
+        self.assertIn('Never dress the last step up as the answer', p)
+        # math in the reason is $-delimited so the notebook banner
+        # typesets it instead of showing raw backslash commands
+        self.assertIn('with formulas in $...$', p)
+
     def test_prove_prompt_names_actual_shared_ledger_claim(self):
         p = agent_do.build_prompt(prove_mode=True, proof_claim_id='c7')
         self.assertIn('root claim\n`c7`', p)
@@ -150,6 +171,8 @@ class TestDoSessionApi(unittest.TestCase):
         rec = json.loads(api['set_result']('x = 2'))
         self.assertTrue(rec['ok'])
         self.assertEqual(rec['provenance']['status'], 'unverified')
+        self.assertEqual(rec['selection'], 'r1')
+        self.assertEqual(session.ledger.selections[0]['result'], 'x = 2')
         self.assertEqual(session.result_override, 'x = 2')
         self.assertFalse(json.loads(api['set_result']('\\frac{'))['ok'])
         self.assertEqual(session.result_override, 'x = 2')  # kept
@@ -167,6 +190,110 @@ class TestDoSessionApi(unittest.TestCase):
         res = json.loads(api['set_result']('x = 2'))
         self.assertEqual(res['provenance']['status'], 'unverified')
         self.assertFalse(json.loads(api['comment']('  '))['ok'])
+
+    def test_comment_from_step_records_a_structured_branch_marker(self):
+        seen = []
+        session = DoSession(on_step=seen.append)
+        api = make_api(session)
+        source = json.loads(api['expand']('(x+1)^2'))['step']['id']
+        rec = json.loads(api['comment'](
+            'the substitution route stalled', source))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['op'], 'branch')
+        self.assertEqual(rec['from'], 's1')
+        marker = session.new_steps()[-1]
+        self.assertEqual(marker['args']['reason'],
+                         'the substitution route stalled')
+        self.assertIsNone(marker['result'])
+        self.assertEqual(seen[-1]['op'], 'branch')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        bad = json.loads(api['comment']('resume', 's999'))
+        self.assertFalse(bad['ok'])
+        self.assertEqual(bad['op'], 'branch')
+
+    def test_branch_marker_attaches_to_next_transform(self):
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+1)^2'))
+        json.loads(api['substitute'](first['result'], 'x', '1'))
+        marker = json.loads(api['comment'](
+            'the numeric detour is not the symbolic answer', 's1'))
+        refused = json.loads(api['expand']('(y+1)^2'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('does not resume branch marker', refused['error'])
+        self.assertEqual(len(session.new_steps()), 3)
+        resumed = json.loads(api['factor_quadratic'](
+            first['result'], 'x'))
+        self.assertEqual(resumed['step']['id'], 's4')
+        target = session.ledger.steps[-1]
+        self.assertEqual(target['exploration']['marker'], marker['id'])
+        self.assertEqual(target['exploration']['from'], 's1')
+        selected = json.loads(api['set_result'](resumed['result']))
+        self.assertEqual(selected['selection'], 'r1')
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine'], ['s1', 's4'])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'], ['s2'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_pending_marker_note_downgrades_and_refusal_steers(self):
+        # live conv! trace shape: 5 of 8 comment calls died against the
+        # pending-marker gate because the refusal never named the repair
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+1)^2'))
+        json.loads(api['substitute'](first['result'], 'x', '1'))
+        marker = json.loads(api['comment']('detour went nowhere', 's1'))
+        self.assertEqual(marker['op'], 'branch')
+        # a note whose from_step names the pending marker ITSELF is the
+        # observed misuse: record the plain note the agent meant
+        note = json.loads(api['comment']('status: routes exhausted',
+                                         marker['id']))
+        self.assertTrue(note['ok'])
+        self.assertEqual(note['op'], 'comment')
+        self.assertIn('markers do not stack', note['hint'])
+        # any other from_step while a marker is pending names both repairs
+        refused = json.loads(api['comment']('analysis note', 's1'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('plain comment (no from_step)', refused['error'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_set_open_records_open_outcome(self):
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['expand']('(x+1)^2'))
+        self.assertFalse(json.loads(api['set_open'](' '))['ok'])
+        rec = json.loads(api['set_open']('missing: a checked lower bound'))
+        self.assertTrue(rec['ok'])
+        self.assertEqual(rec['outcome'], 'open')
+        self.assertEqual(rec['selection'], 'r1')
+        outcome = session.ledger.selections[-1]
+        self.assertIsNone(outcome['result'])
+        self.assertEqual(outcome['provenance']['status'], 'open')
+        dup = json.loads(api['set_open']('again'))
+        self.assertFalse(dup['ok'])
+        self.assertIn('already recorded', dup['error'])
+        self.assertEqual(session.new_steps()[-1]['op'], 'expand')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_set_open_refused_after_designation_and_recovery_after_open(
+            self):
+        session = DoSession()
+        api = make_api(session)
+        first = json.loads(api['expand']('(x+2)^2'))
+        json.loads(api['set_result'](first['result']))
+        refused = json.loads(api['set_open']('stalled'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('already designated', refused['error'])
+        # and the reverse order recovers: set_result supersedes set_open
+        other = DoSession()
+        api2 = make_api(other)
+        step = json.loads(api2['expand']('(x+3)^2'))
+        self.assertTrue(json.loads(api2['set_open']('thought stuck'))['ok'])
+        recovered = json.loads(api2['set_result'](step['result']))
+        self.assertTrue(recovered['ok'], recovered.get('error'))
+        self.assertEqual([s['id'] for s in other.ledger.selections],
+                         ['r1', 'r2'])
+        self.assertEqual(other.ledger.replay()['status'], 'verified')
 
     def test_set_result_rejects_detached_conclusion(self):
         session = DoSession()
@@ -188,6 +315,8 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(rec['provenance']['status'], 'verified')
         self.assertEqual(rec['provenance']['step'], 's1')
         self.assertNotEqual(rec['provenance']['method'], 'exact-result')
+        self.assertEqual(session.ledger.selections[-1]['provenance']['step'],
+                         's1')
 
     def test_set_result_can_select_shared_ledger_result(self):
         ledger = Ledger()
@@ -544,6 +673,99 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
 
+    def test_set_open_suppresses_last_step_fallback(self):
+        # the conv! pseudo-answer: a run that certified nothing used to
+        # hand the cell its last checked step as a "verified" result
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'no tactic covers the goal shape'}, 'c2')],
+            [message('Left open: the checked split answers nothing yet.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('decide the undecidable',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['status'], 'open')
+        self.assertEqual(res['final_provenance']['source'], 'open')
+        self.assertEqual(res['final_provenance']['reason'],
+                         'no tactic covers the goal shape')
+        self.assertEqual(res['final_provenance']['selection'], 'r1')
+        # prose stays subordinate to the recorded outcome
+        self.assertTrue(res.get('summary_unverified'))
+        self.assertEqual(res['branch_topology']['spine'], [])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_set_open_closes_out_unresolved_marker_visibly(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('comment', {'text': 'wrong route',
+                                   'from_step': 's1'}, 'c2')],
+            [tool_call('set_open', {
+                'reason': 'the resume needs a tactic this run lacks'},
+                'c3')],
+            [message('open')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('explore', model=ScriptedModel(script),
+                              ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['branch_topology']['unresolved_markers'],
+                         ['s2'])
+        md = ledger.render_markdown()
+        self.assertIn('left unresolved; outcome recorded open', md)
+        self.assertNotIn('awaiting a continuing step', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_branch_run_returns_spine_and_abandoned_path_summary(self):
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('substitute', {
+                'expr': 'x^{2}+2x+1', 'var': 'x', 'value': '1'}, 'c2')],
+            [tool_call('comment', {
+                'text': 'the numeric detour does not answer the symbolic goal',
+                'from_step': 's1'}, 'c3')],
+            [tool_call('factor_quadratic', {
+                'expr': 'x^{2}+2x+1', 'var': 'x'}, 'c4')],
+            [tool_call('set_result', {'expr': '(x+1)^{2}'}, 'c5')],
+            [message('Used the factored symbolic route.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('explore then factor',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_provenance']['step'], 's4')
+        self.assertEqual(res['branch_topology']['spine'], ['s1', 's4'])
+        self.assertEqual(res['abandoned_paths'], [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'the numeric detour does not answer the symbolic goal',
+            'steps': ['s2'],
+        }])
+        self.assertEqual(ledger.selections[-1]['id'], 'r1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_dead_branch_assumption_is_not_a_final_assumption(self):
+        script = [
+            [tool_call('expand', {'expr': 'xy=1'}, 'c1')],
+            [tool_call('apply', {
+                'equation': 'xy=1', 'op': '/', 'arg': 'y'}, 'c2')],
+            [tool_call('comment', {
+                'text': 'division is unnecessary', 'from_step': 's1'}, 'c3')],
+            [tool_call('apply', {
+                'equation': 'xy=1', 'op': '-', 'arg': '1'}, 'c4')],
+            [tool_call('set_result', {'expr': 'xy-1=0'}, 'c5')],
+            [message('Kept the assumption-free route.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('rearrange without division',
+                              model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertTrue(ledger.assumptions)
+        self.assertEqual(res['assumptions'], [])
+        self.assertEqual(res['abandoned_paths'][0]['steps'], ['s2'])
+
     def test_set_result_cannot_override_with_detached_value(self):
         script = [
             [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
@@ -645,6 +867,52 @@ class TestScriptedAgent(unittest.TestCase):
         rep = ledger.replay()
         self.assertEqual(rep['status'], 'verified', rep.get('reason'))
 
+    def test_prove_mode_reclaim_refocuses_root_and_statement_sets_result(
+            self):
+        # The live n/2^n trap: after a first conditional closure the agent
+        # re-stated the root claim (minting c2, which stole the goal focus
+        # of every later step, so conclude(c1) could never succeed again)
+        # and then passed the claim STATEMENT to set_result (refused; the
+        # selection wants the endpoint). Both moves must now work: the
+        # re-claim focuses c1, a repeated conclude replaces the chain, and
+        # the statement maps to the concluded endpoint.
+        goal = r'\lim_{n \to \infty} \frac{n}{2^n} = 0'
+        start = r'\lim_{n \to \infty} \frac{n}{2^n}'
+        transformed = (r'\lim_{n \to \infty} \frac{1}'
+                       r'{({2}^n) \ln\left (2 \right )}')
+        script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
+            [tool_call('limit_lhopital', {'expr': start}, 'c1')],
+            [tool_call('limit_table', {'expr': transformed}, 'c2')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s1', 's2']}, 'c3')],
+            # the agent re-states the claim hunting for a better chain
+            [tool_call('claim', {'statement': goal}, 'c4')],
+            [tool_call('limit_lhopital', {'expr': start}, 'c5')],
+            [tool_call('limit_table', {'expr': transformed}, 'c6')],
+            [tool_call('conclude', {'claim_id': 'c1',
+                                    'step_ids': ['s3', 's4']}, 'c7')],
+            [tool_call('set_result', {'expr': goal}, 'c8')],
+            [message('Mechanically checked via l\'Hopital.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction('prove the limit', ledger=ledger,
+                              model=ScriptedModel(script), proof_goal=goal)
+        self.assertTrue(res['ok'], res.get('error'))
+        # the re-claim reused c1: one claim, and the late steps kept its goal
+        self.assertEqual(len(res['claims']), 1)
+        self.assertEqual([s.get('goal') for s in res['steps']
+                          if s.get('result') is not None],
+                         ['c1', 'c1', 'c1', 'c1'])
+        self.assertEqual(res['claims'][0]['verdict'], 'conditional')
+        self.assertEqual(res['claims'][0]['conclusion']['steps'],
+                         ['s3', 's4'])
+        # the statement spelling designated the concluded endpoint
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(res['final_provenance']['source'], 'claim')
+        rep = ledger.replay()
+        self.assertEqual(rep['status'], 'verified', rep.get('reason'))
+
     def test_prove_mode_leaves_failed_target_open(self):
         script = [
             [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
@@ -660,6 +928,38 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['claims'][0]['verdict'], 'open')
         self.assertIsNone(res['final_result'])
         self.assertEqual(res['final_provenance']['status'], 'open')
+
+    def test_prove_mode_set_open_refines_reason_and_respects_conclusion(
+            self):
+        # with the root still open, set_open records the agent's specific
+        # missing move instead of the generic no-closing-chain reason
+        script = [
+            [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
+            [tool_call('limit_table', {
+                'expr': r'\lim_{n \to \infty} \frac{1}{n}'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'no tactic relates the table value to the '
+                          'claimed sequence'}, 'c2')],
+            [message('Left open.')],
+        ]
+        res = run_instruction(
+            'try the proof', model=ScriptedModel(script),
+            proof_goal=r'\lim_{n \to \infty} \frac{n}{2^n} = 0')
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['claims'][0]['verdict'], 'open')
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['source'], 'open')
+        self.assertIn('no tactic relates', res['final_provenance']['reason'])
+        # a concluded root refuses the open outcome and names the repair
+        session = DoSession()
+        api = make_api(session)
+        session.claim(r'\lim_{n \to \infty} \frac{1}{n} = 0', root=True)
+        json.loads(api['limit_table'](r'\lim_{n \to \infty} \frac{1}{n}'))
+        json.loads(api['conclude']('c1', ['s1']))
+        refused = json.loads(api['set_open']('stalled'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('concluded', refused['error'])
+        self.assertIn('set_result', refused['error'])
 
     def test_open_claim_caps_plain_do_summary(self):
         # even outside prove!, prose must not dominate an open claim
@@ -705,6 +1005,138 @@ class TestScriptedAgent(unittest.TestCase):
             ledger=ledger)
         self.assertEqual(len(ledger.steps), 3)
         self.assertEqual(len(res['steps']), 1)  # only this run's slice
+
+
+class TestObservability(unittest.TestCase):
+    """Langfuse tracing is opt-in, non-fatal, and never touches the ledger.
+
+    Runs fully offline: a Langfuse client backed by an in-memory OTEL
+    exporter captures spans without any network or credentials.
+    """
+
+    def test_env_toggle_parsing(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(observability.ENABLE_VAR, None)
+            self.assertFalse(observability.is_enabled())
+        for on in ('1', 'true', 'on', 'yes', 'ON', 'Enabled'):
+            with mock.patch.dict(os.environ,
+                                 {observability.ENABLE_VAR: on}):
+                self.assertTrue(observability.is_enabled(), on)
+        for off in ('0', 'false', 'off', 'no', '', 'maybe'):
+            with mock.patch.dict(os.environ,
+                                 {observability.ENABLE_VAR: off}):
+                self.assertFalse(observability.is_enabled(), off)
+
+    def test_disabled_is_a_noop_and_run_is_unaffected(self):
+        observability._reset_for_tests()
+        self.addCleanup(observability._reset_for_tests)
+        with mock.patch.dict(os.environ, {observability.ENABLE_VAR: 'off'}):
+            self.assertFalse(observability.setup())
+        self.assertFalse(observability.active())
+        with observability.trace_run('anything') as span:
+            self.assertIsNone(span)  # a no-op context manager
+        observability.set_output(None, 'ignored')  # must not raise
+        observability.flush()  # must not raise
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x',
+            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]))
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['final_result'], '2x = 4')
+
+    def test_build_model_tracing_toggle_follows_observability(self):
+        # THE landmine: the OpenInference instrumentor rides the Agents-SDK
+        # tracing pipeline, so an active observability must leave that
+        # pipeline ENABLED; an inactive one disables it (no OpenAI upload).
+        for is_active, expected_disabled in [(True, False), (False, True)]:
+            calls = []
+            with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
+                 mock.patch('agents.set_tracing_disabled',
+                            side_effect=calls.append), \
+                 mock.patch.object(observability, 'active',
+                                   return_value=is_active):
+                agent_do.build_model()
+            self.assertEqual(calls, [expected_disabled], is_active)
+
+    def test_build_model_accepts_notebook_override(self):
+        with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
+             mock.patch.object(observability, 'active', return_value=False):
+            built = agent_do.build_model('z-ai/glm-5.2')
+        self.assertEqual(built.model, 'z-ai/glm-5.2')
+
+    def test_provider_order_reaches_model_settings_extra_body(self):
+        settings = []
+
+        class RecordingModel(ScriptedModel):
+            async def get_response(self, system_instructions, input,
+                                   model_settings, *args, **kwargs):
+                settings.append(model_settings)
+                return await super().get_response(
+                    system_instructions, input, model_settings,
+                    *args, **kwargs)
+
+        res = run_instruction(
+            'say hello', model=RecordingModel([[message('hello')]]),
+            providers=('Cerebras', 'Fireworks'))
+        self.assertTrue(res['ok'])
+        self.assertEqual(settings[0].extra_body, {
+            'provider': {
+                'order': ['Cerebras', 'Fireworks'],
+                'allow_fallbacks': False,
+            },
+        })
+
+    def test_active_run_emits_one_nested_langfuse_trace(self):
+        from agents import set_tracing_disabled
+        from openinference.instrumentation.openai_agents import (
+            OpenAIAgentsInstrumentor)
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter)
+        from langfuse import Langfuse
+
+        exporter = InMemorySpanExporter()
+        lf = Langfuse(public_key='pk-lf-test', secret_key='sk-lf-test',
+                      tracing_enabled=True, span_exporter=exporter)
+        set_tracing_disabled(False)
+        observability._reset_for_tests()
+
+        def cleanup():
+            OpenAIAgentsInstrumentor().uninstrument()
+            observability._reset_for_tests()
+            set_tracing_disabled(True)  # leave the process quiet again
+            lf.shutdown()
+        self.addCleanup(cleanup)
+
+        self.assertTrue(observability.setup(client=lf))
+        self.assertTrue(observability.active())
+
+        ledger = Ledger()
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x',
+            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]),
+            ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        lf.flush()
+
+        spans = exporter.get_finished_spans()
+        self.assertTrue(spans, 'no spans were exported')
+        # one trace for the whole run, rooted at our wrapping observation
+        self.assertEqual(len({s.context.trace_id for s in spans}), 1)
+        root = next(s for s in spans if s.parent is None)
+        self.assertEqual(root.name, 'do!')
+        attrs = dict(root.attributes)
+        self.assertEqual(attrs.get('langfuse.observation.input'),
+                         'solve 2x + 3 = 7 for x')
+        self.assertEqual(attrs.get('langfuse.observation.metadata.mode'),
+                         'do')
+        self.assertEqual(attrs.get('langfuse.observation.type'), 'agent')
+        # the trusted-primitive calls appear as nested tool spans
+        kinds = {s.attributes.get('openinference.span.kind') for s in spans}
+        self.assertIn('TOOL', kinds)
+        # tracing is observability only: the ledger is exactly what it would
+        # be without it
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['apply_both_sides', 'expand'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
@@ -1048,9 +1480,30 @@ class TestMathShellDo(unittest.TestCase):
         resolved = self.shell.resolve_backrefs('[[3]]')
         primitives.parse_latex(resolved)
 
+    def test_typed_collection_survives_history_snapshot(self):
+        import primitives
+        from notation import Notation
+
+        latex = '\\{(-1,2),(1,-2)\\}'
+        sym = self.shell.parser.parse(latex)
+        rendered = self.shell.output(
+            sym, self.shell.parsedNotation, 48, True)
+        self.assertEqual(rendered, latex)
+
+        # A later parse clears parsedNotation in place. The private history
+        # snapshot must retain both the collection and its pair children.
+        self.shell.parser.parse('z')
+        resolved = self.shell.resolve_backrefs('[[48]]')
+        chained, notation = primitives.parse_latex(resolved)
+        collection = notation.getf(chained, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertTrue(all(notation.getf(item, Notation.PAIR) is not None
+                            for item in collection.args))
+
     def test_do_cell_streams_and_chains(self):
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(SOLVE_SCRIPT)):
+                               lambda model_name=None: ScriptedModel(
+                                   SOLVE_SCRIPT)):
             self.shell.exec('do! solve 2x + 3 = 7 for x', 2,
                             add_to_history=True)
         out = self._html()
@@ -1062,6 +1515,103 @@ class TestMathShellDo(unittest.TestCase):
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
+
+    def test_do_open_outcome_banner_typesets_dollar_math(self):
+        # the reason's $-delimited math must reach the banner intact and
+        # the banner div must stay MathJax-eligible (unlike note prose,
+        # which is deliberately tex2jax_ignore'd)
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_open', {
+                'reason': 'the missing move is a checked bound for '
+                          '$\\sum_{n=1}^{m} \\frac{1}{n}$'}, 'c2')],
+            [message('Left open.')],
+        ]
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda model_name=None: ScriptedModel(
+                                   script)):
+            self.shell.exec('do! decide something out of reach', 5,
+                            add_to_history=True)
+        out = self._html()
+        self.assertIn('outcome: open', out)
+        self.assertIn('$\\sum_{n=1}^{m} \\frac{1}{n}$', out)
+        self.assertIn('(unverified reason)', out)
+        banner = next(getattr(d, 'data', '') for d in self.displays
+                      if 'outcome: open' in getattr(d, 'data', ''))
+        self.assertNotIn('tex2jax_ignore', banner)
+
+    def test_int_composite_closes_across_substitution_chain(self):
+        # the reported live cell (gemini, trace-replayed): u = x^{1/6}
+        # substitution, polynomial division, linearity, assemble, back-
+        # substitution, expand — every step green, set_result accepted,
+        # and the goal-chain gate then refused the splice because its
+        # step hops used strict spelling identity across \int boundaries
+        def rt(tactic, arguments, cid):
+            return ResponseFunctionToolCall(
+                type='function_call', name='run_tactic',
+                arguments=json.dumps({'tactic': tactic,
+                                      'arguments': arguments}),
+                call_id=cid, id=cid)
+
+        calls = [
+            tool_call('load_skill', {'skill': 'integration'}, 'c0'),
+            rt('integrate_substitute',
+               ['\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}', 'x',
+                'x^{\\frac{1}{6}}', 'u', '\\frac{6u^5}{u^3+u^2}'], 'c1'),
+            rt('integrate_rewrite',
+               ['\\frac{6u^5}{u^3+u^2}', 'u', '\\frac{6u^3}{u+1}'], 'c2'),
+            rt('integrate_rewrite',
+               ['\\frac{6u^3}{u+1}', 'u', '6u^2-6u+6-\\frac{6}{u+1}'],
+               'c3'),
+            rt('integrate_linearity',
+               ['6u^2-6u+6-\\frac{6}{u+1}', 'u'], 'c4'),
+            rt('integrate_power_rule', ['6u^2', 'u'], 'c5'),
+            rt('substitute', ['2u^{3} + C', 'C', '0'], 'c6'),
+            rt('integrate_power_rule', ['6u', 'u'], 'c7'),
+            rt('substitute', ['3u^{2} + C', 'C', '0'], 'c8'),
+            rt('integrate_power_rule', ['6', 'u'], 'c9'),
+            rt('substitute', ['6u + C', 'C', '0'], 'c10'),
+            rt('integrate_substitute',
+               ['\\frac{6}{u+1}', 'u', 'u+1', 'v', '\\frac{6}{v}'], 'c11'),
+            rt('integrate_table', ['\\frac{6}{v}', 'v'], 'c12'),
+            rt('substitute',
+               ['6 \\ln\\left(v\\right) + C', 'v', 'u+1'], 'c13'),
+            rt('substitute',
+               ['6 \\ln\\left ((u+1) \\right )+C', 'C', '0'], 'c14'),
+            rt('integrate_assemble',
+               ['s4', 's6', 's8', 's10', 's14'], 'c15'),
+            rt('substitute',
+               ['\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+                '\\left(6u\\right) - '
+                '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C',
+                'u', 'x^{\\frac{1}{6}}'], 'c16'),
+            rt('expand',
+               ['\\left (2(x^{\\frac {1} {6}})^{3}\\right )- '
+                '\\left (3(x^{\\frac {1} {6}})^{2}\\right )+ '
+                '\\left (6(x^{\\frac {1} {6}}) \\right )- '
+                '\\left (6 \\ln\\left (((x^{\\frac {1} {6}})+1) \\right )'
+                ' \\right )+C'], 'c17'),
+            tool_call('set_result', {'expr':
+                '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+C'
+                '+6x^{\\frac {1} {6}}'
+                '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )'}, 'c18'),
+        ]
+        turns = [[c] for c in calls]
+        turns.append([message('The indefinite integral is set.')])
+        with mock.patch.object(agent_do, 'build_model',
+                               lambda model_name=None: ScriptedModel(
+                                   turns)):
+            self.shell.exec(
+                'int! \\int \\frac {dx} (x^{\\frac 1 2} + x^{\\frac 1 3})',
+                6, add_to_history=True)
+        out = self._html()
+        self.assertNotIn('did not close', out)
+        self.assertNotIn('do! error', out)
+        # 17 replayed steps plus the composite glue check
+        self.assertEqual(len(self.shell.ledger.steps), 18)
+        self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
+        chained = self.shell.resolve_backrefs('[[6]]')
+        self.assertIn('\\ln', chained)
 
     def test_do_missing_backref_fails_fast(self):
         called = []
@@ -1095,8 +1645,10 @@ class TestMathShellDo(unittest.TestCase):
         ])
         self.assertIn('verified chain', html)
         for frag in ('<code>s1</code>', '<code>expand</code>',
-                     '$x^{2}+2x+1$', '(branch)', '+1 assum.'):
+                     '$x^{2}+2x+1$', 'new chain; no marker',
+                     '+1 assum.'):
             self.assertIn(frag, html)
+        self.assertNotIn('(branch)', html)
         # check-status colors: agree green, skipped grey
         self.assertIn('#176b2c', html)
         self.assertIn('#888', html)
@@ -1106,9 +1658,68 @@ class TestMathShellDo(unittest.TestCase):
                    'args': {'text': 'strategy note'}, 'input': None,
                    'result': None, 'check': {'status': 'note'},
                    'assumptions': []}
+        branch = {'id': 's2', 'hash': 'h2', 'op': 'branch',
+                  'args': {'from': 's1', 'reason': 'try another route'},
+                  'input': None, 'result': None,
+                  'check': {'status': 'note'}, 'assumptions': []}
         self.assertIsNone(self.shell.render_do_chain([]))
         self.assertIsNone(self.shell.render_do_chain(
-            [comment, self._chain_step('s2', 'expand', '5')]))
+            [comment, branch, self._chain_step('s3', 'expand', '5')]))
+
+    def test_branch_marker_stream_render_is_plain_annotation(self):
+        html = self.shell.render_do_step({
+            'id': 's3', 'hash': 'h3', 'op': 'branch',
+            'args': {'from': 's1',
+                     'reason': 'substitution < increased complexity'},
+            'input': None, 'result': None, 'continues': None,
+            'check': {'status': 'note'}, 'assumptions': [],
+        })
+        self.assertIn('tex2jax_ignore', html)
+        self.assertIn('branch from s1', html)
+        self.assertIn('substitution &lt; increased complexity', html)
+        self.assertNotIn('$', html)
+
+    def test_chain_table_folds_abandoned_path_with_marker_reason(self):
+        first = self._chain_step('s1', 'expand', 'x^{2}+2x+1',
+                                 continues=None)
+        dead = self._chain_step('s2', 'substitute', '4')
+        resumed = self._chain_step('s4', 'factor_quadratic', '(x+1)^{2}',
+                                   continues=False)
+        resumed['exploration'] = {
+            'marker': 's3', 'from': 's1',
+            'reason': 'numeric < detour', 'hash': 'edge',
+        }
+        topology = {'abandoned_paths': [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'numeric < detour', 'steps': ['s2'],
+        }]}
+        html = self.shell.render_do_chain([first, dead, resumed], topology)
+        self.assertIn('<details', html)
+        self.assertIn('abandoned path from s1', html)
+        self.assertIn('numeric &lt; detour', html)
+        self.assertIn('<code>s2</code>', html)  # expandable body retained
+        self.assertIn('resumed from s1 via s3', html)
+        self.assertNotIn('(branch)', html)
+
+    def test_chain_table_can_expand_prior_run_steps_named_by_new_marker(self):
+        first = self._chain_step('s1', 'expand', 'x^{2}+2x+1',
+                                 continues=None)
+        dead = self._chain_step('s2', 'substitute', '4')
+        resumed = self._chain_step('s4', 'factor_quadratic', '(x+1)^{2}',
+                                   continues=False)
+        resumed['exploration'] = {
+            'marker': 's3', 'from': 's1', 'reason': 'old detour',
+            'hash': 'edge',
+        }
+        topology = {'abandoned_paths': [{
+            'marker': 's3', 'source': 's1', 'continues_at': 's4',
+            'reason': 'old detour', 'steps': ['s2'],
+        }]}
+        html = self.shell.render_do_chain(
+            [resumed], topology, all_steps=[first, dead, resumed])
+        self.assertIn('old detour', html)
+        self.assertIn('<code>s2</code>', html)
+        self.assertIn('<code>s4</code>', html)
 
     def test_query_only_final_is_rendered_unverified(self):
         result = {'ok': True, 'steps': [], 'assumptions': [],
@@ -1140,6 +1751,69 @@ class TestPromptCommandModel(unittest.TestCase):
         # recorded series_converges step, never in an expr splice
         self.assertFalse(reg['conv'].expr)
         self.assertIsNone(reg['conv'].direct)
+
+    def test_repo_model_endpoint_config(self):
+        import model_config
+        endpoints = model_config.load_model_config()
+        glm = model_config.find_model(endpoints, 'z-ai/glm-5.2')
+        self.assertIsNotNone(glm)
+        self.assertEqual(glm.providers, ('Cerebras', 'Fireworks'))
+
+    def test_model_endpoint_config_validation(self):
+        import model_config
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config('models: []')
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config(
+                'models:\n  - model: a\n    providers: Cerebras')
+        with self.assertRaises(model_config.ModelConfigError):
+            model_config.parse_model_config(
+                'models:\n  - model: a\n  - model: a')
+
+    def test_model_command_completion_replaces_only_current_token(self):
+        import model_config
+        endpoints = (
+            model_config.ModelEndpoint('alpha/one', ()),
+            model_config.ModelEndpoint('beta/two', ('Fast', 'Safe')),
+        )
+        code = 'model! be'
+        reply = model_config.complete_model_command(
+            code, len(code), endpoints=endpoints)
+        self.assertEqual(reply['matches'], ['alpha/one', 'beta/two'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'be')
+        self.assertEqual(
+            [item['type'] for item in
+             reply['metadata']['_jupyter_types_experimental']],
+            ['model', 'model'])
+
+    def test_provider_completion_uses_selected_model_and_skips_used(self):
+        import model_config
+        endpoints = (
+            model_config.ModelEndpoint('beta/two', ('Fast', 'Safe')),
+        )
+        code = 'model! beta/two, Fast, S'
+        reply = model_config.complete_model_command(
+            code, len(code), endpoints=endpoints)
+        self.assertEqual(reply['matches'], ['Safe'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'S')
+        self.assertEqual(
+            reply['metadata']['_jupyter_types_experimental'][0]['type'],
+            'provider')
+
+    def test_non_model_command_has_no_model_completions(self):
+        import model_config
+        self.assertIsNone(model_config.complete_model_command(
+            'solve! x = 2', len('solve! x = 2'), endpoints=()))
+
+    def test_kernel_do_complete_routes_to_model_configuration(self):
+        import asyncio
+        from toymathkernel import MathKernel
+        code = 'model! z-ai'
+        reply = asyncio.run(MathKernel.do_complete(None, code, len(code)))
+        self.assertIn('z-ai/glm-5.2', reply['matches'])
+        self.assertEqual(reply['status'], 'ok')
 
     def test_static_lexer_command_table_matches_committed_registries(self):
         import prompt_commands as pc
@@ -1313,10 +1987,56 @@ class TestPromptCommandDispatch(unittest.TestCase):
         out = self._html()
         self.assertIn('notebook commands', out)
         self.assertIn('int', out)
+        self.assertIn('model!', out)
+
+    def test_model_command_sets_configured_routing_for_later_runs(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('model! z-ai/glm-5.2', 1)
+            self.shell.exec('do! Hello', 2)
+        self.assertEqual(box['kwargs']['model_name'], 'z-ai/glm-5.2')
+        self.assertEqual(box['kwargs']['providers'],
+                         ('Cerebras', 'Fireworks'))
+        self.assertIn('fallbacks disabled', self._html())
+
+    def test_model_command_provider_arguments_override_config(self):
+        self.shell.exec('model! z-ai/glm-5.2, Fireworks, Cerebras, Fireworks',
+                        1)
+        self.assertEqual(self.shell.model_name, 'z-ai/glm-5.2')
+        self.assertEqual(self.shell.model_providers,
+                         ('Fireworks', 'Cerebras'))
+
+    def test_model_command_allows_unlisted_model(self):
+        self.shell.exec('model! vendor/custom-model', 1)
+        self.assertEqual(self.shell.model_name, 'vendor/custom-model')
+        self.assertEqual(self.shell.model_providers, ())
+        self.assertIn('default provider routing', self._html())
+
+    def test_model_command_without_arguments_guides_to_completion(self):
+        original = self.shell.model_name
+        self.shell.exec('model!', 1)
+        self.assertEqual(self.shell.model_name, original)
+        self.assertIn('press <kbd>Tab</kbd>', self._html())
+
+    def test_model_change_notifies_frontend_handler(self):
+        changes = []
+        self.shell.model_change_handler = (
+            lambda model, providers: changes.append((model, providers)))
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        self.assertEqual(changes, [
+            ('z-ai/glm-5.2', ('Cerebras', 'Fireworks')),
+        ])
+
+    def test_model_command_rejects_empty_provider(self):
+        original = self.shell.model_name
+        self.shell.exec('model! z-ai/glm-5.2,', 1)
+        self.assertEqual(self.shell.model_name, original)
+        self.assertIn('model! error', self._html())
 
     def test_command_steps_land_in_shared_ledger(self):
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(SOLVE_SCRIPT)):
+                               lambda model_name=None: ScriptedModel(
+                                   SOLVE_SCRIPT)):
             self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
         self.assertEqual(len(self.shell.ledger.steps), 2)
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
@@ -1490,6 +2210,20 @@ class TestExprComposite(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
 
+    def test_composite_agent_run_uses_notebook_model_routing(self):
+        calls = []
+
+        def fake(instruction, **kwargs):
+            calls.append(kwargs)
+            return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
+
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^2', 2, add_to_history=True)
+        self.assertEqual(calls[0]['model_name'], 'z-ai/glm-5.2')
+        self.assertEqual(calls[0]['providers'],
+                         ('Cerebras', 'Fireworks'))
+
     def test_non_expr_command_in_composite_refused(self):
         # solve! is not expr; mixed into a composite it must be refused
         with mock.patch.object(agent_do, 'run_instruction',
@@ -1579,7 +2313,8 @@ class TestExprComposite(unittest.TestCase):
         # the original failing notebook cell, end to end through the shell
         # composite path with a scripted agent (offline)
         with mock.patch.object(agent_do, 'build_model',
-                               lambda: ScriptedModel(list(LIM_SUM_SCRIPT))):
+                               lambda model_name=None: ScriptedModel(
+                                   list(LIM_SUM_SCRIPT))):
             self.shell.exec('lim! ' + LIM_SUM_EXPR, 1, add_to_history=True)
         html = self._html()
         self.assertNotIn('do! error', html)
@@ -1624,6 +2359,67 @@ class TestChainsToGoal(unittest.TestCase):
     def test_no_steps_rejected(self):
         import expr_commands as ec
         self.assertFalse(ec._chains_to_goal([], 's1', 'x'))
+
+    def test_integral_boundary_hops_accepted(self):
+        # the live int! chain shape: rewrite results are \int-wrapped
+        # while the next inputs are their bare integrands, and assemble
+        # consumes the linearity input. Linkage inherits the ledger's
+        # chaining convention; strict spelling identity broke every
+        # honest hop across an \int boundary.
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}',
+             '\\int \\frac{6u^5}{u^3+u^2} \\, d u'),
+            ('\\frac{6u^5}{u^3+u^2}',
+             '\\int \\left(6u^2-6u+6-\\frac{6}{u+1}\\right) \\, d u'),
+            ('6u^2-6u+6-\\frac{6}{u+1}',
+             '2u^{3}-3u^{2}+6u-6 \\ln\\left ((u+1) \\right )+C'),
+            ('2u^{3}-3u^{2}+6u-6 \\ln\\left ((u+1) \\right )+C',
+             '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+6x^{\\frac {1} {6}}'
+             '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )+C'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's4',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+        # a linearity PIECE still cannot stand in for the whole
+        self.assertFalse(ec._chains_to_goal(
+            self._steps(('6u^2-6u+6-\\frac{6}{u+1}',
+                         '\\int 6u^{2} \\, d u - \\int 6u \\, d u '
+                         '+ \\int 6 \\, d u - \\int \\frac {6} {u+1} '
+                         '\\, d u'),
+                        ('6u^2', '2u^{3} + C')),
+            's2',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+
+    def test_bracket_respelling_hop_accepted(self):
+        # second live model, same cell: the agent retyped the assemble
+        # result WITHOUT its decorative per-piece \left(...\right)
+        # wrappers before back-substituting. Bracket respellings of one
+        # structure must chain; a binding CHANGE must not.
+        import expr_commands as ec
+        from ledger import _chain_links
+        self.assertTrue(_chain_links(
+            '\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+            '\\left(6u\\right) - '
+            '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C',
+            '2u^{3} - 3u^{2} + 6u - 6 \\ln\\left ((u+1) \\right ) + C'))
+        # the stripper re-encodes child boundaries: dropping LOAD-BEARING
+        # parens is a different expression, not a respelling
+        self.assertFalse(_chain_links('(a+b)c', 'a+bc'))
+        self.assertFalse(_chain_links('|x|', 'x'))
+        steps = self._steps(
+            ('\\frac{1}{x^{1/2}+x^{1/3}}',
+             '\\int \\left(6u^2 - 6u + 6 - \\frac{6}{u+1}\\right) \\, d u'),
+            ('6u^2 - 6u + 6 - \\frac{6}{u+1}',
+             '\\left(2u^{3}\\right) - \\left(3u^{2}\\right) + '
+             '\\left(6u\\right) - '
+             '\\left(6 \\ln\\left ((u+1) \\right )\\right) + C'),
+            ('2u^{3} - 3u^{2} + 6u - 6 \\ln\\left ((u+1) \\right ) + C',
+             '2x^{\\frac {1} {2}}-3x^{\\frac {1} {3}}+C'
+             '+6x^{\\frac {1} {6}}'
+             '-6 \\ln\\left ((x^{\\frac {1} {6}}+1) \\right )'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's3',
+            '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
 
 
 class TestDirectCommands(unittest.TestCase):
@@ -1806,6 +2602,48 @@ class TestDirectCommands(unittest.TestCase):
         r(sym)
         self.assertEqual(len(r.direct_records), 1)
         self.assertIn('assumptions', r.direct_records[0])
+
+
+class TestUnknownToolSteering(unittest.TestCase):
+    def test_hallucinated_tool_names_steer_instead_of_killing_the_run(self):
+        # live probe: a strong model called the TACTIC name integrate_table
+        # as a raw tool and the SDK's ModelBehaviorError aborted a run that
+        # already held three green steps. Unknown tool calls must return to
+        # the model as one-turn steering; a tactic-shaped name must point
+        # at run_tactic and the owning skill.
+        captured = []
+
+        class RecordingModel(ScriptedModel):
+            async def get_response(self, system_instructions, input,
+                                   *args, **kwargs):
+                captured.append(input)
+                return await super().get_response(
+                    system_instructions, input, *args, **kwargs)
+
+        script = [
+            [ResponseFunctionToolCall(
+                type='function_call', name='integrate_table',
+                arguments=json.dumps({'expr': 'x', 'var': 'x'}),
+                call_id='b1', id='b1')],
+            [ResponseFunctionToolCall(
+                type='function_call', name='frobnicate',
+                arguments='{}', call_id='b2', id='b2')],
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c3')],
+            [message('recovered')],
+        ]
+        res = run_instruction('misname some tools',
+                              model=RecordingModel(script))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertIsNone(res.get('error'))
+        self.assertEqual([s['op'] for s in res['steps']], ['expand'])
+
+        second = json.dumps(captured[1], default=str)
+        self.assertIn('is a tactic, not a tool', second)
+        self.assertIn('run_tactic', second)
+        self.assertIn('integration', second)
+        third = json.dumps(captured[2], default=str)
+        self.assertIn('does not exist', third)
+        self.assertIn('load_skill, run_tactic, comment', third)
 
 
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',

@@ -34,6 +34,8 @@ Two layers coexist:
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
 | `engine/agent_do.py` | `do!` Jupyter endpoint: small stable tool surface (`load_skill`, `run_tactic`, ledger controls) over the tactic registry |
+| `engine/model_config.py`, `engine/models.yaml` | Notebook-local `model!` selection and configured OpenRouter model/provider endpoints |
+| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup and notebook-local live model title; TypeScript source and committed prebuilt bundle |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
 | `engine/plot_sandbox.py` | Sandboxed figure backends for `do!`: Python under Pyodide/Deno (`pyodide_runner.mjs`), TeX under node-tikzjax (`tikz_runner.mjs`) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
@@ -125,7 +127,7 @@ than duplicating an exhaustive tactic manual. `python toymath_cli.py skills`,
 source .venv/bin/activate            # or PYTHONPATH=. to avoid import errors
 
 python console.py                    # console mode
-jupyter notebook                     # kernel mode (LaTeX kernel, registered by toymathkernel.py)
+jupyter notebook                     # kernel mode (install kernel_spec as name `toymath` first)
 python toymath_cli.py expand "(x+1)^2" --session s.json   # agent CLI
 
 uv pip install -r requirements.txt   # dependencies
@@ -188,6 +190,8 @@ def create_actions():
 | INDEX | `(base, (sub, sup_l, power, sup_r))` | `x^2` → `(x, (None, None, 2, None))` |
 | FACTORIAL | `(operand,)` | `n!` → `(n,)` |
 | BINOM | `(upper, lower)` | `\binom{n}{k}` → `(n, k)` |
+| PAIR | `(first, second)` | `(x,y)` → `(x, y)` |
+| COLLECTION | `(item1, item2, ...)` | `\{(-1,2),(1,-2)\}` |
 | P_LIST | `(factor1, factor2, ...)` | `xy` → `(x, y)` |
 | S_LIST | `(term1, +term2, ...)` | `x+y` → `(x, +y)` |
 | GROUP | `(inner,)` with `br` prop | `{x}` → `(x,)` br="{}" |
@@ -266,6 +270,23 @@ if isinstance(n, IntegerValue): ...
   commands via `prompt_commands.load_commands()`.
 - The `do!` agent endpoint requires `OPEN_ROUTER` in `.env` (model via
   `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`).
+- Optional Langfuse tracing of do! runs is off by default; set
+  `TOYMATH_OBSERVABILITY=on` (with `LANGFUSE_PUBLIC_KEY`/
+  `LANGFUSE_SECRET_KEY`/`LANGFUSE_BASE_URL`) to send one trace per run —
+  agent turns, LLM generations with token usage/latency, and every trusted
+  primitive call — to Langfuse. `engine/observability.py` owns the wiring
+  (OpenInference instrumentor → OTEL → Langfuse). It is observability only:
+  it never touches the ledger or oracle, and any Langfuse failure is
+  downgraded to a warning so a derivation always runs. LANDMINE: the
+  instrumentor rides the Agents-SDK tracing pipeline, so `build_model` only
+  calls `set_tracing_disabled(True)` when tracing is inactive — enabling it
+  with tracing disabled would silently emit nothing.
+- To research a misbehaving do! run from its Langfuse trace, invoke the
+  `langfuse-research` skill (`.claude/skills/langfuse-research/SKILL.md`):
+  re-run with `TOYMATH_OBSERVABILITY=on`, then pull the trace with the
+  official `langfuse` CLI (`langfuse --env .env api traces get <id> --json`)
+  and read the diagnostic signals. Read-only — it never touches the ledger
+  or oracle.
 - `do!` figures need Deno (`brew install deno`) — toggle both off with
   `TOYMATH_SANDBOX=off`. Two backends, deliberately separate processes
   with different grants (see `plot_sandbox.py`):

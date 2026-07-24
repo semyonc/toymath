@@ -19,7 +19,7 @@ class MathLexer(object):
         'echo-on', 'goal', 'mul', 'mulex', 'rules', 'track',
         # committed notebook commands + dispatcher built-ins
         'commands', 'conv', 'diff', 'do', 'expand', 'help', 'int', 'lim',
-        'prove', 'solve',
+        'model', 'prove', 'solve',
      })
 
      def __init__(self, command_names=None, **kwargs):
@@ -127,6 +127,7 @@ class MathLexer(object):
         'smallmatrix',
         'cr',
         'cases',
+        'collection',
         'in',
         'Bbb',
         'to',

@@ -18,9 +18,11 @@ import os
 import re
 import threading
 
+import observability
 import primitives
 import tactic_registry
 import tactic_skills
+from model_config import DEFAULT_MODEL, MODEL_VAR
 from tactics import core as core_tactics
 from ledger import Ledger, TRANSFORMING_OPS
 
@@ -32,8 +34,6 @@ except ImportError:  # pragma: no cover - dotenv ships with the kernel env
 
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
-MODEL_VAR = 'OPENROUTER_MODEL'
-DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
 DEFAULT_MAX_TURNS = 64
 
 _SKILL_PATH = os.path.join(
@@ -79,8 +79,21 @@ _DO_RULES = """
 - Use `claim` only for a relation you intend to establish as true, never for
   an equation whose solutions you are seeking. Ordinary calculations and
   root-finding should stay as tactic steps followed by `set_result`.
-- Use comment only for short strategy/branch annotations in plain text. Notes
-  are unverified prose, never steps or results; do not put scratch work there.
+- Use comment only for short strategy annotations in plain text. When
+  abandoning a recorded path and resuming from an earlier result, pass that
+  exact step id as from_step, then feed that source result verbatim to the
+  next tactic. To abandon a recorded step ITSELF (e.g. the very first move
+  went the wrong way), pass that step id as from_step and restart the next
+  tactic from that step's recorded input. This records an exploration edge,
+  never mathematical case data or provenance. Pass from_step ONLY when the
+  very next tactic resumes there; ordinary notes and summaries must omit
+  it. Do not put scratch work in notes.
+- If every applicable route is exhausted and no ledger value certifiably
+  answers the instruction, call set_open once with a short reason naming
+  the exact missing move and what you tried, with formulas in $...$, then
+  stop. Open records that
+  THIS session certified nothing - it never means no solution exists.
+  Never dress the last step up as the answer instead.
 """
 
 _PLOT_RULES = """
@@ -134,6 +147,10 @@ a proof: when the checked chain reaches the claim, call `conclude` with
 `set_result`.
 If no available tactic closes the claim, leave it OPEN and give only a short
 description of the missing move. Never bridge the gap with prose.
+Re-stating the statement with `claim` re-focuses `ROOT_CLAIM` (it never
+mints a duplicate), and a repeated `conclude` may replace the closing chain
+with a better one (e.g. fewer assumptions). `set_result` takes the
+concluded endpoint, or the claim statement itself which maps to it.
 """
 
 _FALLBACK_SKILL = """# ToyMath verified derivations
@@ -198,8 +215,11 @@ class DoSession(object):
         self.plot_backend = plot_backend
         self.tikz_backend = tikz_backend
         self.start = len(self.ledger.steps)
+        self.selection_start = len(self.ledger.selections)
         self.result_override = None
         self.result_provenance = None
+        self.result_selection = None
+        self.open_selection = None
         self.current_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
@@ -213,7 +233,14 @@ class DoSession(object):
         (possibly step-annotated) record."""
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
             with self._lock:
-                step = self.ledger.record(result, goal=self.current_goal)
+                try:
+                    step = self.ledger.record(
+                        result, goal=self.current_goal)
+                except ValueError as exc:
+                    refused = dict(result)
+                    refused['ok'] = False
+                    refused['error'] = str(exc)
+                    return refused
                 result = dict(result)
                 result['step'] = {'id': step['id'], 'hash': step['hash']}
                 if self.on_step is not None:
@@ -225,6 +252,9 @@ class DoSession(object):
 
     def new_claims(self):
         return self.ledger.claims[self.claim_start:]
+
+    def new_selections(self):
+        return self.ledger.selections[self.selection_start:]
 
     def claim(self, statement, parent=None, root=False):
         """Record and focus a claim. Root claims govern prove-mode output."""
@@ -245,13 +275,85 @@ class DoSession(object):
             self.current_goal = claim.get('parent') or claim['id']
         return claim
 
-    def comment(self, text):
-        """Append a narrative note to the ledger and stream it."""
+    def comment(self, text, from_step=None):
+        """Append a narrative note or structured branch marker and stream it."""
         with self._lock:
-            step = self.ledger.record_comment(text, goal=self.current_goal)
+            if from_step:
+                pending = self.ledger._pending_branch(self.current_goal)
+                if pending is not None and from_step == pending['id']:
+                    # the note annotates the pending marker itself — the
+                    # agent meant a plain comment, not a second marker
+                    # (markers do not stack); live agents hit this shape
+                    step = self.ledger.record_comment(
+                        text, goal=self.current_goal)
+                else:
+                    step = self.ledger.record_branch(
+                        from_step, text, goal=self.current_goal)
+            else:
+                step = self.ledger.record_comment(
+                    text, goal=self.current_goal)
             if self.on_step is not None:
                 self.on_step(step)
         return step
+
+    def set_open(self, reason):
+        """Record a replay-validated run-level OPEN outcome.
+
+        Sound because it claims nothing about the mathematics: "this
+        session exhibits no certified result" is ledger-decidable.  The
+        vocabulary is deliberately the claim layer's "open" — never a
+        statement that no solution exists."""
+        reason = (reason or '').strip()
+        if not reason:
+            raise ValueError(
+                'set_open needs a short reason naming the exact missing '
+                'move')
+        if self.result_override is not None:
+            raise ValueError(
+                'this run already designated a certified result; the '
+                'outcome is not open')
+        if self.open_selection is not None:
+            raise ValueError(
+                f'open outcome already recorded '
+                f'({self.open_selection["id"]}); stop, or continue only '
+                'to certify a result')
+        if self.proof_claim_id is not None:
+            root = self.ledger.get_claim(self.proof_claim_id)
+            if root is not None and root.get('verdict') != 'open':
+                raise ValueError(
+                    f'root claim {self.proof_claim_id} is concluded; call '
+                    'set_result with its endpoint')
+        with self._lock:
+            selection = self.ledger.record_open(
+                _cap_prove_summary(reason), goal=self.current_goal)
+            self.open_selection = selection
+        return selection
+
+    def root_statement_endpoint(self, expr):
+        """Map a retyped root-claim statement to its concluded endpoint.
+
+        Agents naturally restate the proved claim when designating the
+        final result; the selection machinery records endpoint values, so
+        accept the statement spelling and answer with the endpoint its
+        conclusion closes to. Returns None when the run has no concluded
+        root claim or ``expr`` is not that claim's statement."""
+        if self.proof_claim_id is None:
+            return None
+        claim = self.ledger.get_claim(self.proof_claim_id)
+        if claim is None or claim.get('verdict') == 'open':
+            return None
+        endpoint = (claim.get('conclusion') or {}).get('endpoint')
+        if not endpoint:
+            return None
+        statement = claim.get('statement') or ''
+        if expr == statement:
+            return endpoint
+        try:
+            if primitives.same_expression(statement, expr):
+                return endpoint
+        except Exception:
+            pass
+        return None
 
     def designate_result(self, expr):
         """Select a chainable value without letting the agent invent a
@@ -355,18 +457,28 @@ def make_api(session):
         result = tactic_registry.invoke_agent(tactic, arguments, session)
         return json.dumps(result, ensure_ascii=False, default=str)
 
-    def comment(text: str) -> str:
-        """Add a short unverified strategy or branch note to the ledger.
+    def comment(text: str, from_step: str = '') -> str:
+        """Add a short unverified strategy note or exploration marker.
 
         Args:
             text: one or two short plain-text sentences; no scratch work.
+            from_step: earlier transforming step id to resume from, or empty
+                for an ordinary note. The next tactic must consume that
+                source result — or, to abandon that step itself, its
+                recorded input; this never supplies mathematical provenance.
         """
         try:
-            step = session.comment(text)
+            step = session.comment(text, from_step=from_step or None)
         except ValueError as exc:
-            return json.dumps({'ok': False, 'op': 'comment',
+            return json.dumps({'ok': False,
+                               'op': 'branch' if from_step else 'comment',
                                'error': str(exc)}, ensure_ascii=False)
-        reply = {'ok': True, 'op': 'comment', 'id': step['id']}
+        reply = {'ok': True, 'op': step['op'], 'id': step['id']}
+        if step['op'] == 'branch':
+            reply['from'] = step['args']['from']
+        elif from_step:
+            reply['hint'] = ('from_step named the pending marker; recorded '
+                             'as a plain note — markers do not stack')
         if len(text) > 400:
             reply['hint'] = 'keep comments to one or two short sentences'
         return json.dumps(reply, ensure_ascii=False)
@@ -414,6 +526,9 @@ def make_api(session):
         except primitives.PrimitiveError as exc:
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': str(exc)}, ensure_ascii=False)
+        mapped = session.root_statement_endpoint(expr)
+        if mapped is not None:
+            expr = mapped
         provenance = session.designate_result(expr)
         if provenance is None:
             if session.proof_claim_id is not None:
@@ -422,18 +537,50 @@ def make_api(session):
                     error = ('root claim is still open; call conclude with '
                              'a mechanically checked closing chain first')
                 else:
+                    endpoint = ((root.get('conclusion') or {})
+                                .get('endpoint'))
                     error = ('value is not the endpoint of the concluded '
-                             f'root claim {session.proof_claim_id}')
+                             f'root claim {session.proof_claim_id}; call '
+                             f'set_result with its endpoint {endpoint!r}')
             else:
                 error = ('value is not mechanically equivalent to any '
                          'result in the shared ledger; use a tactic to '
                          'establish it or select an earlier ledger result')
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': error}, ensure_ascii=False)
+        try:
+            with session._lock:
+                session.result_selection = session.ledger.record_selection(
+                    expr, provenance, goal=session.current_goal)
+        except ValueError as exc:
+            return json.dumps({'ok': False, 'op': 'set_result',
+                               'error': str(exc)}, ensure_ascii=False)
         session.result_override = expr
         session.result_provenance = provenance
         return json.dumps({'ok': True, 'op': 'set_result', 'result': expr,
-                           'provenance': provenance}, ensure_ascii=False)
+                           'provenance': provenance,
+                           'selection': session.result_selection['id']},
+                          ensure_ascii=False)
+
+    def set_open(reason: str) -> str:
+        """Record that this run ends OPEN: no certified result.
+
+        Only for exhausted routes — never a substitute for trying the
+        applicable tactics, and never a claim that no solution exists.
+
+        Args:
+            reason: one or two short sentences naming the exact missing
+                move and what was tried; wrap each formula in $...$ so
+                the notebook renders it.
+        """
+        try:
+            selection = session.set_open(reason)
+        except ValueError as exc:
+            return json.dumps({'ok': False, 'op': 'set_open',
+                               'error': str(exc)}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'op': 'set_open', 'outcome': 'open',
+                           'selection': selection['id']},
+                          ensure_ascii=False)
 
     def plot(code: str, caption: str) -> str:
         """Render an unverified matplotlib/seaborn/plotly illustration.
@@ -482,6 +629,7 @@ def make_api(session):
         'claim': claim,
         'conclude': conclude,
         'set_result': set_result,
+        'set_open': set_open,
     }
     if session.plot_backend is not None:
         api['plot'] = plot
@@ -505,7 +653,7 @@ def make_tools(session):
     from agents import function_tool
     api = make_api(session)
     names = ['load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
-             'set_result']
+             'set_result', 'set_open']
     if session.plot_backend is not None:
         names.append('plot')
     if session.tikz_backend is not None:
@@ -517,7 +665,7 @@ def make_tools(session):
 # runner
 # ---------------------------------------------------------------------------
 
-def build_model():
+def build_model(model_name=None):
     """OpenRouter-backed chat-completions model for the Agents SDK."""
     key = os.environ.get(API_KEY_VAR)
     if not key:
@@ -525,20 +673,25 @@ def build_model():
             f'{API_KEY_VAR} is not set - put the OpenRouter key in .env')
     from openai import AsyncOpenAI
     from agents import OpenAIChatCompletionsModel, set_tracing_disabled
-    set_tracing_disabled(True)
+    # Leave the Agents SDK tracing ENABLED only when observability is active:
+    # the OpenInference instrumentor rides that pipeline, so disabling it
+    # would silently starve Langfuse. When inactive, disable it as before so
+    # no traces are shipped to OpenAI's backend.
+    set_tracing_disabled(not observability.active())
     client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
     return OpenAIChatCompletionsModel(
-        model=os.environ.get(MODEL_VAR, DEFAULT_MODEL),
+        model=model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL),
         openai_client=client)
 
 
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
-                    plot_backend=None, proof_goal=None, tikz_backend=None):
+                    plot_backend=None, proof_goal=None, tikz_backend=None,
+                    model_name=None, providers=()):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
-    summary[, error]}.
+    branch_topology, abandoned_paths, summary[, error]}.
     `steps` are the ledger steps this run added; `final_result` is the
     cell's chainable value. Figures reach
     `on_plot(caption, [{kind, data, height?}, ...])` where kind is
@@ -547,8 +700,11 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     thread with its own asyncio loop, so this is safe to call from the
     Jupyter kernel's event-loop thread.
     """
-    from agents import Agent, Runner
+    from agents import Agent, ModelSettings, Runner, RunConfig
     from agents.exceptions import MaxTurnsExceeded
+    # Set up tracing before the model is built: build_model consults
+    # observability.active() to decide whether to leave Agents-SDK tracing on.
+    observability.setup()
     if plot_backend is None:
         import plot_sandbox
         plot_backend = plot_sandbox.get_backend()
@@ -572,20 +728,67 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                       proof_claim_id=(root_claim['id']
                                       if root_claim is not None else 'c1')),
                   tools=make_tools(session),
-                  model=model if model is not None else build_model())
+                  model=(model if model is not None
+                         else build_model(model_name=model_name)))
+    def _tool_error_message(fargs):
+        # A model naming a TACTIC as a tool must be steered back to
+        # run_tactic in one turn, never abort the whole derivation
+        # (live: a hallucinated `integrate_table` call killed a run
+        # with three green steps).
+        if getattr(fargs, 'kind', None) != 'tool_not_found':
+            return fargs.default_message
+        spec = tactic_registry.BY_NAME.get(fargs.tool_name)
+        if spec is not None:
+            return (f"'{fargs.tool_name}' is a tactic, not a tool. Call "
+                    f"run_tactic with tactic='{fargs.tool_name}' and its "
+                    f"ordered string arguments (load_skill "
+                    f"'{spec.skill}' first if that skill is not loaded).")
+        return (f"Tool '{fargs.tool_name}' does not exist. Use only the "
+                "fixed tools: load_skill, run_tactic, comment, claim, "
+                "conclude, set_result, set_open.")
+
+    provider_order = tuple(providers or ())
+    model_settings = None
+    if provider_order:
+        model_settings = ModelSettings(extra_body={
+            'provider': {
+                'order': list(provider_order),
+                'allow_fallbacks': False,
+            },
+        })
+    run_config = RunConfig(tool_not_found_behavior='return_error_to_model',
+                           tool_error_formatter=_tool_error_message,
+                           model_settings=model_settings)
     holder = {}
+    trace_meta = {
+        'mode': 'prove' if proof_goal is not None else 'do',
+        'model': (model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL)
+                  if model is None else type(model).__name__),
+        'providers': list(provider_order),
+        'max_turns': max_turns,
+    }
 
     def worker():
         import asyncio
         try:
-            holder['res'] = asyncio.run(
-                Runner.run(agent, instruction, max_turns=max_turns))
+            # trace_run must be entered on this thread: the instrumentor's
+            # root span inherits the active OTEL context here so the whole
+            # agent trace nests under one Langfuse observation.
+            with observability.trace_run(instruction,
+                                         metadata=trace_meta) as span:
+                res = asyncio.run(
+                    Runner.run(agent, instruction, max_turns=max_turns,
+                               run_config=run_config))
+                observability.set_output(
+                    span, str(res.final_output or '').strip() or None)
+                holder['res'] = res
         except Exception as e:  # surfaced below, never swallowed
             holder['err'] = e
 
     t = threading.Thread(target=worker, name='toymath-do', daemon=True)
     t.start()
     t.join()
+    observability.flush()
 
     steps = session.new_steps()
     last_transform = next((s for s in reversed(steps)
@@ -603,6 +806,12 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             'steps': root_claim['conclusion']['steps'],
             'method': root_claim['conclusion']['closure'],
         }
+    elif session.open_selection is not None:
+        # the agent recorded a run-level open outcome: no certified
+        # result exists, so no fallback value may masquerade as one
+        final = None
+        provenance = dict(session.open_selection.get('provenance') or {})
+        provenance['selection'] = session.open_selection['id']
     elif root_claim is not None:
         final = None
         provenance = {
@@ -622,10 +831,23 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     else:
         final = None
         provenance = None
+    marker_ids = [s['id'] for s in steps if s.get('op') == 'branch']
+    topology = session.ledger.presentation_topology(
+        final_provenance=(None if session.result_selection is not None
+                          else provenance),
+        marker_ids=marker_ids)
+    if provenance and provenance.get('status') == 'unverified':
+        final_assumptions = []
+    elif topology['spine']:
+        final_assumptions = topology['spine_assumptions']
+    else:
+        final_assumptions = list(session.ledger.assumptions)
     out = {'ok': 'err' not in holder, 'steps': steps,
            'claims': session.new_claims(),
-           'assumptions': list(session.ledger.assumptions),
+           'assumptions': final_assumptions,
            'final_result': final, 'final_provenance': provenance,
+           'branch_topology': topology,
+           'abandoned_paths': topology['abandoned_paths'],
            'summary': None}
     if 'err' in holder:
         e = holder['err']
@@ -638,7 +860,8 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         summary = str(holder['res'].final_output or '').strip()
         open_claims = any((c.get('verdict') or 'open') == 'open'
                           for c in out['claims'])
-        if proof_goal is not None or open_claims:
+        if (proof_goal is not None or open_claims
+                or session.open_selection is not None):
             # an open claim must stay visibly unfinished: prose can never
             # substitute for the missing chain, in prove! or plain do!
             summary = _cap_prove_summary(summary)

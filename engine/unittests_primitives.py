@@ -11,6 +11,7 @@ from LatexParser import MathParser
 from polyrat import (Poly, RatFunc, NotInFragment, to_ratfunc,
                      ratfunc_to_notation)
 import primitives as P
+import ledger as ledger_module
 from tactics import core as Core
 from tactics import differentiation as Differentiation
 from tactics import equations as Equations
@@ -1230,6 +1231,80 @@ class TestRelationSystemsAndProductSlash(unittest.TestCase):
         self.assertIn('relation system', piecewise['error'])
 
 
+class TestTypedCollectionsAndPairs(unittest.TestCase):
+    def test_stationary_points_have_first_class_nodes(self):
+        from replicator import Replicator
+
+        latex = '\\{(-1,2),(1,-2)\\}'
+        sym, notation = P.parse_latex(latex)
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 2)
+        self.assertTrue(all(notation.getf(item, Notation.PAIR) is not None
+                            for item in collection.args))
+
+        copied_notation = Notation()
+        copied = Replicator(notation, copied_notation)(sym)
+        written = P.write_latex(copied, copied_notation)
+        self.assertEqual(written, latex)
+        self.assertEqual(P._normal_form(written), P._normal_form(latex))
+
+    def test_collection_can_hold_a_pair_relation(self):
+        sym, notation = P.parse_latex('\\{(x,y)=(2,1)\\}')
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 1)
+        relation = notation.getf(collection.args[0], Notation.COMP)
+        self.assertIsNotNone(relation)
+        self.assertIsNotNone(notation.getf(relation.args[0], Notation.PAIR))
+        self.assertIsNotNone(notation.getf(relation.args[1], Notation.PAIR))
+
+    def test_collection_variants_and_empty_collection_round_trip(self):
+        cases = (
+            ('\\{\\}', '\\{\\}'),
+            ('\\{x\\}', '\\{x\\}'),
+            ('\\{x,y\\}', '\\{x,y\\}'),
+            ('\\left\\{x,y\\right\\}', '\\{x,y\\}'),
+            ('\\{|x|\\}', '\\{|x|\\}'),
+            ('\\{|x|,|y|\\}', '\\{|x|,|y|\\}'),
+            ('\\{\\{1,2\\},3\\}', '\\{\\{1,2\\},3\\}'),
+        )
+        for source, canonical in cases:
+            with self.subTest(source=source):
+                sym, notation = P.parse_latex(source)
+                self.assertIsNotNone(
+                    notation.getf(sym, Notation.COLLECTION))
+                self.assertEqual(P.write_latex(sym, notation), canonical)
+                self.assertTrue(P.same_expression(source, canonical))
+
+    def test_pair_is_distinct_from_comma_syntax(self):
+        pair, pair_notation = P.parse_latex('(x,y)')
+        self.assertIsNotNone(pair_notation.getf(pair, Notation.PAIR))
+        left_pair, left_notation = P.parse_latex(
+            '\\left(x,y\\right)')
+        self.assertIsNotNone(left_notation.getf(
+            left_pair, Notation.PAIR))
+
+        triple, triple_notation = P.parse_latex('(x,y,z)')
+        triple_group = triple_notation.getf(triple, Notation.GROUP)
+        self.assertIsNotNone(triple_group)
+        self.assertIsNotNone(triple_notation.getf(
+            triple_group.args[0], Notation.C_LIST))
+
+        self.assertFalse(P.same_expression('(x,y)', 'x,y'))
+        self.assertFalse(P.same_expression('\\{x,y\\}', 'x,y'))
+
+    def test_set_builder_keeps_its_existing_node(self):
+        sym, notation = P.parse_latex('\\{x|x\\gt0\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.S_GROUP))
+        self.assertIsNone(notation.getf(sym, Notation.COLLECTION))
+
+    def test_scalar_tactics_refuse_typed_results(self):
+        rec = Core.expand('\\{x,y\\}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an expression', rec['error'])
+
+
 class TestCombinatorialNotation(unittest.TestCase):
     def parse(self, latex):
         notation = Notation()
@@ -1551,6 +1626,7 @@ class TestLedger(unittest.TestCase):
         ledger = Ledger(path)
         self.assertEqual(ledger.data['version'], 2)
         self.assertEqual(ledger.claims, [])
+        self.assertEqual(ledger.selections, [])
         self.assertEqual(ledger.replay()['status'], 'verified')
 
 
@@ -1598,6 +1674,25 @@ class TestGoalAwareLedger(unittest.TestCase):
         self.assertEqual(closed['conclusion']['closure'],
                          'true-relation-endpoint')
 
+    def test_concluded_claim_defines_spine_without_result_selection(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('(x+1)^2 = x^2+2x+1')
+        source = ledger.record(Core.expand('(x+1)^2'), goal=claim['id'])
+        dead = ledger.record(Core.substitute(
+            source['result'], 'x', '1'), goal=claim['id'])
+        marker = ledger.record_branch(
+            source['id'], 'numeric evaluation was not a symbolic chain',
+            goal=claim['id'])
+        ledger.record(Core.expand(source['result']), goal=claim['id'])
+        ledger.conclude(claim['id'], [source['id']])
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['selected_goal'], claim['id'])
+        self.assertEqual(topology['spine'], [source['id']])
+        self.assertEqual(topology['abandoned_paths'][0]['marker'],
+                         marker['id'])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'],
+                         [dead['id']])
+
     def test_claim_must_be_a_relation(self):
         ledger = Ledger()
         with self.assertRaisesRegex(ValueError, 'top-level relation'):
@@ -1609,6 +1704,30 @@ class TestGoalAwareLedger(unittest.TestCase):
         again = ledger.record_claim('3x^2-3=0')
         self.assertEqual(again['id'], first['id'])
         self.assertEqual(len(ledger.claims), 1)
+
+    def test_concluded_claim_is_refocused_and_strengthened(self):
+        # A repeated statement must focus the SAME claim even after a
+        # conclusion: a duplicate id would strand every later step under a
+        # goal that can never close the original claim (live 64-turn
+        # livelock). A repeated conclude then replaces the closing chain.
+        ledger = Ledger()
+        claim = ledger.record_claim(self.CLAIM)
+        first = ledger.record(Limits.limit_lhopital(
+            r'\lim_{x \to 0} \frac{e^x-1}{x}'), goal=claim['id'])
+        second = ledger.record(Limits.limit_substitute(first['result']),
+                               goal=claim['id'])
+        ledger.conclude(claim['id'], [first['id'], second['id']])
+        again = ledger.record_claim(self.CLAIM)
+        self.assertEqual(again['id'], claim['id'])
+        self.assertEqual(len(ledger.claims), 1)
+        third = ledger.record(Limits.limit_lhopital(
+            r'\lim_{x \to 0} \frac{e^x-1}{x}'), goal=claim['id'])
+        fourth = ledger.record(Limits.limit_substitute(third['result']),
+                               goal=claim['id'])
+        closed = ledger.conclude(claim['id'], [third['id'], fourth['id']])
+        self.assertEqual(closed['conclusion']['steps'],
+                         [third['id'], fourth['id']])
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
     def test_goal_ownership_and_connectivity_are_enforced(self):
         ledger = Ledger()
@@ -2290,6 +2409,369 @@ class TestLedgerComment(unittest.TestCase):
         ledger = Ledger()
         with self.assertRaises(ValueError):
             ledger.record_comment('   ')
+
+
+class TestLedgerBranchMarker(unittest.TestCase):
+    def marker_ledger(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        marker = ledger.record_branch(
+            source['id'], 'the substitution route stalled')
+        return ledger, source, marker
+
+    def test_marker_is_structured_non_provenance_and_replays(self):
+        ledger, source, marker = self.marker_ledger()
+        self.assertEqual(marker['op'], 'branch')
+        self.assertEqual(marker['args'], {
+            'from': source['id'],
+            'reason': 'the substitution route stalled',
+        })
+        self.assertIsNone(marker['result'])
+        self.assertEqual(marker['check']['status'], 'note')
+        self.assertEqual(ledger.last_result(), source['result'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        self.assertIn('branch from s1 (awaiting continuation): '
+                      'the substitution route stalled',
+                      ledger.render())
+        self.assertIn('*branch from `s1`*', ledger.render_markdown())
+
+    def test_marker_round_trips_in_a_saved_session(self):
+        path = os.path.join(tempfile.mkdtemp(), 'branch.json')
+        ledger = Ledger(path)
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record_branch(source['id'], 'try the factored route')
+        ledger.save()
+        loaded = Ledger(path)
+        self.assertEqual(loaded.steps[1]['args']['from'], 's1')
+        self.assertEqual(loaded.replay()['status'], 'verified')
+
+    def test_invalid_source_reason_and_goal_are_refused(self):
+        ledger = Ledger()
+        with self.assertRaisesRegex(ValueError, 'unknown branch source'):
+            ledger.record_branch('s999', 'resume')
+        note = ledger.record_comment('ordinary note')
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.record_branch(note['id'], 'resume')
+        note['result'] = 'forged result'
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.record_branch(note['id'], 'resume')
+        note['result'] = None
+        source = ledger.record(Core.expand('(x+1)^2'))
+        with self.assertRaisesRegex(ValueError, 'needs a reason'):
+            ledger.record_branch(source['id'], '  ')
+
+        claim = ledger.record_claim('x=x')
+        with self.assertRaisesRegex(ValueError, 'belongs to goal'):
+            ledger.record_branch(source['id'], 'resume', goal=claim['id'])
+
+    def test_replay_rejects_tampered_source_and_reason(self):
+        ledger, _source, marker = self.marker_ledger()
+        marker['args']['from'] = 's999'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('branch marker invalid', replay['reason'])
+
+        ledger, _source, marker = self.marker_ledger()
+        marker['args']['reason'] = 'silently changed'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('hash mismatch', replay['reason'])
+
+    def test_marker_cannot_close_a_claim(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('x=x')
+        source = ledger.record(Core.expand('x=x'), goal=claim['id'])
+        marker = ledger.record_branch(
+            source['id'], 'try another route', goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'not a transforming step'):
+            ledger.conclude(claim['id'], [marker['id']])
+
+    def test_next_transform_persists_edge_and_selection_defines_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        dead = ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(
+            source['id'], 'the numeric detour does not answer the goal')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+        self.assertEqual(resumed['exploration']['from'], source['id'])
+        self.assertFalse(resumed['continues'])  # chronological, not topology
+
+        selection = ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(selection['id'], 'r1')
+        self.assertEqual(topology['spine'], [source['id'], resumed['id']])
+        self.assertEqual(topology['abandoned_paths'], [{
+            'marker': marker['id'], 'source': source['id'],
+            'continues_at': resumed['id'],
+            'reason': 'the numeric detour does not answer the goal',
+            'steps': [dead['id']],
+        }])
+        md = ledger.render_markdown()
+        self.assertIn('<details>', md)
+        self.assertIn('Abandoned path from <code>s1</code>', md)
+        self.assertIn('resumed as <code>s4</code>', md)
+        self.assertIn('**s2**', md)  # checked work stays expandable
+        self.assertIn('Selected final result `r1` from `s4`', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_integrand_convention_links_chain_spine_and_renderers(self):
+        # live probe (substitution workflow): integrate_table consumes the
+        # INTEGRAND of the previous \int result — the accepted chaining
+        # convention must be linkage-visible, or a linear derivation loses
+        # its first step from the spine and any upstream assumptions drop
+        # from the final conditions
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        s2 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s3 = ledger.record(Core.substitute(s2['result'], 'u', 'x^2'))
+        self.assertTrue(s2['continues'])
+        self.assertTrue(s3['continues'])
+        ledger.record_selection(s3['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': s3['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['spine'], [s1['id'], s2['id'], s3['id']])
+        self.assertEqual(topology['unclassified_off_spine'], [])
+        self.assertEqual(topology['parents'][s2['id']], s1['id'])
+        self.assertNotIn('new chain', ledger.render_markdown())
+        self.assertNotIn('(branch)', ledger.render())
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_presession_discontinuity_hint_relinks_at_render_time(self):
+        # sessions recorded before the convention was linkage-visible
+        # persist continues=False on honest integrand chains; topology and
+        # the end-of-run renderers re-derive the link while the persisted
+        # hint stays untouched
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        s2 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s2['continues'] = False
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['parents'][s2['id']], s1['id'])
+        self.assertNotIn('new chain', ledger.render_markdown())
+        self.assertFalse(ledger.steps[1]['continues'])
+
+    def test_branch_resume_accepts_operator_body_input(self):
+        # gen45 live refusal class: resuming from an \int-result step with
+        # an integrand-consuming tactic was structurally impossible — the
+        # gate demanded the wrapped result verbatim while the tactic's
+        # interface takes the integrand
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        ledger.record(Integration.integrate_by_parts(
+            '\\cos(u)', 'u', '\\cos(u)', '1'))
+        marker = ledger.record_branch(
+            s1['id'], 'by parts makes the remainder harder')
+        resumed = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+        self.assertEqual(resumed['exploration']['from'], s1['id'])
+        # result-anchored edges stay byte-identical with older sessions
+        self.assertNotIn('anchor', resumed['exploration'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_branch_resume_from_source_input_abandons_the_step_itself(self):
+        # live probe (root-anchor gap): the FIRST checked move was the
+        # dead end; with only a result-anchored resume available, a strong
+        # model manufactured a skipped no-op step to satisfy the gate and
+        # the dead route stayed unclassified. The source step's recorded
+        # INPUT is now a legitimate resume anchor meaning "abandon that
+        # step itself".
+        ledger = Ledger()
+        s1 = ledger.record(Integration.integrate_by_parts(
+            '2x\\cos(x^2)', 'x', '\\cos(x^2)', '2x'))
+        marker = ledger.record_branch(
+            s1['id'], 'by parts raises the degree; restart from the input')
+        resumed = ledger.record(Integration.integrate_substitute(
+            '2x\\cos(x^2)', 'x', 'x^2', 'u', '\\cos(u)'))
+        self.assertEqual(resumed['exploration']['from'], s1['id'])
+        self.assertEqual(resumed['exploration']['anchor'], 'input')
+        s4 = ledger.record(Integration.integrate_table('\\cos(u)', 'u'))
+        s5 = ledger.record(Core.substitute(s4['result'], 'u', 'x^2'))
+        ledger.record_selection(s5['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': s5['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertEqual(topology['spine'],
+                         [resumed['id'], s4['id'], s5['id']])
+        self.assertIsNone(topology['parents'][resumed['id']])
+        self.assertEqual(topology['abandoned_paths'], [{
+            'marker': marker['id'], 'source': s1['id'],
+            'continues_at': resumed['id'],
+            'reason': 'by parts raises the degree; restart from the input',
+            'steps': [s1['id']],
+            'anchor': 'input',
+        }])
+        self.assertEqual(topology['unclassified_off_spine'], [])
+        md = ledger.render_markdown()
+        self.assertIn('Abandoned path from <code>s1</code>', md)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_branch_target_must_resume_source_and_markers_do_not_stack(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        marker = ledger.record_branch(source['id'], 'try another route')
+        with self.assertRaisesRegex(ValueError, 'input does not resume'):
+            ledger.record(Core.expand('(y+1)^2'))
+        with self.assertRaisesRegex(ValueError, 'still needs'):
+            ledger.record_branch(source['id'], 'stack another marker')
+        # A partial saved session with an unresolved marker remains replayable.
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+
+    def test_replay_rejects_tampered_edge_and_selection(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '1'))
+        ledger.record_branch(source['id'], 'discard the value-only route')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        selection = ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        resumed['exploration']['from'] = 's2'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('edge metadata', replay['reason'])
+
+        resumed['exploration'] = ledger._branch_edge(
+            ledger.steps[2], resumed)
+        selection['provenance']['step'] = 's2'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('selection hash mismatch', replay['reason'])
+
+    def test_legacy_marker_without_persisted_target_edge_still_replays(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(source['id'], 'legacy resume')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        marker['hash'] = ledger_module._legacy_branch_hash(
+            source['id'], marker['args']['reason'])
+        resumed.pop('exploration')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        edge = ledger.branch_edges()[0]
+        self.assertEqual((edge['from'], edge['to'], edge['persisted']),
+                         ('s1', 's4', False))
+
+    def test_dead_path_assumptions_do_not_condition_selected_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('xy=1'))
+        dead = ledger.record(Core.apply_both_sides(
+            source['result'], '/', 'y'))
+        self.assertTrue(dead['assumptions'])
+        ledger.record_branch(source['id'], 'division is unnecessary')
+        resumed = ledger.record(Core.apply_both_sides(
+            source['result'], '-', '1'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        topology = ledger.presentation_topology()
+        self.assertTrue(ledger.assumptions)  # artifact preserves dead work
+        self.assertEqual(topology['spine_assumptions'], [])
+
+
+class TestLedgerOpenOutcome(unittest.TestCase):
+    def test_open_outcome_records_selects_nothing_and_replays(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        outcome = ledger.record_open(
+            'no tactic covers the goal shape; a checked lower-bound '
+            'relation is the missing move')
+        self.assertEqual(outcome['id'], 'r1')
+        self.assertIsNone(outcome['result'])
+        self.assertEqual(outcome['provenance']['status'], 'open')
+        self.assertEqual(outcome['provenance']['source'], 'open')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        with self.assertRaisesRegex(ValueError, 'needs a reason'):
+            ledger.record_open('   ')
+
+    def test_open_outcome_never_carries_authority_on_replay(self):
+        ledger = Ledger()
+        step = ledger.record(Core.expand('(x+1)^2'))
+        outcome = ledger.record_open('stalled')
+        # hash-consistent tampering must still fail the semantic checks:
+        # an open outcome can neither select a value nor cite authority
+        for tamper in (
+                {'result': step['result']},
+                {'provenance': {'status': 'open', 'source': 'open',
+                                'reason': 'stalled', 'step': step['id']}},
+                {'provenance': {'status': 'verified', 'source': 'open',
+                                'reason': 'stalled'}},
+                {'provenance': {'status': 'open', 'source': 'open',
+                                'reason': ''}}):
+            tampered = dict(outcome)
+            tampered.update(tamper)
+            tampered['hash'] = ledger_module._selection_hash(
+                tampered.get('result'), tampered['provenance'],
+                tampered.get('goal'))
+            ledger.selections[-1] = tampered
+            replay = ledger.replay()
+            self.assertEqual(replay['status'], 'failed', tamper)
+            self.assertIn('final selection invalid', replay['reason'])
+        # plain mutation without re-hashing fails on the hash itself
+        ledger.selections[-1] = dict(outcome)
+        ledger.selections[-1]['provenance'] = {
+            'status': 'open', 'source': 'open', 'reason': 'edited'}
+        self.assertEqual(ledger.replay()['status'], 'failed')
+
+    def test_open_ending_renders_unresolved_marker_and_banner(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute(source['result'], 'x', '3'))
+        ledger.record_branch(source['id'], 'the detour went nowhere')
+        ledger.record_open('the goal needs a tactic this session lacks')
+        md = ledger.render_markdown()
+        self.assertIn('**Outcome `r1` — OPEN:** no certified result', md)
+        self.assertIn('*(unverified reason)*', md)
+        self.assertIn('left unresolved; outcome recorded open', md)
+        self.assertNotIn('awaiting a continuing step', md)
+        text = ledger.render()
+        self.assertIn('(unresolved; outcome open)', text)
+        self.assertIn('OPEN r1#', text)
+        self.assertNotIn('SELECT', text)
+
+    def test_trailing_open_outcome_keeps_earlier_certified_spine(self):
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'))
+        dead = ledger.record(Core.substitute(source['result'], 'x', '1'))
+        marker = ledger.record_branch(
+            source['id'], 'the numeric detour does not answer the goal')
+        resumed = ledger.record(Core.factor_quadratic(
+            source['result'], 'x'))
+        ledger.record_selection(resumed['result'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': resumed['id'], 'method': 'exact-result',
+        })
+        ledger.record_open('a later cell stalled on a new goal')
+        topology = ledger.presentation_topology()
+        # the session-level spine still belongs to the certified selection
+        self.assertEqual(topology['spine'], [source['id'], resumed['id']])
+        self.assertEqual(topology['abandoned_paths'][0]['steps'],
+                         [dead['id']])
+        self.assertEqual(topology['selection'], 'r2')
+        # an explicitly passed open provenance stays literal: no spine
+        literal = ledger.presentation_topology(
+            final_provenance={'status': 'open', 'source': 'open',
+                              'reason': 'stalled'},
+            marker_ids=[marker['id']])
+        self.assertEqual(literal['spine'], [])
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 TELESCOPING_LIMIT = ('\\lim _{n \\rightarrow \\infty}\\left['
@@ -3056,6 +3538,28 @@ class TestGoalCoverage(unittest.TestCase):
         self.assertTrue(P.covers_goal(canon, braces))
         self.assertTrue(P.covers_goal(canon, parens))
         self.assertTrue(P.covers_goal(braces, canon))
+
+    def test_covers_goal_bare_integrand_vs_textbook_integral(self):
+        # live int! failure: the first step consumed the BARE integrand of
+        # a textbook goal whose denominator is parenthesized; the goal
+        # link must compare integrand-to-integrand, brackets stripped
+        bare = '\\frac{1}{x^{\\frac{1}{2}}+x^{\\frac{1}{3}}}'
+        goal = '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'
+        self.assertTrue(P.covers_goal(bare, goal))
+        self.assertTrue(P.covers_goal(goal, bare))
+        self.assertFalse(P.covers_goal('\\frac{1}{x^{1/2}}', goal))
+
+    def test_covers_goal_peels_emitter_parens_around_sum_integrand(self):
+        # the \int emitter parenthesizes sum integrands as pure syntax
+        # protection; the linearity/assemble input is the bare sum
+        wrapped = '\\int \\left(6u^2-6u+6-\\frac{6}{u+1}\\right) \\, d u'
+        plain = '6u^2-6u+6-\\frac{6}{u+1}'
+        self.assertTrue(P.covers_goal(plain, wrapped))
+        self.assertTrue(P.covers_goal(wrapped, plain))
+        # semantic brackets are never stripped: |x| is not x
+        self.assertFalse(P.covers_goal('\\int |x| \\, d x',
+                                       '\\int x \\, d x'))
+        self.assertFalse(P.covers_goal('|x|', '\\int x \\, d x'))
 
     def test_covers_goal_bare_integrand_of_textbook_goal(self):
         # agents legitimately restate a textbook-form goal by its bare

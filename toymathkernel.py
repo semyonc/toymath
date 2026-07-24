@@ -80,7 +80,40 @@ class MathKernel(Kernel):
             self.shell_handlers[msg_type] = getattr(self.comm_manager, msg_type)
 
         self.mathShell = mathShell.MathShell()
+        self._model_comms = set()
+        self.comm_manager.register_target('toymath.model',
+                                          self._open_model_comm)
+        self.mathShell.model_change_handler = self._broadcast_model
         setShell(self.mathShell)
+
+    def _model_payload(self):
+        return {'model': self.mathShell.model_name,
+                'providers': list(self.mathShell.model_providers)}
+
+    def _open_model_comm(self, comm, _open_msg):
+        """Connect the JupyterLab model-title extension to this kernel."""
+        self._model_comms.add(comm)
+        comm.on_close(lambda _msg: self._model_comms.discard(comm))
+        comm.send(self._model_payload())
+
+    def _broadcast_model(self, _model, _providers):
+        payload = self._model_payload()
+        for comm in tuple(self._model_comms):
+            try:
+                comm.send(payload)
+            except Exception:
+                self._model_comms.discard(comm)
+
+    async def do_complete(self, code, cursor_pos):
+        """Complete configured model ids and providers for ``model!``."""
+        from engine import model_config
+        try:
+            reply = model_config.complete_model_command(code, cursor_pos)
+        except model_config.ModelConfigError:
+            reply = None
+        if reply is not None:
+            return reply
+        return await super().do_complete(code, cursor_pos)
 
     def makeCopySpan(self, latex):
         latex_bytes = latex.encode("utf-8")
@@ -243,46 +276,6 @@ class MathKernelApp(IPKernelApp):
     kernel_class = MathKernel
 
 
-def refresh_kernelspec_model_name(kernel_name="toymath"):
-    """Cosmetic: suffix the installed kernelspec display name with the
-    current do! model, so JupyterLab's kernel picker and status bar show
-    which model drives agent runs (e.g. "Toy Math · anthropic/...").
-
-    Runs at kernel startup, after load_dotenv, so editing .env and
-    restarting the kernel refreshes the label. Best-effort by design:
-    any failure (no installed spec, read-only dir) must never block
-    kernel startup. Note per-command model overrides can still diverge
-    from this label for a single run - the label is cosmetic, not
-    provenance.
-    """
-    try:
-        import json
-        import os
-        from jupyter_client.kernelspec import KernelSpecManager
-
-        try:
-            from engine.agent_do import MODEL_VAR, DEFAULT_MODEL
-        except Exception:
-            MODEL_VAR = "OPENROUTER_MODEL"
-            DEFAULT_MODEL = "anthropic/claude-sonnet-5"
-        model = os.environ.get(MODEL_VAR, DEFAULT_MODEL)
-        spec = KernelSpecManager().get_kernel_spec(kernel_name)
-        path = os.path.join(spec.resource_dir, "kernel.json")
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        # keep the base name stable across model changes (idempotent)
-        base = data.get("display_name", "Toy Math").split(" · ")[0]
-        display = f"{base} · {model}"
-        if data.get("display_name") != display:
-            data["display_name"] = display
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=4)
-                fh.write("\n")
-    except Exception:
-        pass
-
-
 if __name__ == "__main__":
     logging.disable(logging.ERROR)
-    refresh_kernelspec_model_name()
     MathKernelApp.launch_instance()

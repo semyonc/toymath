@@ -33,6 +33,8 @@ class Replicator(object):
         '\\sqrt': 'enter_sqrt',
         'factorial': 'enter_factorial',
         '\\binom': 'enter_binom',
+        'pair': 'enter_pair',
+        'collection': 'enter_collection',
         '\\buildrel': 'enter_buildrel',
         'func': 'enter_func',
         'group': 'enter_group',
@@ -254,6 +256,12 @@ class Replicator(object):
         res = self._probe(sym, '\\binom')
         if res is not None:
             return res
+        res = self._probe(sym, 'pair')
+        if res is not None:
+            return res
+        res = self._probe(sym, 'collection')
+        if res is not None:
+            return res
         res = self._probe(sym, "\\array")
         if res is not None:
             return res
@@ -452,6 +460,18 @@ class Replicator(object):
         return self.output_notation.repf(
             self.mapsym(sym),
             Func(f.sym, tuple(self.enter_expr(arg) for arg in f.args),
+                 **f.props))
+
+    def enter_pair(self, sym, f):
+        return self.output_notation.repf(
+            self.mapsym(sym),
+            Func(f.sym, tuple(self.enter_subformula(arg) for arg in f.args),
+                 **f.props))
+
+    def enter_collection(self, sym, f):
+        return self.output_notation.repf(
+            self.mapsym(sym),
+            Func(f.sym, tuple(self.enter_subformula(arg) for arg in f.args),
                  **f.props))
 
     def enter_buildrel(self, sym, f):
