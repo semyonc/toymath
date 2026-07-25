@@ -522,6 +522,74 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertFalse(rec['ok'])
         self.assertIn('not integrate_linearity', rec['error'])
 
+    def _stationary_session(self):
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['diff']('x^3-3x', 'x'))
+        roots = json.loads(api['quadratic_roots']('3x^{2}-3', 'x'))
+        values = []
+        for root, substituted in (('-1', '(-1)^{3}-3(-1)'),
+                                  ('1', '(1)^{3}-3(1)')):
+            json.loads(api['substitute']('x^3-3x', 'x', root))
+            values.append(json.loads(
+                api['evaluate'](substituted))['step']['id'])
+        return session, api, roots['step']['id'], values
+
+    def test_points_assemble_completes_the_stationary_point_answer(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, values))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(rec['sources'],
+                         {'roots': 's2', 'values': ['s4', 's6']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        # every checked step stays on the presented spine, and both
+        # renderings name the function the values were paired from
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine'],
+                         [s['id'] for s in session.ledger.steps])
+        self.assertIn('values of x^3-3x from s4, s6',
+                      session.ledger.render())
+        self.assertIn('values of $x^3-3x$ from `s2` → `s4, s6`',
+                      session.ledger.render_markdown())
+
+    def test_points_assemble_refuses_swapped_value_steps(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, list(reversed(values))))
+        self.assertFalse(rec['ok'])
+        self.assertIn('is not the value of', rec['error'])
+        self.assertEqual(len(session.ledger.steps), 6)
+
+    def test_points_assemble_needs_recorded_value_steps(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, ['s4', 's99']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_replay_rejects_tampered_point_provenance(self):
+        session, api, roots_id, values = self._stationary_session()
+        json.loads(api['points_assemble']('x^3-3x', 'x', roots_id, values))
+        session.ledger.steps[-1]['sources']['values'][1] = 's4'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_typed_result_is_selectable_after_harmless_respelling(self):
+        session, api, roots_id, values = self._stationary_session()
+        json.loads(api['points_assemble']('x^3-3x', 'x', roots_id, values))
+        selected = json.loads(api['set_result'](r'\{ (-1, 2), (1, -2) \}'))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['method'], 'same-expression')
+        reordered = json.loads(api['set_result'](r'\{(1,-2),(-1,2)\}'))
+        self.assertFalse(reordered['ok'])
+
     def test_replay_rejects_tampered_assembly_provenance(self):
         session = DoSession()
         api = make_api(session)
@@ -628,6 +696,46 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertTrue(res['steps'][1]['continues'])
         self.assertEqual(shown, ['stationary points'])
         self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_stationary_points_finish_as_one_assembled_collection(self):
+        script = [
+            [tool_call('load_skill', {'skill': 'differentiation'}, 'sk1')],
+            [tool_call('diff', {'expr': 'x^3-3x', 'var': 'x'}, 'd1')],
+            [tool_call('load_skill', {'skill': 'equations'}, 'sk2')],
+            [tool_call('quadratic_roots', {
+                'expr': '3x^{2}-3', 'var': 'x'}, 'r1')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '-1'}, 'p1')],
+            [tool_call('evaluate', {'expr': '(-1)^{3}-3(-1)'}, 'p2')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '1'}, 'p3')],
+            [tool_call('evaluate', {'expr': '(1)^{3}-3(1)'}, 'p4')],
+            [tool_call('points_assemble', {
+                'expr': 'x^3-3x', 'var': 'x', 'roots_step': 's2',
+                'value_steps': ['s4', 's6']}, 'a1')],
+            [tool_call('set_result', {
+                'expr': r'\{(-1,2),(1,-2)\}'}, 'done')],
+            [message('Assembled the checked stationary points.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction(
+            'find the stationary points of x^3-3x',
+            model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        self.assertEqual(res['final_provenance']['step'], 's7')
+        self.assertEqual(res['steps'][-1]['op'], 'points_assemble')
+        self.assertEqual(res['steps'][-1]['check']['status'], 'agree')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_points_assemble_needs_its_subject_skill(self):
+        session = DoSession()
+        api = make_api(session)
+        refusal = json.loads(api['run_tactic'](
+            'points_assemble', ['x^3-3x', 'x', 's1', 's2']))
+        self.assertFalse(refusal['ok'])
+        self.assertIn("load_skill('equations')", refusal['error'])
 
     def test_ellipsis_series_limit_closes_via_sum_tactics(self):
         res = run_instruction('evaluate ' + LIM_SUM_EXPR,

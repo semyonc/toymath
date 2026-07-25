@@ -191,6 +191,63 @@ def _limit_squeeze_from_steps(context, args):
     return result
 
 
+def _points_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('points_assemble',
+                      'points_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    roots_id = args['roots_step']
+    roots = by_id.get(roots_id)
+    if roots is None or roots.get('result') is None:
+        return _error('points_assemble',
+                      f'unknown transforming step {roots_id!r}')
+    source_ids = args['value_steps']
+    values = []
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('points_assemble',
+                          f'unknown transforming step {source_id!r}')
+        values.append(source['result'])
+    result = equations.points_assemble(
+        args['expr'], args['var'], roots['result'], values)
+    if result.get('ok'):
+        result['sources'] = {
+            'roots': roots_id,
+            'values': list(source_ids),
+        }
+    return result
+
+
+def _validate_points_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    roots = seen.get(sources.get('roots'))
+    if roots is None or roots.get('result') is None:
+        return 'missing root-step provenance'
+    if roots.get('result') != args.get('roots'):
+        return 'root-step provenance mismatch'
+    source_ids = sources.get('values') or []
+    values = args.get('values') or []
+    if len(source_ids) != len(values):
+        return 'point-value provenance mismatch'
+    for source_id, value in zip(source_ids, values):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != value:
+            return f'point-value provenance mismatch at {source_id}'
+    recorded = step.get('points')
+    if recorded is not None:
+        try:
+            expected = equations.point_pairs(
+                args.get('roots', ''), args.get('var', ''), values)
+        except primitives.PrimitiveError:
+            return 'unreadable point association'
+        if recorded != expected:
+            return 'point association mismatch'
+    return None
+
+
 def _validate_integrate_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -307,6 +364,27 @@ TACTICS = (
     TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',
                'find every rational root of a quadratic expression or '
                'equality', equations.quadratic_roots, (E, V)),
+    TacticSpec(
+        'points_assemble', 'points_assemble', 'equations',
+        'assemble recorded roots and their recorded values into the '
+        'complete point collection',
+        equations.points_assemble,
+        (E, V, _arg('roots', 'ROOTS', 'recorded solution relation'),
+         _arg('values', 'VALUE', 'recorded values, one per root',
+              nargs='+')),
+        agent_arguments=(
+            E, V, _arg('roots_step', 'ROOTS_STEP',
+                       'ledger step id of the recorded solutions'),
+            _arg('value_steps', 'STEP',
+                 'ordered value step ids, one per root', nargs='+')),
+        agent_handler=_points_assemble_from_steps,
+        cli_arguments=(
+            E, V, _arg('roots_step', 'ROOTS_STEP',
+                       'ledger step id of the recorded solutions'),
+            _arg('value_steps', 'STEP',
+                 'ordered value step ids, one per root', nargs='+')),
+        cli_handler=_points_assemble_from_steps,
+        provenance_validator=_validate_points_assemble),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',

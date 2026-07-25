@@ -28,10 +28,28 @@ the candidates and completeness independently. Irrational or complex roots
 are refused rather than approximated.
 
 For stationary points, first load differentiation and call `diff`, then load
-this skill and pass the derivative result verbatim to `quadratic_roots`. To
-mark points on the original graph, substitute each returned root into the
-original function and evaluate before plotting. The plot remains an
+this skill and pass the derivative result verbatim to `quadratic_roots`. That
+records where the derivative vanishes — the x-values, not the points.
+
+When the task asks for the points themselves, finish with `points_assemble`.
+Substitute each recorded root into the ORIGINAL function and `evaluate` it, so
+every value is its own checked step, then call
+
+```text
+points_assemble ORIGINAL_FUNCTION VAR ROOTS_STEP VALUE_STEP...
+```
+
+with the step id of the root result and one value step id per root, in the
+order the roots are written. It re-derives every root-to-value association
+independently and returns the complete collection `\{(x_1,y_1),...\}`, which
+is the answer to designate with `set_result`. Never type that collection
+yourself: an assembled answer is a claim about where each number came from,
+and only this tactic can check it. If a value has not been recorded as a step
+yet, record it first — the tactic reads ledger ids, not typed numbers.
+
+To mark the points on a graph, plot after assembling. The plot remains an
 unverified illustration.
 
 An equation being solved is not a claim that the equation is universally
-true. Do not call `claim` for it; designate the root result with `set_result`.
+true. Do not call `claim` for it; designate the complete result with
+`set_result`.

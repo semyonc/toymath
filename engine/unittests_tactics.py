@@ -111,6 +111,8 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertNotIn('integrate_by_parts EXPR', limits)
         equations = tactic_skills.render('equations')
         self.assertIn('quadratic_roots EXPR VAR', equations)
+        self.assertIn('points_assemble EXPR VAR ROOTS_STEP STEP...',
+                      equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
     def test_existing_cli_shapes_are_preserved(self):
@@ -132,10 +134,48 @@ class TestTacticRegistry(unittest.TestCase):
         roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
         self.assertEqual((roots.cmd, roots.expr, roots.var),
                          ('quadratic_roots', 'x^2-1', 'x'))
+        points = parser.parse_args([
+            'points_assemble', 'x^3-3x', 'x', 's2', 's5', 's6'])
+        self.assertEqual((points.cmd, points.roots_step, points.value_steps),
+                         ('points_assemble', 's2', ['s5', 's6']))
         branch = parser.parse_args([
             'branch', 's2', 'try another route', '--session', 'work.json'])
         self.assertEqual((branch.cmd, branch.from_step, branch.reason),
                          ('branch', 's2', 'try another route'))
+
+    def test_cli_points_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core, differentiation, equations
+
+        path = os.path.join(tempfile.mkdtemp(), 'points.json')
+        ledger = Ledger(path)
+        ledger.record(differentiation.differentiate('x^3-3x', 'x'))
+        ledger.record(equations.quadratic_roots('3x^{2}-3', 'x'))
+        for value in ('(-1)^{3}-3(-1)', '(1)^{3}-3(1)'):
+            ledger.record(core.evaluate(value))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'points_assemble', 'x^3-3x', 'x', 's2', 's3', 's4',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(rec['sources'],
+                         {'roots': 's2', 'values': ['s3', 's4']})
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_points_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'points_assemble', 'x^3-3x', 'x', 's2', 's3', 's4'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
 
     def test_cli_branch_records_and_replays_marker(self):
         from ledger import Ledger

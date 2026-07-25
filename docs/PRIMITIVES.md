@@ -176,6 +176,14 @@ retrieves ordered recorded pieces, recomputes the combined result, persists the
 source ids, and revalidates them during replay. Squeeze likewise requires the
 recorded lower- and upper-bound limit steps.
 
+Complete answers that are collections of associated values follow the same
+rule. A solution set of points is assembled by `points_assemble` from the
+recorded solution step and one recorded value step per root: every
+root-to-value association is gated symbolically and then re-derived by the
+independent evaluator, which is what sees the pairing. A typed collection an
+agent writes out by hand is a claim about where each number came from, so it
+is not admissible as a result on its own.
+
 The same principle governs inline notebook commands:
 
 ```text
@@ -204,7 +212,10 @@ Important verified-layer behaviors include:
   as `\{(-1,2),(1,-2)\}` survive parse/write, graph replication, normal-form
   comparison, and notebook `[[n]]` history; they deliberately have no set
   algebra or scalar numeric-oracle meaning, while bare `x,y` remains the
-  existing command/system `C_LIST`;
+  existing command/system `C_LIST`. Because the oracle cannot sample such a
+  value, selecting one as the final result relies on structural identity with
+  a recorded step result — the same comparison the ledger uses to validate the
+  selection — so item order is significant and never rearranged;
 - maximal non-fragment subtrees become opaque atoms so rational algebra can
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol
@@ -269,7 +280,11 @@ writer, comparer, and replicator landmines.
   both-sides operations, but there is no autonomous elimination, row-combine,
   or general linear-system solver.
 - Quadratic root finding returns complete rational roots; irrational and
-  complex roots remain outside the executable equation tactics.
+  complex roots remain outside the executable equation tactics. Point
+  assembly completes those roots into `\{(x_1,y_1),...\}` only from recorded
+  steps: it associates values with roots and checks each association, but it
+  finds no roots, evaluates nothing on its own, and has no collection
+  algebra.
 - Infinite sums/products enter only through the definitional
   partial-sums rewrite (value = limit of partial sums, if it exists);
   ellipsis and infinite bounds never become sampled ring variables.

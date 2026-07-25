@@ -394,6 +394,19 @@ class DoSession(object):
                     'status': 'verified', 'source': 'ledger',
                     'step': step['id'], 'method': 'exact-result',
                 }
+            # Structural identity first, exactly as the ledger validates the
+            # selection this is about to create. It is strictly stronger
+            # evidence than numeric agreement, and it is the only reading
+            # available for a typed result the scalar oracle refuses to
+            # sample (a point collection, a pair).
+            try:
+                if primitives.same_expression(expr, established):
+                    return {
+                        'status': 'verified', 'source': 'ledger',
+                        'step': step['id'], 'method': 'same-expression',
+                    }
+            except Exception:
+                pass
             try:
                 eq = core_tactics.equal_exprs(expr, established)
             except Exception:
@@ -413,6 +426,11 @@ class DoSession(object):
 
 
 def _equivalent(left, right):
+    try:
+        if primitives.same_expression(left, right):
+            return True
+    except Exception:
+        pass
     try:
         rec = core_tactics.equal_exprs(left, right)
     except Exception:

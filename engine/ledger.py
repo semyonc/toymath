@@ -1154,6 +1154,13 @@ class Ledger(object):
                 ids = ', '.join(src.get('values', []))
                 arg_note = (f" — sources `{src.get('linearity', '?')}` "
                             f"→ `{ids}`")
+            elif step['op'] == 'points_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('values', []))
+                # naming the paired function keeps the reader from assuming
+                # it is whatever the chain last mentioned
+                arg_note = (f" — values of ${step['args'].get('expr', '')}$ "
+                            f"from `{src.get('roots', '?')}` → `{ids}`")
             goal = (f" → `{step['goal']}`" if step.get('goal') else '')
             out.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
                        f"— *{mark}*{branch}")
@@ -1255,6 +1262,12 @@ class Ledger(object):
                     '      sources: linearity '
                     + src.get('linearity', '?') + '; values '
                     + ', '.join(src.get('values', [])))
+            elif step['op'] == 'points_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: roots ' + src.get('roots', '?')
+                    + '; values of ' + step['args'].get('expr', '?')
+                    + ' from ' + ', '.join(src.get('values', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
         visible_assumptions = (topology['spine_assumptions']

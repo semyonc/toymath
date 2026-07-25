@@ -825,6 +825,97 @@ class TestQuadraticRoots(unittest.TestCase):
         self.assertIn('solution metadata', replay['reason'])
 
 
+class TestPointsAssemble(unittest.TestCase):
+    def test_assembles_the_complete_point_collection(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['2', '-2'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(r['input'], r'x=-1 \lor x=1')
+        self.assertEqual(r['points'], [{'root': '-1', 'value': '2'},
+                                       {'root': '1', 'value': '-2'}])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_result_is_a_typed_collection_of_pairs(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['2', '-2'])
+        sym, notation = P.parse_latex(r['result'])
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 2)
+        for item in collection.args:
+            self.assertIsNotNone(notation.getf(item, Notation.PAIR))
+
+    def test_single_repeated_root_and_fraction_roots(self):
+        repeated = Equations.points_assemble('x^2-6x+9', 'x', 'x=3', ['0'])
+        self.assertTrue(repeated['ok'], repeated.get('error'))
+        self.assertEqual(repeated['result'], r'\{(3,0)\}')
+        fraction = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=-\frac{1}{2} \lor x=1',
+            [r'\frac{11}{8}', '-2'])
+        self.assertTrue(fraction['ok'], fraction.get('error'))
+        self.assertEqual(fraction['check']['status'], 'agree')
+        self.assertTrue(P.same_expression(
+            fraction['result'], r'\{(-\frac{1}{2},\frac{11}{8}),(1,-2)\}'))
+
+    def test_symbolic_values_stay_associated(self):
+        r = Equations.points_assemble('ax^2', 'x', r'x=-1 \lor x=2',
+                                      ['a', '4a'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertGreater(r['check']['samples'], 2)
+
+    def test_swapped_values_are_refused(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['-2', '2'])
+        self.assertFalse(r['ok'])
+        self.assertIn('is not the value of', r['error'])
+
+    def test_value_count_must_match_the_recorded_solutions(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1', ['2'])
+        self.assertFalse(r['ok'])
+        self.assertIn('one recorded value step per root', r['error'])
+
+    def test_only_recorded_solution_relations_are_accepted(self):
+        inequality = Equations.points_assemble('x^3-3x', 'x', r'x \lt 1',
+                                               ['2'])
+        self.assertFalse(inequality['ok'])
+        self.assertIn('equality', inequality['error'])
+        other_var = Equations.points_assemble('x^3-3x', 'x', 'y=1', ['-2'])
+        self.assertFalse(other_var['ok'])
+        self.assertIn("must name 'x'", other_var['error'])
+        plain = Equations.points_assemble('x^3-3x', 'x', '1', ['-2'])
+        self.assertFalse(plain['ok'])
+        self.assertIn('solution relation', plain['error'])
+
+    def test_repeated_root_spellings_are_refused(self):
+        structural = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=1 \lor x=1', ['-2', '-2'])
+        self.assertFalse(structural['ok'])
+        self.assertIn('the same root', structural['error'])
+        respelled = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=1 \lor x=\frac{2}{2}', ['-2', '-2'])
+        self.assertFalse(respelled['ok'])
+        self.assertIn('the same root', respelled['error'])
+        distinct = Equations.points_assemble(
+            'ax^2', 'x', r'x=b \lor x=-b', ['ab^2', 'ab^2'])
+        self.assertTrue(distinct['ok'], distinct.get('error'))
+
+    def test_independent_check_sees_the_pairing(self):
+        swapped = Equations._points_check(
+            'x^3-3x', 'x', [('-1', '-2'), ('1', '2')])
+        self.assertEqual(swapped['status'], 'disagree')
+        self.assertEqual(swapped['root'], '-1')
+        aligned = Equations._points_check(
+            'x^3-3x', 'x', [('-1', '2'), ('1', '-2')])
+        self.assertEqual(aligned['status'], 'agree')
+
+    def test_undefined_value_at_a_root_is_a_domain_signal(self):
+        check = Equations._points_check('\\frac{1}{x}', 'x', [('0', '0')])
+        self.assertEqual(check['status'], 'domain-differs')
+        self.assertEqual(check['root'], '0')
+
+
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = Core.expand('2 \\cdot x \\cdot (x+1)')
