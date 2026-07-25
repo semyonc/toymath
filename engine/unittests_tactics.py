@@ -108,6 +108,7 @@ class TestTacticRegistry(unittest.TestCase):
         limits = tactic_skills.render('limits')
         self.assertIn('limit_squeeze EXPR LOWER UPPER LOWER_STEP UPPER_STEP',
                       limits)
+        self.assertIn('limit_from_sides EXPR LEFT_STEP RIGHT_STEP', limits)
         self.assertNotIn('integrate_by_parts EXPR', limits)
         equations = tactic_skills.render('equations')
         self.assertIn('quadratic_roots EXPR VAR', equations)
@@ -138,6 +139,10 @@ class TestTacticRegistry(unittest.TestCase):
             'points_assemble', 'x^3-3x', 'x', 's2', 's5', 's6'])
         self.assertEqual((points.cmd, points.roots_step, points.value_steps),
                          ('points_assemble', 's2', ['s5', 's6']))
+        sides = parser.parse_args([
+            'limit_from_sides', 'L', 's6', 's3'])
+        self.assertEqual((sides.cmd, sides.left_step, sides.right_step),
+                         ('limit_from_sides', 's6', 's3'))
         branch = parser.parse_args([
             'branch', 's2', 'try another route', '--session', 'work.json'])
         self.assertEqual((branch.cmd, branch.from_step, branch.reason),

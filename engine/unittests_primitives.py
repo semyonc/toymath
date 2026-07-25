@@ -3530,6 +3530,84 @@ class TestLimitSqueeze(unittest.TestCase):
         self.assertFalse(rec['ok'])
 
 
+OSC_ROOT = '\\lim_{x \\to 0} x \\sqrt{\\cos\\frac{1}{x}}'
+
+
+class TestApproachOracleKinkedBodies(unittest.TestCase):
+    # The finite-point approach oracle extrapolates over a geometric
+    # h-ladder with Aitken acceleration, so |x|-kinked continuous bodies
+    # converge (the smooth Richardson model alone skipped every sample).
+
+    def test_abs_body_substitutes(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} (|x|)')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_negative_abs_body_substitutes(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} (-|x|)')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_two_sided_abs_squeeze_closes_oscillating_root(self):
+        # the live-run bounds: -|x| <= x sqrt(cos(1/x)) <= |x|
+        rec = Limits.limit_squeeze(OSC_ROOT, '(-|x|)', '(|x|)', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+
+    def test_signed_bounds_still_refused_two_sided(self):
+        # the flipping bounds -x <= body <= x are genuinely wrong for x < 0
+        rec = Limits.limit_squeeze(OSC_ROOT, '(-x)', 'x', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('ordering', rec['error'])
+
+    def test_oscillating_body_still_refuses(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} \\sin\\frac{1}{x}')
+        self.assertFalse(rec['ok'])
+
+    def test_leading_minus_body_names_the_repair(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} -x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('parenthesize', rec['error'])
+
+
+class TestLimitFromSides(unittest.TestCase):
+    # The core tactic validates the two-sided target and the value; the
+    # recorded one-sided premises are enforced by the registry handlers
+    # (session-required) and re-validated by replay provenance — a
+    # source-less step fails replay, mirroring limit_squeeze.
+
+    def test_two_sided_from_agreeing_sides(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('^{-}', rec['left'])
+        self.assertIn('^{+}', rec['right'])
+
+    def test_one_sided_target_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0^+} x', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('two-sided', rec['error'])
+
+    def test_value_with_bound_variable_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_contradicted_value_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x^2', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('contradicts', rec['error'])
+
+    def test_unconverged_oracle_defers_to_premises(self):
+        # sampling cannot converge on this oscillating (true) limit; the
+        # record is exact-by-theorem and only the registry handlers
+        # (recorded premises) can admit it
+        rec = Limits.limit_from_sides(
+            '\\lim_{x \\to 0} x \\sin\\frac{1}{x}', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'exact')
+
+
 class TestEllipsisClaim(unittest.TestCase):
     def test_ellipsis_claim_records_and_closes_conditionally(self):
         ledger = Ledger()

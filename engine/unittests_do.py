@@ -499,6 +499,94 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(replay['status'], 'failed')
         self.assertIn('provenance', replay['reason'])
 
+    OSC_ROOT = '\\lim_{x \\to 0} x \\sqrt{\\cos\\frac{1}{x}}'
+
+    def _one_sided_setup(self, api):
+        right = json.loads(api['limit_substitute']('\\lim_{x \\to 0^+} x'))
+        left = json.loads(api['limit_substitute']('\\lim_{x \\to 0^-} x'))
+        return left['step']['id'], right['step']['id']
+
+    def test_limit_from_sides_uses_recorded_one_sided_limits(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['sources'],
+                         {'left': left_id, 'right': right_id})
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_from_sides_closes_oscillating_root(self):
+        # the live-failure workflow: direction-dependent squeezes close
+        # each side, then the sides combine into the two-sided limit
+        session = DoSession()
+        api = make_api(session)
+        r_low = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^+} (-x)'))
+        r_up = json.loads(api['limit_substitute']('\\lim_{x \\to 0^+} x'))
+        right = json.loads(api['limit_squeeze'](
+            '\\lim_{x \\to 0^+} x \\sqrt{\\cos\\frac{1}{x}}',
+            '(-x)', 'x', r_low['step']['id'], r_up['step']['id']))
+        self.assertTrue(right['ok'], right.get('error'))
+        l_low = json.loads(api['limit_substitute']('\\lim_{x \\to 0^-} x'))
+        l_up = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^-} (-x)'))
+        left = json.loads(api['limit_squeeze'](
+            '\\lim_{x \\to 0^-} x \\sqrt{\\cos\\frac{1}{x}}',
+            'x', '(-x)', l_low['step']['id'], l_up['step']['id']))
+        self.assertTrue(left['ok'], left.get('error'))
+        rec = json.loads(api['limit_from_sides'](
+            self.OSC_ROOT, left['step']['id'], right['step']['id']))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_from_sides_rejects_mismatched_side_step(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, _ = self._one_sided_setup(api)
+        other = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^+} (-x)'))
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, other['step']['id']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not record', rec['error'])
+
+    def test_limit_from_sides_rejects_unequal_side_values(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        for step in session.ledger.steps:
+            if step['id'] == left_id:
+                step['result'] = '1'
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        self.assertFalse(rec['ok'])
+        self.assertIn('not the same value', rec['error'])
+
+    def test_replay_rejects_tampered_from_sides_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        session.ledger.steps[-1]['sources']['left'] = right_id
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance', replay['reason'])
+
+    def test_replay_rejects_sourceless_from_sides_step(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        del session.ledger.steps[-1]['sources']
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+
     def test_integrate_assemble_rejects_wrong_source_order(self):
         session = DoSession()
         api = make_api(session)

@@ -1241,6 +1241,16 @@ def _strip_limit(sym, notation):
         sym = g.args[0]
     f = notation.getf(sym, Notation.P_LIST)
     if f is None:
+        s = notation.getf(sym, Notation.S_LIST)
+        if s is not None and s.args:
+            head = _peel_groups(s.args[0], notation)
+            hp = notation.getf(head, Notation.P_LIST)
+            first = hp.args[0] if hp is not None else head
+            if _big_operator_name(first, notation) == '\\lim':
+                raise PrimitiveError(
+                    'a leading sign splits the limit body into a sum; '
+                    'parenthesize the signed body, as in '
+                    '\\lim_{x \\to 0} (-x)')
         raise PrimitiveError('expected a limit expression')
     raw = list(f.args)
     significant = [a for a in raw if not (isinstance(a, Symbol)

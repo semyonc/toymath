@@ -1,7 +1,7 @@
 ---
 name: toymath-limits
 key: limits
-description: Limits by verified rewrite, continuity, tables, l'Hopital, linearity, assembly, and squeeze.
+description: Limits by verified rewrite, continuity, tables, l'Hopital, linearity, assembly, squeeze, and one-sided combination.
 ---
 
 # Limits
@@ -20,6 +20,10 @@ Use one tactic per mathematical justification:
 - `limit_squeeze` requires recorded lower- and upper-bound limit steps reaching
   the same value. Pass the full target limit, lower body, upper body, and the
   two source step ids. Ordering is spot-checked and recorded as an assumption.
+- `limit_from_sides` closes a two-sided limit from recorded left and right
+  one-sided limit steps of the same body that reached the same value. Cite the
+  two step ids; each side may itself be closed by any tactic, including a
+  one-sided squeeze.
 
 When no direct rule closes the limit but the body is bounded by simpler
 sequences, propose the bounds yourself and squeeze. This is the standard
@@ -29,6 +33,14 @@ but `0` and `\frac{1}{\sqrt{2n+1}}` bound it (root-power decay closes the
 upper bound). Close each bound's `\lim` as its own step first, then cite
 both step ids in `limit_squeeze`. Do not chase factorial or binomial
 rewrites of a product body — those forms have no grammar here.
+
+If a two-sided squeeze ordering fails because the natural bounds flip sign
+with the variable (a witness near `0^-` while the ordering holds on the
+right), either use absolute-value bounds — `(-|x|)` and `(|x|)`,
+parenthesized — or split by direction: squeeze `\lim_{x \to a^{+}}` and
+`\lim_{x \to a^{-}}` as their own steps, then cite both step ids in
+`limit_from_sides`. A leading `-` in any limit body or bound must be
+parenthesized: `\lim_{x \to 0} (-x)`, never `\lim_{x \to 0} -x`.
 
 Never type the final linear combination into core `expand`; use assembly so
 the cited branch provenance remains replayable. One-sided and infinite

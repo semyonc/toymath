@@ -191,6 +191,44 @@ def _limit_squeeze_from_steps(context, args):
     return result
 
 
+def _limit_from_sides_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('limit_from_sides',
+                      'limit_from_sides requires a session')
+    by_id = {step['id']: step for step in steps}
+    resolved = {}
+    for tag in ('left', 'right'):
+        source_id = args[f'{tag}_step']
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('limit_from_sides',
+                          f'unknown transforming step {source_id!r}')
+        try:
+            expected = limits.limit_with_direction(args['expr'], tag)
+        except primitives.PrimitiveError as exc:
+            return _error('limit_from_sides', str(exc))
+        if not primitives.same_expression(source.get('input') or '',
+                                          expected):
+            return _error(
+                'limit_from_sides',
+                f'{source_id!r} does not record the {tag} one-sided '
+                f'limit {expected!r}')
+        resolved[tag] = source['result']
+    if not primitives.same_expression(resolved['left'], resolved['right']):
+        equal = core.equal_exprs(resolved['left'], resolved['right'])
+        if not (equal.get('ok') and equal.get('verdict') == 'yes'):
+            return _error(
+                'limit_from_sides',
+                'the recorded one-sided limits are not the same value: '
+                f'{resolved["left"]!r} vs {resolved["right"]!r}')
+    result = limits.limit_from_sides(args['expr'], resolved['left'])
+    if result.get('ok'):
+        result['sources'] = {'left': args['left_step'],
+                             'right': args['right_step']}
+    return result
+
+
 def _points_assemble_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -218,6 +256,27 @@ def _points_assemble_from_steps(context, args):
             'values': list(source_ids),
         }
     return result
+
+
+def _validate_limit_from_sides(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    for tag in ('left', 'right'):
+        source = seen.get(sources.get(tag))
+        if source is None or source.get('result') is None:
+            return f'missing {tag}-limit provenance'
+        try:
+            expected = limits.limit_with_direction(args.get('expr', ''),
+                                                   tag)
+        except primitives.PrimitiveError:
+            return f'malformed {tag} one-sided limit'
+        if not primitives.same_expression(source.get('input') or '',
+                                          expected):
+            return f'{tag}-limit provenance mismatch'
+        if not primitives.same_expression(source['result'],
+                                          args.get('value', '')):
+            return f'{tag}-limit value mismatch'
+    return None
 
 
 def _validate_points_assemble(step, seen):
@@ -473,6 +532,25 @@ TACTICS = (
             _arg('upper_step', 'UPPER_STEP', 'upper-bound limit step id')),
         agent_handler=_limit_squeeze_from_steps,
         provenance_validator=_validate_limit_squeeze),
+    TacticSpec(
+        'limit_from_sides', 'limit_from_sides', 'limits',
+        'close a two-sided limit from its recorded agreeing one-sided '
+        'limits',
+        limits.limit_from_sides,
+        (E, _arg('value', 'VALUE', 'common one-sided limit value')),
+        agent_arguments=(
+            E, _arg('left_step', 'LEFT_STEP',
+                    'left one-sided limit step id'),
+            _arg('right_step', 'RIGHT_STEP',
+                 'right one-sided limit step id')),
+        agent_handler=_limit_from_sides_from_steps,
+        cli_arguments=(
+            E, _arg('left_step', 'LEFT_STEP',
+                    'left one-sided limit step id'),
+            _arg('right_step', 'RIGHT_STEP',
+                 'right one-sided limit step id')),
+        cli_handler=_limit_from_sides_from_steps,
+        provenance_validator=_validate_limit_from_sides),
 
     TacticSpec('sum_from_ellipsis', 'sum_from_ellipsis',
                'finite_operators',
