@@ -8,6 +8,12 @@ import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { IDisposable } from '@lumino/disposable';
 
 import { closeCommSafely } from './comm_lifecycle';
+import {
+  applyModelTitle,
+  findAddedKernelNameItem,
+  IItemNode,
+  KERNEL_NAME_ITEM
+} from './model_title';
 
 const COMM_TARGET = 'toymath.model';
 const TOYMATH_KERNEL = 'toymath';
@@ -23,44 +29,59 @@ interface IPanelState {
   activeCell: Cell | null;
   completionTimer: number | null;
   disposed: boolean;
+  kernelNameItem: HTMLElement | null;
+  itemObserver: MutationObserver | null;
+  toolbarObserver: MutationObserver | null;
 }
 
 function isToyMath(panel: NotebookPanel): boolean {
   return panel.sessionContext.session?.kernel?.name === TOYMATH_KERNEL;
 }
 
-function setKernelTitle(panel: NotebookPanel, model: string | null): void {
-  // KernelNameComponent has no dynamic-label API beyond kernelChanged. Keep
-  // its existing button/click handler and change only this notebook panel's
-  // rendered label after React has handled any kernel-change signal.
-  requestAnimationFrame(() => {
-    if (panel.isDisposed) {
-      return;
-    }
-    const button = panel.toolbar.node.querySelector<HTMLElement>(
-      '.jp-Toolbar-kernelName'
-    );
-    if (!button) {
-      return;
-    }
-    const label = button.querySelector<HTMLElement>(
-      '.jp-ToolbarButtonComponent-label'
-    );
-    if (!label) {
-      return;
-    }
-    if (model && isToyMath(panel)) {
-      label.textContent = `Toy Math · ${model}`;
-      button.dataset.toymathModel = 'true';
-      button.title = `ToyMath agent model: ${model}. Click to switch kernel.`;
-      button.setAttribute('aria-label', `Toy Math agent model ${model}`);
-    } else {
-      label.textContent = panel.sessionContext.kernelDisplayName;
-      delete button.dataset.toymathModel;
-      button.title = 'Switch kernel';
-      button.setAttribute('aria-label', panel.sessionContext.kernelDisplayName);
-    }
-  });
+function paintKernelTitle(panel: NotebookPanel, state: IPanelState): void {
+  // KernelNameComponent has no dynamic-label API beyond kernelChanged, so keep
+  // JupyterLab's own button and click handler and rewrite only its label. The
+  // write is idempotent because it runs again on every mutation of the item.
+  if (panel.isDisposed || !state.kernelNameItem) {
+    return;
+  }
+  const model = state.model && isToyMath(panel) ? state.model.model : null;
+  applyModelTitle(
+    // The DOM node satisfies the structural subset the painter needs.
+    state.kernelNameItem as unknown as IItemNode,
+    model,
+    panel.sessionContext.kernelDisplayName
+  );
+}
+
+/**
+ * Track the kernel-name toolbar item of `panel` and paint the current model.
+ *
+ * `item` is the node just added to the toolbar, when the caller saw it; the
+ * responsive toolbar can park the item in its document-level overflow popup,
+ * where a re-query of the toolbar would no longer find it.
+ */
+function bindKernelName(
+  panel: NotebookPanel,
+  state: IPanelState,
+  item: HTMLElement | null = null
+): void {
+  const found =
+    item ?? panel.toolbar.node.querySelector<HTMLElement>(KERNEL_NAME_ITEM);
+  if (found && found !== state.kernelNameItem) {
+    state.itemObserver?.disconnect();
+    state.kernelNameItem = found;
+    // React remounts the button whenever the item is re-parented between the
+    // toolbar and the overflow popup, which drops the model from the label.
+    const observer = new MutationObserver(() => paintKernelTitle(panel, state));
+    observer.observe(found, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+    state.itemObserver = observer;
+  }
+  paintKernelTitle(panel, state);
 }
 
 function readModelMessage(msg: KernelMessage.ICommMsgMsg): IModelState | null {
@@ -85,7 +106,7 @@ function connectPanel(panel: NotebookPanel, state: IPanelState): void {
 
   const kernel = panel.sessionContext.session?.kernel;
   if (!kernel || kernel.name !== TOYMATH_KERNEL) {
-    setKernelTitle(panel, null);
+    paintKernelTitle(panel, state);
     return;
   }
 
@@ -97,7 +118,9 @@ function connectPanel(panel: NotebookPanel, state: IPanelState): void {
       return;
     }
     state.model = model;
-    setKernelTitle(panel, model.model);
+    // A background tab restored by the workspace has no toolbar items until it
+    // is first revealed, so the item may still be missing at this point.
+    bindKernelName(panel, state);
   };
   comm.onClose = () => {
     if (state.comm === comm) {
@@ -126,7 +149,10 @@ function attachPanel(
     model: null,
     activeCell: null,
     completionTimer: null,
-    disposed: false
+    disposed: false,
+    kernelNameItem: null,
+    itemObserver: null,
+    toolbarObserver: null
   };
   const onKernelChanged = (): void => connectPanel(panel, state);
   const onCellContentChanged = (): void => {
@@ -164,6 +190,27 @@ function attachPanel(
   panel.sessionContext.kernelChanged.connect(onKernelChanged);
   panel.content.activeCellChanged.connect(onActiveCellChanged);
   onActiveCellChanged(panel.content, panel.content.activeCell);
+
+  // The toolbar of a workspace-restored panel is populated only when the tab is
+  // first revealed, and its items move in and out of the overflow popup as the
+  // panel is shown, hidden, or resized. Follow the kernel-name item across all
+  // of that instead of painting the title once.
+  const toolbarObserver = new MutationObserver(records => {
+    const added = records.flatMap(record =>
+      Array.from(record.addedNodes).filter(
+        (node): node is Element => node.nodeType === Node.ELEMENT_NODE
+      )
+    );
+    bindKernelName(
+      panel,
+      state,
+      findAddedKernelNameItem(added) as HTMLElement | null
+    );
+  });
+  toolbarObserver.observe(panel.toolbar.node, { childList: true });
+  state.toolbarObserver = toolbarObserver;
+  bindKernelName(panel, state);
+
   void panel.sessionContext.ready.then(() => connectPanel(panel, state));
 
   return {
@@ -175,6 +222,11 @@ function attachPanel(
         return;
       }
       state.disposed = true;
+      state.toolbarObserver?.disconnect();
+      state.toolbarObserver = null;
+      state.itemObserver?.disconnect();
+      state.itemObserver = null;
+      state.kernelNameItem = null;
       panel.sessionContext.kernelChanged.disconnect(onKernelChanged);
       panel.content.activeCellChanged.disconnect(onActiveCellChanged);
       state.activeCell?.model.contentChanged.disconnect(onCellContentChanged);
