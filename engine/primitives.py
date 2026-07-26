@@ -46,6 +46,7 @@ _ELLIPSIS_NAMES = frozenset({
     '\\ldots', '\\cdots', '\\dots', '\\vdots', '\\ddots', '\\hdots',
     '\\dotsb', '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'})
 _ELLIPSIS_RE = re.compile(r'\\(?:[lcvdh])?dots[bcimo]?(?![A-Za-z])')
+_DISPLAY_STAR_RE = re.compile(r'(?<!\\)[ \t]*\*[ \t]*')
 
 
 def parse_latex(latex, allow_ellipsis=False, command_names=None):
@@ -202,6 +203,42 @@ def same_expression(latex1, latex2):
                 == _normal_form(latex2, allow_ellipsis=True))
     except PrimitiveError:
         return False
+
+
+def display_latex(latex):
+    """Presentation-only cleanup for a recorded LaTeX string.
+
+    Agents commonly use the keyboard product separator ``*``. Keep that
+    exact spelling in tactic records for hashing/replay, but show it as the
+    conventional ``\\cdot`` in MathJax-facing views. This is deliberately
+    not a parse/write canonicalization: re-emitting ``2*3`` or ``\\sin x*y``
+    can lose the explicit boundary the agent wrote.
+
+    Both spellings must parse to the same notation shape in both directions.
+    ``same_expression`` is intentionally unsuitable here because it preserves
+    the P_LIST ``cdot`` presentation prop; the structural comparer ignores
+    that prop without doing algebra or consulting the numeric oracle. On any
+    parse or shape mismatch, retain the source verbatim.
+    """
+    if not isinstance(latex, str) or '*' not in latex:
+        return latex
+    candidate = _DISPLAY_STAR_RE.sub(r' \\cdot ', latex)
+    if candidate == latex:
+        return latex
+    try:
+        source_sym, source_notation = parse_latex(
+            latex, allow_ellipsis=True)
+        display_sym, display_notation = parse_latex(
+            candidate, allow_ellipsis=True)
+        from comparer import s_equal
+        if (s_equal(source_sym, source_notation,
+                    display_sym, display_notation)
+                and s_equal(display_sym, display_notation,
+                            source_sym, source_notation)):
+            return candidate
+    except (PrimitiveError, ValueError):
+        pass
+    return latex
 
 
 def _operator_body_latex(latex):

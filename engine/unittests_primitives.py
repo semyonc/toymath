@@ -946,6 +946,24 @@ class TestParsingEdges(unittest.TestCase):
         self.assertEqual(Core.equal_exprs('a \\cdot b * c', 'c b a')['verdict'],
                          'yes')
 
+    def test_display_latex_prettifies_only_structural_product_stars(self):
+        cases = {
+            '3*x': '3 \\cdot x',
+            '2 * 3': '2 \\cdot 3',
+            '\\sin x*y': '\\sin x \\cdot y',
+            '\\lim_{x \\to 0} x*\\sin x':
+                '\\lim_{x \\to 0} x \\cdot \\sin x',
+            'a*b+\\ldots': 'a \\cdot b+\\ldots',
+        }
+        for source, expected in cases.items():
+            self.assertEqual(P.display_latex(source), expected, source)
+        self.assertEqual(P.display_latex('3x'), '3x')
+        self.assertEqual(P.display_latex('3 \\cdot x'), '3 \\cdot x')
+        # Invalid or non-mathematical star contexts fail closed.
+        for source in ('x**2', '\\text{a*b}',
+                       '\\begin{matrix*}a\\end{matrix*}', 'x\\*y'):
+            self.assertEqual(P.display_latex(source), source)
+
     def test_substitute_into_equation(self):
         r = Core.substitute('x^2 - 6x + 5 = 0', 'x', '5')
         self.assertTrue(r['ok'])
@@ -1134,6 +1152,18 @@ class TestIntegration(unittest.TestCase):
         self.assertIn('# Verified derivation', md)
         self.assertIn('assumptions', md)
         self.assertIn('\\Longrightarrow', md)
+
+    def test_markdown_render_prettifies_star_without_mutating_ledger(self):
+        ledger = Ledger()
+        step = ledger.record(
+            Differentiation.differentiate('x^3 - 3*x', 'x'))
+        stored_hash = step['hash']
+        md = ledger.render_markdown()
+        self.assertIn('x^3 - 3 \\cdot x', md)
+        self.assertNotIn('3*x', md)
+        self.assertEqual(step['input'], 'x^3 - 3*x')
+        self.assertEqual(step['hash'], stored_hash)
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 class TestEqual(unittest.TestCase):

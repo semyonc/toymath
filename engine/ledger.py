@@ -20,6 +20,20 @@ from tactics import core as core_tactics
 
 LEDGER_VERSION = 2
 
+
+def _display_latex(latex):
+    """Derived rich-view spelling; persisted ledger text stays untouched."""
+    import primitives
+    return primitives.display_latex(latex)
+
+
+def _display_math_spans(text):
+    """Apply formula cleanup only inside the $...$ spans of mixed prose."""
+    parts = text.split('$')
+    return ''.join(f'${_display_latex(part)}$' if i % 2 else part
+                   for i, part in enumerate(parts))
+
+
 def _step_hash(op, input_latex, result_latex):
     h = hashlib.sha1(f'{op}|{input_latex}|{result_latex}'.encode('utf-8'))
     return h.hexdigest()[:7]
@@ -60,8 +74,8 @@ def assumption_markdown(assumption):
     historical whole-line math wrapping."""
     display = assumption.get('display')
     if display is not None:
-        return display
-    return f"${assumption['text']}$"
+        return _display_math_spans(display)
+    return f"${_display_latex(assumption['text'])}$"
 
 
 def _markdown_prose(text):
@@ -1079,7 +1093,7 @@ class Ledger(object):
                 detail = f' ({count} steps, {assumptions} assumptions)'
             lines.append(
                 f'**CLAIM {claim["id"]} — {verdict}{detail}:** '
-                f'${claim["statement"]}$')
+                f'${_display_latex(claim["statement"])}$')
             if verdict == 'OPEN':
                 lines.append('')
                 lines.append('*No mechanically checked closing chain has '
@@ -1104,7 +1118,7 @@ class Ledger(object):
                 lines.append(
                     f'**Selected final result `{selected["id"]}`'
                     f'{source_note} — {status}:** '
-                    f'${selected["result"]}$')
+                    f'${_display_latex(selected["result"])}$')
                 lines.append('')
 
         final_assumptions = (topology['spine_assumptions']
@@ -1156,10 +1170,12 @@ class Ledger(object):
                 arg_note = f" — `{a['op']} {a['arg']}` on both sides"
             elif step['op'] == 'substitute':
                 a = step['args']
-                arg_note = f" — ${a['var']} := {a['value']}$"
+                arg_note = (f" — ${_display_latex(a['var'])} := "
+                            f"{_display_latex(a['value'])}$")
             elif step['op'] == 'integrate_by_parts':
                 a = step['args']
-                arg_note = f" — $u = {a['u']}$, $dv = {a['dv']}$"
+                arg_note = (f" — $u = {_display_latex(a['u'])}$, "
+                            f"$dv = {_display_latex(a['dv'])}$")
             elif step['op'] == 'integrate_assemble':
                 src = step.get('sources', {})
                 ids = ', '.join(src.get('antiderivatives', []))
@@ -1175,14 +1191,17 @@ class Ledger(object):
                 ids = ', '.join(src.get('values', []))
                 # naming the paired function keeps the reader from assuming
                 # it is whatever the chain last mentioned
-                arg_note = (f" — values of ${step['args'].get('expr', '')}$ "
+                expr = _display_latex(step['args'].get('expr', ''))
+                arg_note = (f" — values of ${expr}$ "
                             f"from `{src.get('roots', '?')}` → `{ids}`")
             goal = (f" → `{step['goal']}`" if step.get('goal') else '')
             out.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
                        f"— *{mark}*{branch}")
             out.append('')
-            out.append(f"$${step['input']} \\;\\Longrightarrow\\; "
-                       f"{step['result']}$$")
+            input_latex = _display_latex(step['input'])
+            result_latex = _display_latex(step['result'])
+            out.append(f"$${input_latex} \\;\\Longrightarrow\\; "
+                       f"{result_latex}$$")
             for a in step['assumptions']:
                 out.append(f"- assumes {assumption_markdown(a)}")
             out.append('')

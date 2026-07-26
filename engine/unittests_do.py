@@ -1849,6 +1849,24 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('#176b2c', html)
         self.assertIn('#888', html)
 
+    def test_rich_ledger_views_prettify_formula_stars(self):
+        step = self._chain_step('s1', 'expand', 'x*y')
+        step['input'] = '2*x'
+        streamed = self.shell.render_do_step(step)
+        chain = self.shell.render_do_chain([
+            step, self._chain_step('s2', 'expand', '2*x')])
+        claim = self.shell.render_do_claim({
+            'id': 'c1', 'statement': 'x*y=2*x', 'verdict': 'open'})
+        assumption = self.shell._assumption_html({'text': 'x*y \\ne 0'})
+        for rendered in (streamed, chain, claim, assumption):
+            self.assertIn('\\cdot', rendered)
+            self.assertNotIn('*', rendered)
+        mixed = self.shell._assumption_html({
+            'text': 'unused',
+            'display': 'literal * prose, then $x*y$'})
+        self.assertIn('literal * prose', mixed)
+        self.assertIn('$x \\cdot y$', mixed)
+
     def test_chain_table_skips_comments_and_short_runs(self):
         comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
                    'args': {'text': 'strategy note'}, 'input': None,

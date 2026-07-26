@@ -168,6 +168,13 @@ remains comment-grade annotation and is deliberately distinct from future
 assumption-bearing mathematical case splits. The ledger stays append-only:
 checked work on an abandoned path is never deleted.
 
+Rich ledger views derive one additional presentation spelling without changing
+the replayable record: an agent's explicit keyboard multiplication `*` renders
+as `\cdot`. The candidate is accepted only when both strings parse to the same
+notation shape; invalid or non-mathematical star contexts remain verbatim.
+Hashes, tactic arguments, persisted inputs/results, replay, and terse text/JSON
+views continue to use the exact recorded spelling.
+
 ### Provenance-aware composition
 
 Linearity and squeeze tactics expose an important rule: checking a value is not
