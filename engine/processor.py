@@ -221,18 +221,21 @@ class Calculator(Replacer):
     def make_degree(self, sym, deg):
         f = self.output_notation.getf(sym, Notation.INDEX)
         if f is not None:
-            return self.output_notation.repf(
-                sym,
-                Func(
-                    Notation.INDEX,
+            # A notation DAG may share this INDEX across several terms.  In
+            # particular, mul! repeats the same factor node when expanding a
+            # power.  Replacing ``sym`` here would retroactively change every
+            # earlier term that references it (x^2, x^4, and x^6 would all
+            # become whichever degree was written last).  Power collection
+            # is a transformation, so give its result a fresh node.
+            return self.output_notation.setf(
+                Notation.INDEX,
+                (
+                    f.args[0],
                     (
-                        f.args[0],
-                        (
-                            f.args[1][0],
-                            f.args[1][1],
-                            self.subst(None, deg, Notation.INDEX),
-                            f.args[1][3],
-                        ),
+                        f.args[1][0],
+                        f.args[1][1],
+                        self.subst(None, deg, Notation.INDEX),
+                        f.args[1][3],
                     ),
                 ),
             )

@@ -228,6 +228,12 @@ class TestScenario(unittest.TestCase):
     def test_mul2(self):
         self.checkEqual("mul! (x+1)^3(x-1)", "{x^4+2x^3-2x-1}")
 
+    def test_mul_powered_binomial_cube(self):
+        self.checkEqual(
+            "mul! (1-x^2)^3",
+            "1-3x^2+3x^4-x^6",
+        )
+
     def test_mul3(self):
         self.checkEqual("(x_{0})-({mul! {2}(x_{1}-({{2}x_{2}}))})", "x_{0}-({{2}x_{1}-{4}x_{2}})")
 
