@@ -1,8 +1,17 @@
 import unittest
 from comparer import *
-from processor import MathProcessor
+from processor import (
+    FixedPointCycleError,
+    FixedPointLimitError,
+    MathProcessor,
+)
 from preprocessor import Preprocessor
 from prolog import PrologModel, Rule, Term
+from classic_canonical import (
+    ClassicExpansionLimitError,
+    canonicalize_classic,
+)
+from tactics.core import expand as canonical_expand
 
 def execute_compare(expr1, expr2, params):
     notation1 = Notation()
@@ -91,6 +100,14 @@ class TestScenario(unittest.TestCase):
 
     def checkEqual(self, expr1, expr2):
         return self.assertTrue(check(expr1, expr2))
+
+    def classic_latex(self, expr, processor=None):
+        notation = Notation()
+        sym = MathParser(notation).parse(expr)
+        if processor is None:
+            processor = MathProcessor()
+        outsym, out_notation = processor(sym, notation, {}, {})
+        return LaTexWriter(out_notation)(outsym)
 
     def test_pattern1(self):
         self.assertCompare(
@@ -233,6 +250,69 @@ class TestScenario(unittest.TestCase):
             "mul! (1-x^2)^3",
             "1-3x^2+3x^4-x^6",
         )
+
+    def test_classic_commands_match_canonical_expand_and_are_idempotent(self):
+        cases = [
+            ('mul', f'(1{sign}x^2)^{power}')
+            for sign in ('+', '-')
+            for power in (2, 3, 4)
+        ]
+        cases += [
+            ('mul', r'\frac x y \frac y z'),
+            ('add', r'\frac x y + \frac z y'),
+            ('add', r'\frac 1 x + \frac 1 x'),
+        ]
+        for command, argument in cases:
+            with self.subTest(command=command, argument=argument):
+                actual = self.classic_latex(f'{command}! {argument}')
+                expected = canonical_expand(argument)
+                self.assertTrue(expected['ok'], expected.get('error'))
+                self.assertTrue(check(actual, expected['result']))
+                again = self.classic_latex(actual)
+                self.assertEqual(actual, again)
+
+    def test_classic_canonical_falls_back_for_opaque_atoms(self):
+        notation = Notation()
+        sym = MathParser(notation).parse(r'(\sin x+1)^2')
+        self.assertIsNone(canonicalize_classic(sym, notation))
+        self.checkEqual(
+            r'mul! (\sin x+1)^2',
+            r'(\sin x)^2+2\sin x+1',
+        )
+
+    def test_classic_expansion_term_budget_guards_fallback(self):
+        for expr in ('mul! (x+y)^5', r'mul! (\sin x+y)^5'):
+            with self.subTest(expr=expr):
+                with self.assertRaises(ClassicExpansionLimitError):
+                    self.classic_latex(
+                        expr,
+                        MathProcessor(max_expansion_terms=5),
+                    )
+
+    def test_classic_fixed_point_iteration_limit(self):
+        with self.assertRaises(FixedPointLimitError):
+            self.classic_latex(
+                'mul! (x+1)^2',
+                MathProcessor(max_iterations=1),
+            )
+
+    def test_classic_fixed_point_cycle_detection(self):
+        class Toggle(object):
+            arity = 1
+
+            def __init__(self, target):
+                self.target = Symbol(target)
+
+            def exec(self, calculator, sym, f):
+                return calculator.output_notation.setf(self.target, f.args)
+
+        notation = Notation()
+        sym = notation.setf(Symbol('ping!'), (None, (IntegerValue(1),)))
+        processor = MathProcessor(max_iterations=10)
+        processor.actions['ping'] = Toggle('pong!')
+        processor.actions['pong'] = Toggle('ping!')
+        with self.assertRaises(FixedPointCycleError):
+            processor(sym, notation, {}, {})
 
     def test_mul3(self):
         self.checkEqual("(x_{0})-({mul! {2}(x_{1}-({{2}x_{2}}))})", "x_{0}-({{2}x_{1}-{4}x_{2}})")

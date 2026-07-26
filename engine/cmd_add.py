@@ -4,6 +4,7 @@ from replicator import Replicator
 from comparer import pattern, NotationParam
 from cmd_mul import Mul, chainexpr
 from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
+from classic_canonical import canonicalize_classic
 
 def is_group_inside_plist(notation, f):
     for arg in f.args:
@@ -32,6 +33,11 @@ class Add(object):
         return self.main(processor, processor.output_notation, outsym)
 
     def main(self, processor, notation, sym):
+        canonical = canonicalize_classic(
+            sym, notation, processor.max_expansion_terms)
+        if canonical is not None:
+            return canonical
+
         out = self.add_slist([], processor, notation, sym)
         if len(out) == 1:
             sym_out = out[0]

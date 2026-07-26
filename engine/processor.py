@@ -20,6 +20,22 @@ from replicator import Replicator
 from helpers import trace_notation
 from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
 from frac_utils import FRAC_SYMBOL_NAMES, normalize_frac
+from classic_canonical import DEFAULT_CLASSIC_MAX_TERMS
+
+
+DEFAULT_MAX_FIXED_POINT_ITERATIONS = 256
+
+
+class FixedPointError(RuntimeError):
+    """Base class for deterministic classic fixed-point failures."""
+
+
+class FixedPointCycleError(FixedPointError):
+    """The classic rewrite engine revisited an earlier non-final state."""
+
+
+class FixedPointLimitError(FixedPointError):
+    """The classic rewrite engine did not converge within its pass limit."""
  
 
 def iterate(x):
@@ -129,10 +145,12 @@ class Calculator(Replacer):
     abbreviated_minus = comparer.pattern("(+x)", ["x"])
     abbreviated_plus = comparer.pattern("(-x)", ["x"])
 
-    def __init__(self, notation, output_notation, actions=None, model=None):
+    def __init__(self, notation, output_notation, actions=None, model=None,
+                 max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS):
         super(Calculator, self).__init__(notation, output_notation)
         self.actions = actions
         self.prologModel = model
+        self.max_expansion_terms = max_expansion_terms
 
     def enter_command(self, sym, f):
         action_name = f.sym.name[:-1]
@@ -640,10 +658,19 @@ class Calculator(Replacer):
 class MathProcessor(object):
     """MathProcessor"""
 
-    def __init__(self, model=None, **kwargs):
+    def __init__(self, model=None,
+                 max_iterations=DEFAULT_MAX_FIXED_POINT_ITERATIONS,
+                 max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS,
+                 **kwargs):
+        if max_iterations <= 0:
+            raise ValueError('fixed-point iteration limit must be positive')
+        if max_expansion_terms <= 0:
+            raise ValueError('classic expansion term budget must be positive')
         self.trace = None
         self.actions = register_actions()
         self.prologModel = model
+        self.max_iterations = max_iterations
+        self.max_expansion_terms = max_expansion_terms
 
     # create True in Notation
     @staticmethod
@@ -665,16 +692,32 @@ class MathProcessor(object):
             if parse_res is not None:
                 return parse_res, notation
         index = 1
+        seen_states = [(sym, notation)]
         while True:
             calculator = Calculator(
-                notation, output_notation, self.actions, self.prologModel
+                notation, output_notation, self.actions, self.prologModel,
+                max_expansion_terms=self.max_expansion_terms,
             )
             #trace_notation(notation, sym, tag="before")
             outs = calculator(sym)
             if comparer.s_equal(outs, output_notation, sym, notation):
                 break
+            for seen_index, (seen_sym, seen_notation) in enumerate(seen_states):
+                if comparer.s_equal(
+                    outs, output_notation, seen_sym, seen_notation
+                ):
+                    raise FixedPointCycleError(
+                        'classic fixed-point cycle detected '
+                        f'(pass {index}, repeats state {seen_index})'
+                    )
+            if index >= self.max_iterations:
+                raise FixedPointLimitError(
+                    'classic fixed-point iteration limit exceeded '
+                    f'({self.max_iterations} passes)'
+                )
             notation = output_notation
             sym = outs
+            seen_states.append((sym, notation))
             if self.trace is not None:
                 self.trace(sym, notation, index)
             output_notation = Notation()

@@ -5,6 +5,7 @@ from notation import Notation, Func, Symbol
 from helpers import trace_notation
 from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
 from processor import get_value
+from classic_canonical import canonicalize_classic
 
 
 def chainexpr(oper, notation, sym, negative):
@@ -59,6 +60,14 @@ class Mul(object):
         return self.main(processor, processor.output_notation, outsym, negative)
 
     def main(self, processor, notation, sym, negative):
+        candidate = sym
+        if negative:
+            candidate = notation.setf(Notation.MINUS, (candidate,))
+        canonical = canonicalize_classic(
+            candidate, notation, processor.max_expansion_terms)
+        if canonical is not None:
+            return canonical
+
         # Existing positive exponent pattern (keep for n > 0 non-fraction)
         subst = Mul.Pw1.match(sym, notation)
         if subst is not None:
