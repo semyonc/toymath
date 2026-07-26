@@ -464,6 +464,23 @@ class TestRewrite(unittest.TestCase):
         self.assertTrue(r['ok'])
         self.assertEqual(r['check']['status'], 'agree')
 
+    def test_repeated_param_mismatch_refused(self):
+        # backward square_of_sum binds 'a' twice; the false match used
+        # to win with the last binding and return a disagree-checked
+        # record instead of refusing
+        r = Core.rewrite('x^2 + 2 x z + y^2', 'square_of_sum',
+                      direction='backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_repeated_param_accepts_compound_binding(self):
+        # compound bindings are distinct DAG nodes per occurrence, so
+        # repeated-param consistency must compare structurally
+        r = Core.rewrite('(x+1)^2 + 2 (x+1) y + y^2', 'square_of_sum',
+                      direction='backward')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
 
 class TestInequalities(unittest.TestCase):
     def test_subtract_keeps_relation(self):
@@ -1695,6 +1712,29 @@ class TestLedger(unittest.TestCase):
         ledger.record(Core.apply_both_sides('x y = 1', '/', 'y'))
         ledger.save()
         self.assertEqual(len(Ledger(path).assumptions), 1)
+
+    def test_disagreeing_result_is_not_recorded(self):
+        # admission mirrors replay: replay hard-fails a disagree check,
+        # so record refuses it up front instead of poisoning the session
+        ledger = Ledger(os.path.join(tempfile.mkdtemp(), 'session.json'))
+        bad = dict(Core.expand('(x+1)^2'))
+        bad['check'] = {'status': 'disagree'}
+        with self.assertRaises(ValueError):
+            ledger.record(bad)
+        self.assertEqual(len(ledger.steps), 0)
+
+    def test_sourceless_provenance_step_is_not_recorded(self):
+        # the explicit-value squeeze form sets no sources while its
+        # replay validator demands them; record must refuse, not defer
+        # the failure to replay
+        ledger = Ledger(os.path.join(tempfile.mkdtemp(), 'session.json'))
+        rec = Limits.limit_squeeze(
+            '\\lim_{x \\to 0} x^2 \\sin{\\frac{1}{x}}',
+            '(-x^2)', 'x^2', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        with self.assertRaises(ValueError):
+            ledger.record(rec)
+        self.assertEqual(len(ledger.steps), 0)
 
     def test_relation_system_step_replays(self):
         path = os.path.join(tempfile.mkdtemp(), 'system.json')

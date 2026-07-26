@@ -263,11 +263,16 @@ class NotationParametrizedComparer(NotationComparer):
                     value_list.append(sym1)
                     subst[sym2.name] = value_list
                     return True
-                elif sym2 not in subst:
+                elif sym2.name not in subst:
                     subst[sym2.name] = sym1
                     return True
                 else:
-                    return subst[sym2.name] != sym1
+                    # a repeated parameter matches only when every
+                    # occurrence binds the same subterm; compound
+                    # bindings are distinct DAG nodes, so compare
+                    # structurally, never by node identity
+                    return s_equal(sym1, notation1,
+                                   subst[sym2.name], notation1)
         return sym1 == sym2
 
 

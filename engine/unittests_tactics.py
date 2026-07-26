@@ -228,6 +228,23 @@ class TestTacticRegistry(unittest.TestCase):
             toymath_cli.main(['show', '--session', path])
         self.assertIn('OPEN r1#', shown.getvalue())
 
+    def test_cli_squeeze_session_refuses_sourceless_record(self):
+        # the CLI explicit-value squeeze cannot carry step provenance;
+        # recording it would produce a session that fails replay, so the
+        # ledger refuses at admission and no session file is written
+        path = os.path.join(tempfile.mkdtemp(), 'squeeze.json')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'limit_squeeze',
+                '\\lim_{x \\to 0} x^2 \\sin{\\frac{1}{x}}',
+                '(-x^2)', 'x^2', '0', '--session', path])
+        self.assertEqual(code, 1)
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('provenance', rec['error'])
+        self.assertFalse(os.path.exists(path))
+
     def test_cli_markdown_show_uses_persisted_selection_to_fold_path(self):
         from ledger import Ledger
         from tactics import core

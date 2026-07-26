@@ -26,7 +26,13 @@ def emit(obj, pretty=False):
 def with_session(result, session_path, goal=None):
     if session_path and result.get('ok') and result['op'] in TRANSFORMING_OPS:
         ledger = Ledger(session_path)
-        step = ledger.record(result, goal=goal)
+        try:
+            step = ledger.record(result, goal=goal)
+        except ValueError as exc:
+            refused = dict(result)
+            refused['ok'] = False
+            refused['error'] = str(exc)
+            return refused
         ledger.save()
         result['step'] = {'id': step['id'], 'hash': step['hash']}
     return result

@@ -374,6 +374,22 @@ class Ledger(object):
             # Presentation metadata only.  Mathematical authority still
             # comes exclusively from this step's registered tactic/check.
             step['exploration'] = self._branch_edge(pending_branch, step)
+        # Admission mirrors replay: a step replay would reject must never
+        # be recorded, or the session silently stops being a replayable
+        # artifact.
+        if step['check'].get('status') == 'disagree':
+            raise ValueError(
+                'the independent check disagrees with this result; a '
+                'disagreeing step is not recorded — correct the arguments '
+                'or take a different route')
+        import tactic_registry
+        provenance_error = tactic_registry.validate_provenance(
+            step, {s['id']: s for s in self.steps})
+        if provenance_error:
+            raise ValueError(
+                f'{provenance_error}; a step that would fail replay is '
+                'not recorded — resolve the cited sources from recorded '
+                'steps, or run without a session for an unrecorded check')
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:
