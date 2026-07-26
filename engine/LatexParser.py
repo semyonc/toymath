@@ -113,6 +113,154 @@ def _normalize_collection_literals(latex):
          _SET_BUILDER_CLOSE, '\\}')
 
 
+# Control words that own a following bar, so the scanner must not read it as
+# a bare delimiter: \left| ... \right|, \middle|, and the \vert spellings.
+_BAR_OWNERS = ('\\left', '\\right', '\\middle', '\\bigl', '\\bigr', '\\big',
+               '\\Bigl', '\\Bigr', '\\Big', '\\biggl', '\\biggr', '\\bigg',
+               '\\Biggl', '\\Biggr', '\\Bigg')
+_OPEN_DELIMS = {'(': ')', '[': ']', '{': '}'}
+# plain-TeX fractions that name their own delimiter pair, `|` included
+_DELIM_PAIR_OWNERS = ('\\abovewithdelims', '\\atopwithdelims')
+# \lvert / \rvert / \vert are the same bar; agents re-type delimiter
+# spellings exactly as they re-type \rightarrow for \to.  \| (norm) is a
+# different operator and is deliberately left alone.
+_VERT_RE = re.compile(r'\\[lr]?vert(?![A-Za-z])')
+
+
+def _lower_bare_abs(latex):
+     r"""Pair bare vertical bars and lower each pair to ``\abs{...}``.
+
+     The grammar cannot do this: `|` is its own opener and closer, so a rule
+     wide enough for `|x+1|` puts the LALR machine in a shift/reduce conflict
+     at every middle bar (measured: it resolves as shift and then rejects
+     even `|x|`).  Pairing is a scanning decision — first bar of a scope
+     opens, next bar in the SAME delimiter scope closes — which is the
+     reading humans use (`|a|b|c|` is `|a| b |c|`).  Unpaired bars are left
+     verbatim, so the retained set-builder spelling `\{x|P\}` and matrix
+     preambles pass through untouched.
+     """
+     latex = _VERT_RE.sub('|', latex)
+     if '|' not in latex:
+          return latex
+     out = []
+     # one entry per open delimiter scope: [closing char, pending bar mark,
+     # bars still to skip].  mark = index in `out` just after the opening
+     # bar.  Collection literals have already been lowered, so a surviving
+     # `\{...\}` is a set-builder whose FIRST bar is the condition
+     # separator, not an absolute value.
+     scopes = [[None, None, 0]]
+     i, n = 0, len(latex)
+     while i < n:
+          ch = latex[i]
+          if ch == '\\':
+               j = i + 1
+               while j < n and latex[j].isalpha():
+                    j += 1
+               word = latex[i:j]
+               if j == i + 1:
+                    # escaped single character: \| \{ \} \( ...
+                    nxt = latex[i + 1:i + 2]
+                    if nxt in _OPEN_DELIMS:
+                         scopes.append([_OPEN_DELIMS[nxt], None,
+                                        1 if nxt == '{' else 0])
+                    elif nxt in (')', ']', '}') and len(scopes) > 1 \
+                            and scopes[-1][0] == nxt:
+                         scopes.pop()
+                    out.append(latex[i:i + 2])
+                    i += 2
+                    continue
+               if word in _BAR_OWNERS:
+                    # emit the sizing command together with its delimiter so
+                    # the bar never reaches the pairing logic
+                    k = j
+                    while k < n and latex[k] in ' \t':
+                         k += 1
+                    if k < n and latex[k] == '|':
+                         out.append(latex[i:k + 1])
+                         i = k + 1
+                         continue
+               if word in _DELIM_PAIR_OWNERS:
+                    out.append(word)
+                    i = _copy_delims(latex, j, out, 2)
+                    continue
+               if word.startswith('\\text') or word in ('\\operatorname',
+                                                        '\\color'):
+                    # prose arguments are copied verbatim: a bar there is a
+                    # character, not a delimiter
+                    k = _brace_span(latex, j)
+                    out.append(latex[i:k])
+                    i = k
+                    continue
+               out.append(word)
+               i = j
+               continue
+          if ch in _OPEN_DELIMS:
+               scopes.append([_OPEN_DELIMS[ch], None, 0])
+          elif ch in (')', ']', '}'):
+               if len(scopes) > 1 and scopes[-1][0] == ch:
+                    scopes.pop()
+          elif ch == '|':
+               scope = scopes[-1]
+               if scope[2]:
+                    scope[2] -= 1
+               elif scope[1] is None:
+                    scope[1] = len(out) + 1
+                    out.append('|')
+                    i += 1
+                    continue
+               else:
+                    mark = scope[1]
+                    body = ''.join(out[mark:])
+                    del out[mark - 1:]
+                    out.append('\\abs{' + body + '}')
+                    scope[1] = None
+                    i += 1
+                    continue
+          out.append(ch)
+          i += 1
+     return ''.join(out)
+
+
+def _copy_delims(latex, pos, out, count):
+     """Copy ``count`` delimiter tokens verbatim; return the new position."""
+     n = len(latex)
+     while count and pos < n:
+          if latex[pos] in ' \t':
+               out.append(latex[pos])
+               pos += 1
+               continue
+          if latex[pos] == '\\' and pos + 1 < n:
+               out.append(latex[pos:pos + 2])
+               pos += 2
+          else:
+               out.append(latex[pos])
+               pos += 1
+          count -= 1
+     return pos
+
+
+def _brace_span(latex, pos):
+     """Index just past the balanced ``{...}`` group starting at/after pos."""
+     n = len(latex)
+     while pos < n and latex[pos] in ' \t':
+          pos += 1
+     if pos >= n or latex[pos] != '{':
+          return pos
+     depth = 0
+     while pos < n:
+          if latex[pos] == '\\':
+               pos += 2
+               continue
+          if latex[pos] == '{':
+               depth += 1
+          elif latex[pos] == '}':
+               depth -= 1
+               if depth == 0:
+                    return pos + 1
+          pos += 1
+     return n
+
+
 class MathParser(object):
      tokens = MathLexer.tokens
      literals = MathLexer.literals
@@ -134,6 +282,7 @@ class MathParser(object):
      def parse(self, input):
          input = _normalize_plain_array_envs(input)
          input = _normalize_collection_literals(input)
+         input = _lower_bare_abs(input)
          self.notation.clear()
          try:
              return self.yacc.parse(
@@ -624,7 +773,34 @@ class MathParser(object):
 
      def p_scalar_group_a(self, p):
         '''scalar : '|' expression '|' '''
-        p[0] = self.notation.setf(Notation.GROUP, (p[2],), br='||')
+        p[0] = self.notation.setf(Notation.GROUP, (p[2],), br=Notation.ABS_BR)
+
+     def p_scalar_abs(self, p):
+        '''scalar : abs '{' subformula '}' '''
+        # Internal lowering target for bare `|...|` around a composite body
+        # (see _lower_bare_abs). Builds exactly the node the bare single-
+        # scalar rule builds, so nothing downstream sees a second spelling.
+        p[0] = self.notation.setf(Notation.GROUP, (p[3],), br=Notation.ABS_BR)
+
+     def p_scalar_floor(self, p):
+        '''scalar : lfloor subformula rfloor'''
+        p[0] = self.notation.setf(Notation.GROUP, (p[2],),
+                                  br=Notation.FLOOR_BR)
+
+     def p_scalar_ceil(self, p):
+        '''scalar : lceil subformula rceil'''
+        p[0] = self.notation.setf(Notation.GROUP, (p[2],),
+                                  br=Notation.CEIL_BR)
+
+     def p_scalar_vgroup_floor(self, p):
+        '''scalar : left lfloor subformula right rfloor'''
+        p[0] = self.notation.setf(Notation.V_GROUP, (p[3],),
+                                  br=Notation.FLOOR_BR)
+
+     def p_scalar_vgroup_ceil(self, p):
+        '''scalar : left lceil subformula right rceil'''
+        p[0] = self.notation.setf(Notation.V_GROUP, (p[3],),
+                                  br=Notation.CEIL_BR)
 
      def p_scalar_vgroup(self, p):
         '''scalar : left open subformula right close'''

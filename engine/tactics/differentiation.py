@@ -94,9 +94,10 @@ def _diff(sym, notation, var):
         return s, '0'
     op = f.sym
     if op in (Notation.GROUP, Notation.V_GROUP):
-        if f.props.get('br') == '||':
+        if Notation.is_semantic_bracket(f):
+            name = Notation.BRACKET_NAMES[f.props['br']]
             raise PrimitiveError(
-                'cannot differentiate absolute value (not in the rule set)')
+                f'cannot differentiate {name} (not in the rule set)')
         e, d = _diff(f.args[0], notation, var)
         return _paren(e), d
     if op == Notation.PLUS:

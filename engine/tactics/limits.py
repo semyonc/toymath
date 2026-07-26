@@ -219,7 +219,7 @@ def _limit_fraction(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.get(sym)
@@ -355,7 +355,7 @@ def limit_linearity(expr):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.getf(sym, Notation.S_LIST)

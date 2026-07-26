@@ -42,6 +42,12 @@ parenthesized — or split by direction: squeeze `\lim_{x \to a^{+}}` and
 `limit_from_sides`. A leading `-` in any limit body or bound must be
 parenthesized: `\lim_{x \to 0} (-x)`, never `\lim_{x \to 0} -x`.
 
+Bare `|...|` bars accept a whole expression, so `|\cos\frac{1}{x}|` and
+`\sqrt{|\cos\frac{1}{x}|}` are writable bounds. Absolute value, `\lfloor
+\rfloor`, and `\lceil \rceil` are opaque bracket operators: algebra keeps
+them whole while the oracle evaluates them, so they are safe inside bounds
+but never simplify away.
+
 Never type the final linear combination into core `expand`; use assembly so
 the cited branch provenance remains replayable. One-sided and infinite
 approach points are supported. Non-converged approach sampling is oracle

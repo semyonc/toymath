@@ -270,7 +270,7 @@ def _integral_parts_latex(latex):
     elif len(tail) == 1:
         body = tail[0]
         g = notation.vgetf(body, [Notation.GROUP, Notation.V_GROUP])
-        if g is not None and g.props.get('br') != '||':
+        if g is not None and not Notation.is_semantic_bracket(g):
             body = g.args[0]
         fr = notation.get(body)
         if fr is not None and (fr.sym == Notation.SLASH
@@ -382,7 +382,7 @@ def _transparent_inner(sym, notation):
     """Remove ordinary grouping around binder metadata."""
     while isinstance(sym, Symbol):
         f = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
-        if f is None or f.props.get('br') == '||':
+        if f is None or Notation.is_semantic_bracket(f):
             break
         sym = f.args[0]
     return sym
@@ -771,13 +771,19 @@ def numeric_eval(sym, notation, env):
     op = f.sym
     if op in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
               Notation.PLUS):
-        if f.props.get('br') == '||':
-            # absolute value bars — the oracle computes real |·|, sharing
-            # nothing with the symbolic atom path.
+        if Notation.is_semantic_bracket(f):
+            # bracket operators — the oracle computes the real |·|, floor
+            # and ceiling, sharing nothing with the symbolic atom path.
+            br = f.props['br']
             v = numeric_eval(f.args[0], notation, env)
             if isinstance(v, list):
-                raise EvalError('absolute value of a matrix')
-            return abs(v)
+                raise EvalError(
+                    f'{Notation.BRACKET_NAMES[br]} of a matrix')
+            if br == Notation.ABS_BR:
+                return abs(v)
+            if br == Notation.FLOOR_BR:
+                return float(math.floor(v))
+            return float(math.ceil(v))
         return numeric_eval(f.args[0], notation, env)
     if op in (Notation.PAIR, Notation.COLLECTION):
         raise EvalError(f'{op.name} is a typed result, not a scalar value')
@@ -1236,7 +1242,7 @@ def _strip_limit(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.getf(sym, Notation.P_LIST)
@@ -1312,7 +1318,7 @@ def _peel_groups(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             return sym
         sym = g.args[0]
 
@@ -1344,7 +1350,7 @@ def _split_trailing_differential(num, notation, var):
     position is indistinguishable from the differential - the human
     reading wins."""
     g = notation.vgetf(num, [Notation.GROUP, Notation.V_GROUP])
-    if g is not None and g.props.get('br') != '||':
+    if g is not None and not Notation.is_semantic_bracket(g):
         num = g.args[0]
     f = notation.getf(num, Notation.P_LIST)
     if f is None:
@@ -1391,7 +1397,7 @@ def _strip_integral(sym, notation, var):
         # textbook form: the differential lives in the fraction numerator
         inner = core[0]
         g = notation.vgetf(inner, [Notation.GROUP, Notation.V_GROUP])
-        if g is not None and g.props.get('br') != '||':
+        if g is not None and not Notation.is_semantic_bracket(g):
             inner = g.args[0]
         fr = notation.get(inner)
         if fr is not None and (fr.sym == Notation.SLASH

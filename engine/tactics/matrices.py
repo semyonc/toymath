@@ -32,7 +32,7 @@ def _unwrap_groups(sym, notation):
     while True:
         f = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if f is None or f.props.get('br') == '||':
+        if f is None or Notation.is_semantic_bracket(f):
             return sym
         sym = f.args[0]
 

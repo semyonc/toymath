@@ -278,7 +278,7 @@ def _rational_literal(sym, notation):
             sym = f.args[0]
             continue
         if f.sym in (Notation.GROUP, Notation.V_GROUP):
-            if f.props.get('br') == '||':
+            if Notation.is_semantic_bracket(f):
                 return None
             sym = f.args[0]
             continue
@@ -317,7 +317,7 @@ def _monomial_parts(sym, notation, var):
         if f.sym == Notation.PLUS:
             return _monomial_parts(f.args[0], notation, var)
         if f.sym in (Notation.GROUP, Notation.V_GROUP) \
-                and f.props.get('br') != '||':
+                and not Notation.is_semantic_bracket(f):
             return _monomial_parts(f.args[0], notation, var)
         if f.sym == Notation.INDEX:
             sub, sup_l, power, sup_r = f.args[1]
@@ -637,8 +637,8 @@ def integrate_linearity(expr, var):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        # |...| groups are absolute values, not transparent brackets
-        if g is None or g.props.get('br') == '||':
+        # bracket operators (|...|, floor, ceiling) are not grouping
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.getf(sym, Notation.S_LIST)

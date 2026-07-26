@@ -233,6 +233,12 @@ Important verified-layer behaviors include:
   matrices are never confused with scalar absolute value;
 - matrix-valued factor runs become ordered noncommutative word atoms, while
   scalar factors remain commutative;
+- absolute value, floor, and ceiling are bracket *operators*, not grouping:
+  `|x+1|`, `\lfloor x \rfloor`, and `\lceil x \rceil` (bare, `\left`-sized, or
+  in the `\lvert`/`\rvert` spelling) stay opaque atoms for symbolic algebra
+  while the independent oracle computes the real `|·|`, floor, and ceiling,
+  so `\lfloor x+1 \rfloor = \lfloor x \rfloor + 1` is checkable and
+  `\lfloor x \rfloor = x` is refused with a witness;
 - rule-built derivatives pass through checked canonical algebra before being
   recorded; if removing zero-multiplied domain-bearing terms widens the
   written domain, the step remains visibly `domain-differs` rather than being

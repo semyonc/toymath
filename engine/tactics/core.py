@@ -62,7 +62,7 @@ def _frac_power_var(sym, f, notation):
     base = f.args[0]
     while True:
         g = notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         base = g.args[0]
     sub_l, sup_l, power, sub_r = f.args[1]
@@ -205,7 +205,7 @@ class _PuiseuxOut(Replicator):
         base = f.args[0]
         while True:
             g = self.notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
-            if g is None or g.props.get('br') == '||':
+            if g is None or Notation.is_semantic_bracket(g):
                 break
             base = g.args[0]
         sub_l, sup_l, power, sub_r = f.args[1]
@@ -305,7 +305,7 @@ def _is_zero_term(term, notation):
             term = f.args[0]
             continue
         if f.sym in (Notation.GROUP, Notation.V_GROUP):
-            if f.props.get('br') == '||':
+            if Notation.is_semantic_bracket(f):
                 return False
             term = f.args[0]
             continue
@@ -849,9 +849,10 @@ def _atomize_walk(sym, notation, out_n, store):
     if op in _NON_EXPR_OPS:
         raise NotInFragment(f'{op.name} is not an expression')
     if op in (Notation.GROUP, Notation.V_GROUP):
-        if f.props.get('br') == '||':
-            # |expr| is absolute value, not grouping: the whole bar term is
-            # one opaque atom (identity keeps the bars, so |x| != x).
+        if Notation.is_semantic_bracket(f):
+            # |expr|, floor and ceiling are bracket OPERATORS, not grouping:
+            # the whole bracketed term is one opaque atom (identity keeps the
+            # brackets, so |x| != x and floor(x) != x).
             return store.atom(sym, notation)
         inner = _atomize_walk(f.args[0], notation, out_n, store)
         return out_n.setf(op, (inner,), **f.props)

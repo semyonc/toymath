@@ -35,6 +35,12 @@ def get_value(sym, notation):
         return sym
     f = notation.getf(sym, Notation.GROUP)
     if f is not None:
+        if Notation.is_semantic_bracket(f):
+            # |-3| and \lfloor 2.7 \rfloor are bracket operators, not
+            # grouping: reading the payload straight through would report
+            # -3 and 2.7. There is no oracle in this path, so the guard
+            # refuses a value rather than computing one.
+            return None
         return get_value(f.args[0], notation)
     f = notation.getf(sym, Notation.MINUS)
     if f is not None:
@@ -141,7 +147,7 @@ class Calculator(Replacer):
 
     def get_factor(self, sym):
         f = self.output_notation.vgetf(sym, [Notation.PLUS, Notation.GROUP])
-        if f is not None:
+        if f is not None and not Notation.is_semantic_bracket(f):
             return self.get_factor(f.args[0])
         f = self.output_notation.getf(sym, Notation.MINUS)
         if f is not None:
@@ -158,6 +164,8 @@ class Calculator(Replacer):
 
     def get_expr(self, sym):
         f = self.output_notation.getf(sym, Notation.GROUP)
+        if f is not None and Notation.is_semantic_bracket(f):
+            return [sym]
         if f is not None:
             if self.output_notation.getf(f.args[0], Notation.P_LIST) is not None:
                 sym = f.args[0]
@@ -372,6 +380,14 @@ class Calculator(Replacer):
                 self.mapsym(sym), Func(f.sym, (expr,), **f.props)
             )
         outs = self.enter_formula(f.args[0])
+        if Notation.is_semantic_bracket(f):
+            # a bracket operator keeps its node whatever the payload reduces
+            # to: |-3| is not -3, and \lfloor 2.7 \rfloor is not 2.7. This
+            # path has no oracle, so the guard preserves the operator rather
+            # than evaluating it.
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(f.sym, (outs,), **f.props)
+            )
         if isinstance(outs, Value):
             return outs
         if f.props["br"] == "()":
@@ -546,7 +562,10 @@ class Calculator(Replacer):
                 else:
                     sym = f.args[0]
             f = self.output_notation.getf(sym, Notation.GROUP)
-            if f is None or "quoted" in f.props:
+            if f is None or "quoted" in f.props \
+                    or Notation.is_semantic_bracket(f):
+                # a bracket operator is not a removable parenthesis:
+                # splicing |x+1| into the enclosing sum turns it into x+1
                 output_args.append(arg)
                 continue
             f = self.output_notation.getf(f.args[0], Notation.S_LIST)

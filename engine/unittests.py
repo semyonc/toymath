@@ -105,6 +105,24 @@ class TestScenario(unittest.TestCase):
     def test_classic_product_slash_in_exponent(self):
         self.checkEqual('(-1)^{n(n-1)/2}', '(-1)^{n(n-1)/2}')
 
+    def test_classic_bracket_operators_are_not_parentheses(self):
+        # The fixed-point path has no oracle, so its group handling is the
+        # only guard: splicing |x+1| into the enclosing sum would silently
+        # yield x+2, and reading the payload of |-3| would yield -3.
+        self.checkEqual('|x+1|+1', '|x+1|+1')
+        self.checkEqual('\\lfloor x+1 \\rfloor + 1',
+                        '\\lfloor x+1 \\rfloor + 1')
+        self.checkEqual('|-3|', '|-3|')
+        self.checkEqual('\\lfloor 2.7 \\rfloor', '\\lfloor 2.7 \\rfloor')
+        self.checkEqual('\\lceil 2.1 \\rceil', '\\lceil 2.1 \\rceil')
+
+    def test_classic_like_bracket_terms_still_merge(self):
+        # the guard must not block ordinary like-term arithmetic ON the atom
+        self.checkEqual('|x+1|+|x+1|', '2|x+1|')
+        self.checkEqual('\\lfloor x \\rfloor + \\lfloor x \\rfloor',
+                        '2 \\lfloor x \\rfloor')
+        self.checkEqual('|x|-|x|', '0')
+
     def test_pattern2(self):
         self.assertCompare("a + b + c", "c + b + a")
 

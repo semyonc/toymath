@@ -141,6 +141,30 @@ class Notation(object):
     CMD = Symbol('[cmd]')
     FRAC = Symbol('\\frac')
 
+    # Bracket pairs that CARRY MEANING rather than group.  A GROUP/V_GROUP
+    # tagged with one of these is an operator node: peeling it changes the
+    # mathematics (|x| != x, floor(x) != x), so no consumer may treat it as
+    # transparent grouping.  `br` stays a two-character open/close pair —
+    # the writer maps each character to its LaTeX spelling.
+    ABS_BR = '||'
+    FLOOR_BR = '⌊⌋'    # left/right floor
+    CEIL_BR = '⌈⌉'     # left/right ceiling
+    SEMANTIC_BRACKETS = frozenset({ABS_BR, FLOOR_BR, CEIL_BR})
+    BRACKET_NAMES = {ABS_BR: 'absolute value',
+                     FLOOR_BR: 'floor',
+                     CEIL_BR: 'ceiling'}
+
+    @staticmethod
+    def is_semantic_bracket(f):
+        """True when a group node is a bracket OPERATOR, not grouping.
+
+        Every site that peels grouping must ask this instead of testing one
+        bracket spelling: a consumer that knows only about `||` silently
+        drops the semantics of the next operator in BOTH trust legs at once
+        (the floor/ceiling incident, and the abs incident before it)."""
+        return (f is not None
+                and f.props.get('br') in Notation.SEMANTIC_BRACKETS)
+
     comparer = (
         '=',
         '\\in',

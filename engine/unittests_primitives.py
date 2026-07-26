@@ -1906,6 +1906,142 @@ class TestAbsoluteValue(unittest.TestCase):
         self.assertEqual(c['status'], 'disagree')
 
 
+class TestBareAbsBars(unittest.TestCase):
+    # Bare `|...|` used to parse only around a single scalar, so a live agent
+    # proposing \sqrt{|\cos 1/x|} got a syntax error. The grammar cannot fix
+    # this (| is its own opener and closer: a wider rule puts the LALR
+    # machine in a shift/reduce conflict at every middle bar), so bar pairs
+    # are matched by a scanner at the shared parse boundary.
+
+    def test_composite_bodies_parse(self):
+        for latex in ('|x+1|', '|2x|', '|\\cos x|', '|-x|',
+                      '\\sqrt{|\\cos\\frac{1}{x}|}', '|x+1|^2'):
+            with self.subTest(latex=latex):
+                sym, notation = P.parse_latex(latex)
+                self.assertIsNotNone(sym)
+
+    def test_lowered_bars_build_the_same_node_as_a_bare_scalar(self):
+        self.assertEqual(P.write_latex(*P.parse_latex('|x+1|')), '|x+1|')
+        self.assertEqual(Core.equal_exprs('|x+1|', 'x+1')['verdict'], 'no')
+
+    def test_adjacent_bar_pairs_stay_a_product(self):
+        # |a|b|c| is |a| b |c| — bars pair left to right, the human reading
+        self.assertEqual(Core.equal_exprs('|x||y|', '|x| \\cdot |y|')['verdict'],
+                         'yes')
+        self.assertEqual(Core.equal_exprs('|a|b|c|', '|a| \\cdot b \\cdot |c|')
+                         ['verdict'], 'yes')
+
+    def test_vert_spellings_are_the_same_operator(self):
+        for latex in ('\\lvert x+1 \\rvert', '\\vert x+1 \\vert',
+                      '\\left\\lvert x+1\\right\\rvert'):
+            with self.subTest(latex=latex):
+                self.assertEqual(
+                    Core.equal_exprs(latex, '|x+1|')['verdict'], 'yes')
+
+    def test_set_builder_separator_is_not_an_abs_bar(self):
+        # the retained \{x | P\} spelling keeps its condition separator even
+        # when the condition itself contains absolute values
+        sym, notation = P.parse_latex('\\{x | x \\gt |a|\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.S_GROUP))
+
+    def test_collection_literals_still_parse(self):
+        sym, notation = P.parse_latex('\\{(-1,2),(1,-2)\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.COLLECTION))
+
+    def test_commands_that_name_their_own_delimiters_keep_them(self):
+        # \abovewithdelims names a delimiter PAIR; pairing its bars as an
+        # absolute value would swallow the command's arguments
+        for latex in ('a \\abovewithdelims || 2pt b',
+                      'a \\atopwithdelims .| b'):
+            with self.subTest(latex=latex):
+                sym, notation = P.parse_latex(latex)
+                self.assertIsNotNone(sym)
+
+    def test_prose_arguments_are_not_scanned_for_bars(self):
+        from LatexParser import _lower_bare_abs
+        self.assertEqual(_lower_bare_abs('\\text{a|b|c}'), '\\text{a|b|c}')
+        self.assertEqual(_lower_bare_abs('\\left|x\\right|'),
+                         '\\left|x\\right|')
+
+
+class TestFloorAndCeiling(unittest.TestCase):
+    # \lfloor / \lceil used to lex as ordinary letters, so the delimiters
+    # became free variables in BOTH trust legs: expand('\lfloor x+1 \rfloor')
+    # returned the mangled '\lfloor x+ \rfloor' with a green oracle check.
+    # They are bracket operators now, exactly like |...| since gen 12.
+
+    def test_floor_is_not_its_argument(self):
+        self.assertEqual(Core.equal_exprs('\\lfloor x \\rfloor', 'x')
+                         ['verdict'], 'no')
+        self.assertEqual(Core.equal_exprs('\\lceil x \\rceil', 'x')
+                         ['verdict'], 'no')
+
+    def test_expand_keeps_the_bracket_whole(self):
+        for latex, expected in (
+                ('\\lfloor x+1 \\rfloor', '\\lfloor x+1 \\rfloor'),
+                ('\\lfloor 2x \\rfloor', '\\lfloor 2x \\rfloor'),
+                ('\\lceil x+1 \\rceil', '\\lceil x+1 \\rceil')):
+            with self.subTest(latex=latex):
+                r = Core.expand(latex)
+                self.assertTrue(r['ok'])
+                self.assertEqual(r['result'], expected)
+                self.assertEqual(r['check']['status'], 'agree')
+
+    def test_like_bracket_terms_collect_over_atoms(self):
+        r = Core.expand('\\lfloor x \\rfloor + 2\\lfloor x \\rfloor')
+        self.assertEqual(r['result'], '3 \\lfloor x \\rfloor')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_floor_and_ceiling_are_distinct_atoms(self):
+        r = Core.expand('\\lfloor x \\rfloor + \\lceil x \\rceil')
+        self.assertTrue(r['ok'])
+        self.assertEqual(Core.equal_exprs('\\lfloor x \\rfloor',
+                                          '\\lceil x \\rceil')['verdict'], 'no')
+
+    def test_oracle_computes_real_floor_and_ceiling(self):
+        # true identities the independent leg must confirm
+        self.assertEqual(
+            Core.equal_exprs('\\lfloor x+1 \\rfloor',
+                             '\\lfloor x \\rfloor + 1')['verdict'], 'yes')
+        self.assertEqual(
+            Core.equal_exprs('\\lceil -x \\rceil',
+                             '-\\lfloor x \\rfloor')['verdict'], 'yes')
+        # and a false one it must refuse
+        self.assertEqual(
+            Core.equal_exprs('\\lfloor x \\rfloor + \\lceil x \\rceil',
+                             '2x')['verdict'], 'no')
+
+    def test_evaluate_constant_floor_and_ceiling(self):
+        self.assertEqual(float(Core.evaluate('\\lfloor 2.7 \\rfloor')['result']),
+                         2.0)
+        self.assertEqual(float(Core.evaluate('\\lceil 2.1 \\rceil')['result']),
+                         3.0)
+
+    def test_differentiate_refuses_by_name(self):
+        r = Differentiation.differentiate('\\lfloor x \\rfloor', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('floor', r['error'])
+        r = Differentiation.differentiate('\\lceil x \\rceil', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('ceiling', r['error'])
+
+    def test_sized_delimiters_are_the_same_operator(self):
+        self.assertEqual(
+            Core.equal_exprs('\\left\\lfloor x \\right\\rfloor',
+                             '\\lfloor x \\rfloor')['verdict'], 'yes')
+        self.assertEqual(
+            Core.equal_exprs('\\left\\lceil x \\right\\rceil', 'x')['verdict'],
+            'no')
+
+    def test_presentation_round_trip_is_stable(self):
+        for latex in ('\\lfloor x \\rfloor', '\\lceil\\frac {x} {2}\\rceil',
+                      '\\lfloor x \\rfloor^{2}', '|x+1|'):
+            with self.subTest(latex=latex):
+                once = P.write_latex(*P.parse_latex(latex))
+                twice = P.write_latex(*P.parse_latex(once))
+                self.assertEqual(once, twice)
+
+
 class TestBigOperatorScoping(unittest.TestCase):
     def test_indexed_operators_keep_their_bodies_in_one_atom(self):
         cases = (
