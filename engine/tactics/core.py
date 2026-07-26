@@ -518,7 +518,8 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
             if arg_const is None:
                 return None, (
                     'cannot multiply an inequality by an expression of '
-                    'unknown sign; use a constant or split into cases')
+                    'unknown sign; multiply by a constant instead — no '
+                    'tactic records sign-split cases yet')
             if arg_const < 0:
                 out_rel = _FLIP_REL[rel]
         elif arg_const is None:
@@ -545,7 +546,8 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
             if arg_const is None:
                 return None, (
                     'cannot divide an inequality by an expression of '
-                    'unknown sign; use a constant or split into cases')
+                    'unknown sign; divide by a constant instead — no '
+                    'tactic records sign-split cases yet')
             if arg_const < 0:
                 out_rel = _FLIP_REL[rel]
         elif arg_const is None:
