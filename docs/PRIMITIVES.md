@@ -97,6 +97,13 @@ by an identity the canonicalizer does not know.
 Domain changes are surfaced. A value agreement on a common domain does not
 erase the fact that one expression is defined where the other is not.
 
+A recorded assumption may carry a constraint, and the oracle then samples only
+inside it — strict hypotheses only, so the assumed region always has an
+interior; an unsatisfiable one leaves the check `skipped` rather than agreed.
+Relations get a second, independent leg: the input and output relation must be
+true at exactly the same sampled points. Per-side value comparison cannot see a
+wrong inequality direction, which is what that leg exists for.
+
 ## Ledger and claims
 
 A transforming record becomes a step only when it succeeds and its `op` is a
@@ -269,8 +276,13 @@ writer, comparer, and replicator landmines.
 
 - Partial multivariate common factors may remain uncancelled, although exact
   cross-multiplication keeps equality checking sound.
-- Symbolic-sign multiplication/division of inequalities is refused; there is
-  no case-split constraint store yet.
+- Moving an inequality by a symbolic factor requires the agent to state the
+  case as a strict hypothesis; the tactic records it, derives the direction
+  from it, and refuses when it does not pin the factor's sign. Cases are
+  separate steps, not one branching record: there is no case-split branch
+  topology yet, so a claim whose chain mixes mutually exclusive hypotheses is
+  refused and such hypotheses are displayed as alternatives, never as one
+  condition.
 - Rewrite defaults to the first matching subterm; the optional `at` argument
   (target subterm LaTeX or 1-based match index) selects among several
   matches, and a failed selection lists the available positions. Match

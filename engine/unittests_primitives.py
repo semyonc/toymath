@@ -4273,5 +4273,209 @@ class TestApplyMatrixArguments(unittest.TestCase):
         self.assertIn('matrix-valued', rec['error'])
 
 
+class TestConstrainedOracle(unittest.TestCase):
+    """The oracle samples only inside a stated region."""
+
+    POSITIVE = [{'text': 'x \\gt 0', 'constraint': 'x \\gt 0'}]
+
+    def test_spot_check_agrees_only_under_the_hypothesis(self):
+        self.assertEqual(
+            P.numeric_spot_check('\\sqrt{x^2}', 'x')['status'], 'disagree')
+        self.assertEqual(
+            P.numeric_spot_check('\\sqrt{x^2}', 'x',
+                                 assumptions=self.POSITIVE)['status'],
+            'agree')
+
+    def test_region_without_interior_is_skipped_not_agreed(self):
+        both = self.POSITIVE + [{'text': 'x \\lt 0',
+                                 'constraint': 'x \\lt 0'}]
+        check = P.numeric_spot_check('\\sqrt{x^2}', 'x', assumptions=both)
+        self.assertEqual(check['status'], 'skipped')
+
+    def test_hypothesis_variables_are_sampled_too(self):
+        # a hypothesis about a variable the compared sides never mention
+        # must not reject every point
+        check = P.numeric_spot_check('y + y', '2y',
+                                     assumptions=self.POSITIVE)
+        self.assertEqual(check['status'], 'agree')
+
+    def test_relation_check_sees_a_wrong_flip(self):
+        kept = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\lt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\gt 0'}])
+        self.assertEqual(kept['status'], 'agree')
+        flipped = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\gt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\gt 0'}])
+        self.assertEqual(flipped['status'], 'disagree')
+        # ... and the same flip is right on the other side of zero
+        negative = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\gt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\lt 0'}])
+        self.assertEqual(negative['status'], 'agree')
+
+    def test_relation_check_needs_two_relations(self):
+        self.assertEqual(
+            P.numeric_relation_check('x + 1', 'x + 1')['status'], 'skipped')
+
+    def test_exclusive_hypotheses_recognises_a_sign_split(self):
+        split = [{'text': 'x \\gt 0', 'constraint': 'x \\gt 0'},
+                 {'text': 'x \\lt 0', 'constraint': 'x \\lt 0'}]
+        self.assertEqual(P.exclusive_hypotheses(split), [(0, 1)])
+        crossed = [{'constraint': 'x \\gt 0'}, {'constraint': '0 \\gt x'}]
+        self.assertEqual(P.exclusive_hypotheses(crossed), [(0, 1)])
+        compatible = [{'constraint': 'x \\gt 0'}, {'constraint': 'y \\lt 0'}]
+        self.assertEqual(P.exclusive_hypotheses(compatible), [])
+        # a side condition is not a hypothesis
+        self.assertEqual(
+            P.exclusive_hypotheses([{'text': 'a \\ne 0', 'nonzero': 'a'}]),
+            [])
+
+
+class TestApplyUnderHypothesis(unittest.TestCase):
+    """Sign case splits: the agent states the case, the tactic records it."""
+
+    def test_unknown_sign_refusal_names_the_available_move(self):
+        rec = Core.apply_both_sides('a x \\lt b', '/', 'a')
+        self.assertFalse(rec['ok'])
+        self.assertIn('assuming', rec['error'])
+        self.assertIn('a > 0', rec['error'])
+
+    def test_positive_case_keeps_and_negative_case_flips(self):
+        positive = Core.apply_both_sides('a x \\lt b', '/', 'a',
+                                         assuming='a > 0')
+        self.assertTrue(positive['ok'], positive.get('error'))
+        self.assertIn('\\lt', positive['result'])
+        self.assertEqual(positive['check']['status'], 'agree')
+        self.assertEqual([a['text'] for a in positive['assumptions']],
+                         ['a \\gt 0'])
+        self.assertEqual(positive['args']['assuming'], 'a > 0')
+        negative = Core.apply_both_sides('a x \\lt b', '/', 'a',
+                                         assuming='a < 0')
+        self.assertTrue(negative['ok'], negative.get('error'))
+        self.assertIn('\\gt', negative['result'])
+        self.assertEqual(negative['check']['status'], 'agree')
+
+    def test_hypothesis_about_another_expression_does_not_pin_the_sign(self):
+        rec = Core.apply_both_sides('a x \\lt b', '/', 'a', assuming='x > 0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown sign', rec['error'])
+
+    def test_rearranged_hypothesis_pins_the_factor(self):
+        rec = Core.apply_both_sides('a \\lt b', '*', 'x-3', assuming='x > 3')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lt', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_hypothesis_contradicting_a_literal_is_refused(self):
+        rec = Core.apply_both_sides('x \\lt b', '*', '2', assuming='2 < 0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('contradicts', rec['error'])
+
+    def test_unsatisfiable_hypothesis_cannot_read_as_checked(self):
+        rec = Core.apply_both_sides('a x \\lt b', '*', 'x^2',
+                                    assuming='x^2 < 0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'skipped')
+
+    def test_only_strict_hypotheses_are_accepted(self):
+        for bad, needle in ((r'a \ge 0', 'strict'), ('a = 1', 'strict'),
+                            ('a', 'must be a relation')):
+            rec = Core.apply_both_sides('a x \\lt b', '/', 'a', assuming=bad)
+            self.assertFalse(rec['ok'], bad)
+            self.assertIn(needle, rec['error'])
+
+    def test_strict_hypothesis_replaces_the_nonzero_side_condition(self):
+        rec = Core.apply_both_sides('x = y', '*', 'z', assuming='z > 0')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertEqual(texts, ['z \\gt 0'])
+
+    def test_equation_case_workflow_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'cases.json')
+            book = Ledger(path)
+            first = Core.apply_both_sides('\\frac{1}{x} \\lt 2', '*', 'x',
+                                          assuming='x > 0')
+            book.record(first)
+            book.record(Core.expand(first['result']))
+            second = Core.apply_both_sides('\\frac{1}{x} \\lt 2', '*', 'x',
+                                           assuming='x < 0')
+            book.record(second)
+            book.record(Core.expand(second['result']))
+            book.save()
+            self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+
+class TestEqualUnderHypothesis(unittest.TestCase):
+    def test_domain_mismatch_steers_to_the_restricted_question(self):
+        rec = Core.equal_exprs('\\ln(x^2)', '2\\ln x')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertIn('assuming', rec['note'])
+
+    def test_restricted_yes_carries_its_condition(self):
+        rec = Core.equal_exprs('\\ln(x^2)', '2\\ln x', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertIn('under the stated assumptions', rec['method'])
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['x \\gt 0'])
+
+    def test_several_hypotheses_may_be_comma_separated(self):
+        rec = Core.equal_exprs('\\ln(xy)', '\\ln x + \\ln y',
+                               assuming='x > 0, y > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertEqual(len(rec['assumptions']), 2)
+
+    def test_a_restricted_no_is_still_a_no(self):
+        rec = Core.equal_exprs('\\sqrt{x^2}', 'x', assuming='x < 0')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertIn('counterexample', rec)
+
+    def test_unconditional_verdicts_stay_unconditional(self):
+        rec = Core.equal_exprs('x', 'x + 1', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertEqual(rec['method'], 'canonical')
+        self.assertNotIn('assumptions', rec)
+
+    def test_relation_sides_inherit_the_hypothesis(self):
+        rec = Core.equal_exprs('\\sqrt{x^2} = 3', 'x = 3', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['x \\gt 0'])
+
+
+class TestAlternativeCasesInTheLedger(unittest.TestCase):
+    def _two_case_ledger(self):
+        # one connected chain whose two steps were recorded under opposite
+        # sign hypotheses: individually checked, jointly worth nothing
+        first = Core.apply_both_sides('x = x', '*', 'y', assuming='y > 0')
+        second = Core.apply_both_sides(first['result'], '+', '1',
+                                       assuming='y < 0')
+        book = Ledger()
+        claim = book.record_claim(second['result'])
+        book.record(first, goal=claim['id'])
+        book.record(second, goal=claim['id'])
+        return book, claim
+
+    def test_conclusion_refuses_mutually_exclusive_hypotheses(self):
+        book, claim = self._two_case_ledger()
+        with self.assertRaises(ValueError) as caught:
+            book.conclude(claim['id'], ['s1', 's2'])
+        self.assertIn('mutually exclusive', str(caught.exception))
+
+    def test_markdown_never_conjoins_alternative_cases(self):
+        book, _ = self._two_case_ledger()
+        out = book.render_markdown()
+        self.assertIn('Alternative case hypotheses', out)
+        head = out.split('**s1**')[0]
+        self.assertNotIn('Valid under the assumptions', head)
+
+    def test_compatible_assumptions_still_render_as_one_condition(self):
+        book = Ledger()
+        book.record(Core.apply_both_sides('x = y', '*', 'z'))
+        out = book.render_markdown()
+        self.assertIn('Valid under the assumptions', out)
+        self.assertNotIn('Alternative case', out)
+
+
 if __name__ == '__main__':
     unittest.main()

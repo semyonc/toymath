@@ -575,10 +575,20 @@ class MathShell(object):
             display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
                          f'{_html.escape(res["summary"])}</em></div>'))
         if res['assumptions']:
-            asm = '; '.join(self._assumption_html(a)
-                            for a in res['assumptions'])
-            display(HTML(f'<div style="color:#888">assumptions: '
-                         f'{asm}</div>'))
+            # alternative case hypotheses are listed apart: they hold one
+            # at a time, never together
+            import primitives
+            split = {i for pair in primitives.exclusive_hypotheses(
+                res['assumptions']) for i in pair}
+            for label, wanted in (('assumptions', False),
+                                  ('alternative cases', True)):
+                shown = [a for i, a in enumerate(res['assumptions'])
+                         if (i in split) is wanted]
+                if not shown:
+                    continue
+                asm = '; '.join(self._assumption_html(a) for a in shown)
+                display(HTML(f'<div style="color:#888">{label}: '
+                             f'{asm}</div>'))
         open_prov = res.get('final_provenance') or {}
         if not res.get('final_result') and open_prov.get('source') == 'open':
             # run-level open outcome: no certified result exists, and no

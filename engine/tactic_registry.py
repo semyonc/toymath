@@ -382,7 +382,11 @@ TACTICS = (
                (_arg('equation', 'EQUATION', 'LaTeX relation'),
                 _arg('op', 'OP', 'operation',
                      choices=('+', '-', '*', '/', '^')),
-                _arg('arg', 'ARG', 'operand'))),
+                _arg('arg', 'ARG', 'operand'),
+                _arg('assuming', 'ASSUMING',
+                     'case hypothesis to record, e.g. "x > 0"; a strict one '
+                     'about the factor decides an inequality direction',
+                     default=None, option='--assuming'))),
     TacticSpec('expand', 'expand', 'core',
                'canonicalize rational algebra and combine opaque atoms',
                core.expand, (E,)),
@@ -410,7 +414,10 @@ TACTICS = (
                'check whether two expressions are equal',
                core.equal_exprs,
                (_arg('expr1', 'EXPR1', 'first expression'),
-                _arg('expr2', 'EXPR2', 'second expression')),
+                _arg('expr2', 'EXPR2', 'second expression'),
+                _arg('assuming', 'ASSUMING',
+                     'restrict the question to a stated region, '
+                     'e.g. "x > 0"', default=None, option='--assuming')),
                transforming=False),
     TacticSpec('lemmas', 'lemmas', 'core',
                'list registered rewrite lemmas', core.list_lemmas,
@@ -666,6 +673,10 @@ def _parse_ordered(spec, argv, surface):
             raise ValueError(f'missing {arg.metavar}')
         value = argv[offset]
         offset += 1
+        if value is None and arg.default is not _MISSING:
+            # an explicit null for an optional argument means "omitted"
+            values[arg.name] = arg.default
+            continue
         if not isinstance(value, str):
             raise ValueError(f'{arg.metavar} must be a string')
         if arg.choices and value not in arg.choices:

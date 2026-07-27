@@ -553,6 +553,17 @@ class Ledger(object):
             for assumption in step.get('assumptions', []):
                 if assumption not in assumptions:
                     assumptions.append(assumption)
+        # a chain that borrows from two alternative cases proves nothing:
+        # its stated condition could never hold
+        import primitives
+        exclusive = primitives.exclusive_hypotheses(assumptions)
+        if exclusive:
+            first, second = exclusive[0]
+            raise ValueError(
+                f'the chain rests on mutually exclusive hypotheses '
+                f'{assumptions[first]["text"]!r} and '
+                f'{assumptions[second]["text"]!r}; close each case as its '
+                f'own claim')
         verdict = 'conditional' if assumptions else 'established'
         return {
             'steps': list(step_ids),
@@ -1124,12 +1135,29 @@ class Ledger(object):
         final_assumptions = (topology['spine_assumptions']
                              if topology['spine'] else self.assumptions)
         if final_assumptions:
-            label = ('**Selected spine is valid under the assumptions:** '
-                     if topology['spine'] else
-                     '**Valid under the assumptions:** ')
-            lines.append(label + ', '.join(
-                assumption_markdown(a) for a in final_assumptions))
-            lines.append('')
+            # hypotheses from alternative cases must never read as one
+            # conjunction: nothing holds under `x > 0` AND `x < 0`
+            import primitives
+            split = {i for pair in primitives.exclusive_hypotheses(
+                final_assumptions) for i in pair}
+            shared = [a for i, a in enumerate(final_assumptions)
+                      if i not in split]
+            alternatives = [a for i, a in enumerate(final_assumptions)
+                            if i in split]
+            if shared:
+                label = ('**Selected spine is valid under the assumptions:** '
+                         if topology['spine'] else
+                         '**Valid under the assumptions:** ')
+                lines.append(label + ', '.join(
+                    assumption_markdown(a) for a in shared))
+                lines.append('')
+            if alternatives:
+                lines.append(
+                    '**Alternative case hypotheses** (each step holds under '
+                    'the one it records, not under all of them): '
+                    + ' | '.join(assumption_markdown(a)
+                                 for a in alternatives))
+                lines.append('')
 
         def render_step(step):
             out = []

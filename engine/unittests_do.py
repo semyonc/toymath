@@ -55,6 +55,10 @@ def tool_call(name, args, cid):
             value = args.get(arg.name, arg.default)
             if value is tactic_registry._MISSING:
                 raise AssertionError(f'missing scripted argument {arg.name}')
+            if value is None:
+                # the model-visible schema is a list of strings: an omitted
+                # optional argument is a shorter list, never a null
+                continue
             if arg.nargs in ('+', '*'):
                 ordered.extend(value)
             else:

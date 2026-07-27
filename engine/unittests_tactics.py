@@ -292,6 +292,48 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertTrue(legacy['ok'])
         self.assertEqual(legacy['result'], '(x+2)(x-2)')
 
+    def test_case_hypothesis_flows_through_agent_cli_and_replay(self):
+        session = agent_do.DoSession()
+        record = tactic_registry.invoke_agent(
+            'apply', ['a x \\lt b', '/', 'a', 'a > 0'], session)
+        self.assertTrue(record['ok'], record.get('error'))
+        self.assertIn('\\lt', record['result'])
+        replayed = tactic_registry.replay(record['op'], record['args'])
+        self.assertEqual(replayed['result'], record['result'])
+        # records from before the hypothesis argument replay unchanged
+        legacy = tactic_registry.replay('apply_both_sides', {
+            'equation': '2x = 4', 'op': '/', 'arg': '2'})
+        self.assertTrue(legacy['ok'])
+        self.assertEqual(legacy['result'], '\\frac{2x}{2} = \\frac{4}{2}')
+
+    def test_omitted_optional_argument_may_arrive_as_a_null(self):
+        session = agent_do.DoSession()
+        record = tactic_registry.invoke_agent(
+            'apply', ['2x = 4', '/', '2', None], session)
+        self.assertTrue(record['ok'], record.get('error'))
+        self.assertNotIn('assuming', record['args'])
+
+    def test_cli_accepts_the_hypothesis_option(self):
+        from ledger import Ledger
+
+        def run(*argv):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                toymath_cli.main(list(argv))
+            return json.loads(output.getvalue())
+
+        path = os.path.join(tempfile.mkdtemp(), 'cases.json')
+        rec = run('apply', 'a x \\lt b', '/', 'a',
+                  '--assuming', 'a < 0', '--session', path)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\gt', rec['result'])
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['a \\lt 0'])
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+        verdict = run('equal', '\\sqrt{x^2}', 'x', '--assuming', 'x > 0')
+        self.assertEqual(verdict['verdict'], 'yes')
+        self.assertIn('under the stated assumptions', verdict['method'])
+
 
 if __name__ == '__main__':
     unittest.main()

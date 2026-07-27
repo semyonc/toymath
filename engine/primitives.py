@@ -1087,6 +1087,171 @@ def _eval_kind(sym, notation, env):
         return 'oracle', None
 
 
+# ---------------------------------------------------------------------------
+# assumption constraints: the oracle samples only inside the assumed region
+# ---------------------------------------------------------------------------
+
+# Relations the oracle can test at a sample point. The tactics accept only
+# strict hypotheses (see `_CONSTRAINT_REL` in tactics/core.py); the rest are
+# evaluated honestly here anyway, and a region with no interior simply
+# leaves the check 'skipped' instead of silently unguarded.
+_ORACLE_REL = {'=', '\\ne', '\\neq', '<', '\\lt', '>', '\\gt',
+               '\\le', '\\leq', '\\ge', '\\geq'}
+# distance from the boundary a sample point must keep. Points nearer than
+# this prove nothing about a strict relation, so they are rejected rather
+# than decided.
+_STRICT_MARGIN = 1e-6
+_DISTINCT_MARGIN = 1e-4
+
+
+def _relation_parts(latex):
+    """(lhs, rhs, rel, notation) for a relation, else None. The oracle
+    re-derives relation structure itself and never routes through the
+    symbolic tactic helpers — the two legs must stay independent."""
+    sym, notation = parse_latex(latex)
+    comp = notation.getf(sym, Notation.COMP)
+    if comp is None:
+        return None
+    rel = comp.sym.props.get('op')
+    if rel not in _ORACLE_REL:
+        return None
+    return comp.args[0], comp.args[1], rel, notation
+
+
+def hypothesis_parts(assumption):
+    """(lhs, rhs, direction) for an assumption that states a strict
+    hypothesis, else None. direction is -1 for '<' and +1 for '>'."""
+    relation = (assumption or {}).get('constraint')
+    if not relation:
+        return None
+    try:
+        parts = _relation_parts(relation)
+    except PrimitiveError:
+        return None
+    if parts is None:
+        return None
+    lhs, rhs, rel, notation = parts
+    if rel in ('<', '\\lt'):
+        direction = -1
+    elif rel in ('>', '\\gt'):
+        direction = 1
+    else:
+        return None
+    return write_latex(lhs, notation), write_latex(rhs, notation), direction
+
+
+def exclusive_hypotheses(assumptions):
+    """Index pairs of recorded hypotheses that cannot hold together: the
+    same two sides compared in opposite strict directions (`x > 0` with
+    `x < 0`, or `x > 0` with `0 > x`).
+
+    Structural only, and deliberately incomplete: a general contradiction
+    test would be a prover, which this layer is not. It recognises exactly
+    the shape a sign case-split produces, so alternative cases are never
+    presented as one conjunction."""
+    parsed = [hypothesis_parts(a) for a in (assumptions or [])]
+    pairs = []
+    for i, first in enumerate(parsed):
+        if first is None:
+            continue
+        for j in range(i + 1, len(parsed)):
+            second = parsed[j]
+            if second is None:
+                continue
+            l1, r1, d1 = first
+            l2, r2, d2 = second
+            same = same_expression(l1, l2) and same_expression(r1, r2)
+            crossed = same_expression(l1, r2) and same_expression(r1, l2)
+            if (same and d1 == -d2) or (crossed and d1 == d2):
+                pairs.append((i, j))
+    return pairs
+
+
+def _relation_truth(v1, v2, rel, tol):
+    """True/False for a relation between two sampled values; None when the
+    point is too close to the boundary (or not comparable) to decide."""
+    if isinstance(v1, list) or isinstance(v2, list):
+        return None
+    if rel in ('=', '\\ne', '\\neq'):
+        agree = _num_agree(v1, v2, tol)
+        if agree is None:
+            return None
+        return agree if rel == '=' else not agree
+    scale = max(1.0, abs(v1), abs(v2))
+    d = (v1 - v2) / scale
+    if abs(d) < _STRICT_MARGIN:
+        return None
+    if rel in ('<', '\\lt', '\\le', '\\leq'):
+        return d < 0
+    return d > 0
+
+
+def _sample_guards(assumptions):
+    """(nonzero_guards, constraint_guards) parsed out of assumption records.
+    `nonzero` keeps its historical meaning; `constraint` carries a whole
+    relation the sample point must satisfy."""
+    nonzero = []
+    constraints = []
+    for a in (assumptions or []):
+        expr = a.get('nonzero')
+        if expr:
+            try:
+                nonzero.append(parse_latex(expr))
+            except PrimitiveError:
+                pass
+        relation = a.get('constraint')
+        if relation:
+            try:
+                parts = _relation_parts(relation)
+            except PrimitiveError:
+                parts = None
+            if parts is not None:
+                constraints.append(parts)
+    return nonzero, constraints
+
+
+def _admissible_point(guards, env):
+    """True when the point lies inside every recorded assumption. A point
+    the guards cannot be evaluated at is rejected: an unusable guard must
+    never widen the sampled region."""
+    nonzero, constraints = guards
+    try:
+        for gs, gn in nonzero:
+            if _num_abs(numeric_eval(gs, gn, env)) < _DISTINCT_MARGIN:
+                return False
+        for lhs, rhs, rel, gn in constraints:
+            v1 = numeric_eval(lhs, gn, env)
+            v2 = numeric_eval(rhs, gn, env)
+            if rel in ('\\ne', '\\neq'):
+                if _num_agree(v1, v2, _DISTINCT_MARGIN) is not False:
+                    return False
+                continue
+            if _relation_truth(v1, v2, rel, _STRICT_MARGIN) is not True:
+                return False
+    except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def _guard_variables(guards):
+    """Free variables the guards need. The assumed region lives in the
+    joint space: a hypothesis about a variable the compared expressions do
+    not mention must still be sampled, or every point is rejected."""
+    nonzero, constraints = guards
+    names = set()
+    for gs, gn in nonzero:
+        names |= free_symbols(gs, gn)
+    for lhs, rhs, _rel, gn in constraints:
+        names |= free_symbols(lhs, gn) | free_symbols(rhs, gn)
+    return names
+
+
+def _sample_budget(samples, guards):
+    # rejection sampling inside a constrained region needs more tries; the
+    # unconstrained budget stays exactly as it was
+    return samples * (24 if guards[1] else 8)
+
+
 def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
                        seed=20260705, tol=1e-6):
     """Independently check latex1 == latex2 at random sample points.
@@ -1102,30 +1267,20 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         s2, n2 = parse_latex(latex2)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
-    variables = free_symbols(s1, n1) | free_symbols(s2, n2)
-    guards = []
-    for a in (assumptions or []):
-        expr = a.get('nonzero')
-        if expr:
-            try:
-                gs, gn = parse_latex(expr)
-                guards.append((gs, gn))
-            except PrimitiveError:
-                pass
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(s1, n1) | free_symbols(s2, n2)
+                 | _guard_variables(guards))
     rng = random.Random(seed)
     agreed = 0
     tried = 0
     undefined_both = 0
     mismatches = 0
     mismatch = None
-    while agreed < samples and tried < samples * 8:
+    budget = _sample_budget(samples, guards)
+    while agreed < samples and tried < budget:
         tried += 1
         env = _sample_point(variables, rng)
-        try:
-            if any(_num_abs(numeric_eval(gs, gn, env)) < 1e-4
-                   for gs, gn in guards):
-                continue
-        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        if not _admissible_point(guards, env):
             continue
         k1, v1 = _eval_kind(s1, n1, env)
         k2, v2 = _eval_kind(s2, n2, env)
@@ -1157,6 +1312,60 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     if undefined_both:
         result['undefined_points'] = undefined_both
     return result
+
+
+def numeric_relation_check(latex1, latex2, assumptions=None, samples=12,
+                           seed=20260727, tol=1e-6):
+    """Independently check that two relations hold at exactly the same
+    sample points inside the assumed region.
+
+    Per-side value checks see the algebra but not the DIRECTION: they pass
+    just as happily on `a < b` turned into `-a < -b`. This is the oracle
+    leg for a step whose claim is that the relation is preserved."""
+    try:
+        parts1 = _relation_parts(latex1)
+        parts2 = _relation_parts(latex2)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if parts1 is None or parts2 is None:
+        return {'status': 'skipped', 'reason': 'not a supported relation'}
+    l1, r1, rel1, n1 = parts1
+    l2, r2, rel2, n2 = parts2
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(l1, n1) | free_symbols(r1, n1)
+                 | free_symbols(l2, n2) | free_symbols(r2, n2)
+                 | _guard_variables(guards))
+    rng = random.Random(seed)
+    agreed = 0
+    satisfied = 0
+    tried = 0
+    budget = _sample_budget(samples, guards)
+    while agreed < samples and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng)
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            t1 = _relation_truth(numeric_eval(l1, n1, env),
+                                 numeric_eval(r1, n1, env), rel1, tol)
+            t2 = _relation_truth(numeric_eval(l2, n2, env),
+                                 numeric_eval(r2, n2, env), rel2, tol)
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        if t1 is None or t2 is None:
+            continue
+        if t1 != t2:
+            return {'status': 'disagree', 'point': env,
+                    'holds': {latex1: t1, latex2: t2}}
+        agreed += 1
+        if t1:
+            satisfied += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'no sample points inside the assumed region'}
+    # a region where the relation is never true agrees vacuously; report
+    # how much of the sample actually exercised the direction
+    return {'status': 'agree', 'samples': agreed, 'holding_points': satisfied}
 
 
 # ---------------------------------------------------------------------------
