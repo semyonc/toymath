@@ -143,7 +143,8 @@ class ExprResolver(Replicator):
         import prompt_commands
         instruction = prompt_commands.render(cmd, arg_latex)
         res = self.run_instruction(instruction, ledger=self.ledger,
-                                   on_step=self.on_step)
+                                   on_step=self.on_step,
+                                   chain_goal=arg_latex)
         self.subruns.append(res)
         if not res.get('ok'):
             raise ExprCommandError(res.get('error', f'{cmd.name}! failed'))

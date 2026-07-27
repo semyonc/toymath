@@ -221,6 +221,7 @@ class DoSession(object):
         self.result_selection = None
         self.open_selection = None
         self.current_goal = None
+        self.chain_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
         self.loaded_skills = {'core'}
@@ -548,6 +549,25 @@ def make_api(session):
         if mapped is not None:
             expr = mapped
         provenance = session.designate_result(expr)
+        if (provenance is not None and session.chain_goal is not None
+                and provenance.get('source') != 'claim'):
+            # admission mirrors the composite closure gate: an inline
+            # command (int!, diff!, ...) will refuse a final value whose
+            # step is not connected to the requested expression by a
+            # checked chain — refuse it HERE, while the agent can still
+            # repair (live: a retyped final spelling severed the chain
+            # and the run only learned after it had ended)
+            from expr_commands import _chains_to_goal
+            if not _chains_to_goal(session.new_steps(),
+                                   provenance.get('step'),
+                                   session.chain_goal):
+                return json.dumps({'ok': False, 'op': 'set_result',
+                                   'error': (
+                    'value is established but its step is not connected '
+                    'to the requested expression by a checked chain; '
+                    'select the result of a step that continues the '
+                    'derivation (feed recorded results forward verbatim '
+                    'instead of retyping them)')}, ensure_ascii=False)
         if provenance is None:
             if session.proof_claim_id is not None:
                 root = session.ledger.get_claim(session.proof_claim_id)
@@ -705,7 +725,7 @@ def build_model(model_name=None):
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
                     plot_backend=None, proof_goal=None, tikz_backend=None,
-                    model_name=None, providers=()):
+                    model_name=None, providers=(), chain_goal=None):
     """Run one do! instruction through the agent.
 
     Returns {ok, steps, assumptions, final_result, final_provenance,
@@ -732,6 +752,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     session = DoSession(ledger=ledger, on_step=on_step, on_plot=on_plot,
                         plot_backend=plot_backend,
                         tikz_backend=tikz_backend)
+    session.chain_goal = chain_goal
     root_claim = None
     if proof_goal is not None:
         try:

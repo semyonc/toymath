@@ -869,6 +869,31 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
 
+    def test_set_result_admission_mirrors_chain_goal(self):
+        # admission mirrors the composite closure gate (live: the agent
+        # retyped hand-simplified algebra as its final expand input, the
+        # chain severed silently, and int! refused only after the run had
+        # ended). With a chain_goal, set_result must refuse a verified but
+        # DISCONNECTED value while the agent can still repair.
+        script = [
+            [tool_call('expand', {'expr': '(y+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'y^{2}+2y+1'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('expand it', model=ScriptedModel(list(script)),
+                              chain_goal='(x+1)^2')
+        # the designation was refused: the run falls back to the honest
+        # last-transform record instead of a selection
+        self.assertEqual(res['final_provenance']['method'], 'last-step')
+        # control 1: the same selection with a matching goal is admitted
+        res = run_instruction('expand it', model=ScriptedModel(list(script)),
+                              chain_goal='(y+1)^2')
+        self.assertEqual(res['final_result'], 'y^{2}+2y+1')
+        self.assertNotEqual(res['final_provenance']['method'], 'last-step')
+        # control 2: plain do! runs carry no chain goal and stay permissive
+        res = run_instruction('expand it', model=ScriptedModel(list(script)))
+        self.assertNotEqual(res['final_provenance']['method'], 'last-step')
+
     def test_set_open_suppresses_last_step_fallback(self):
         # the conv! pseudo-answer: a run that certified nothing used to
         # hand the cell its last checked step as a "verified" result
@@ -2634,6 +2659,20 @@ class TestChainsToGoal(unittest.TestCase):
         self.assertTrue(ec._chains_to_goal(
             steps, 's3',
             '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+
+    def test_cdot_respelling_hop_accepted(self):
+        # live int! \int dx/(2\sin x - \cos x + 5): the agent rewrote a
+        # bare constant integrand as \frac{\sqrt{5}}{5} \cdot 1, and the
+        # explicit-\cdot presentation marking severed the verified chain
+        # at the \int-boundary hop — every step green, closure refused.
+        # The marking is display-only; linkage must be blind to it.
+        from ledger import _chain_links
+        self.assertTrue(_chain_links(
+            '\\int \\frac{\\sqrt{5}}{5} \\cdot 1 \\, d v',
+            '\\frac{\\sqrt{5}}{5} \\cdot 1'))
+        self.assertTrue(_chain_links('a \\cdot b', 'a b'))
+        # blindness covers the dot marking only, never structure
+        self.assertFalse(_chain_links('a \\cdot b', 'a + b'))
 
 
 class TestDirectCommands(unittest.TestCase):
