@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Indefinite-integration tactics."""
+import math
 from fractions import Fraction
 
 from notation import Notation, Symbol
@@ -124,17 +125,89 @@ def _is_bare_var(sym, notation, var):
         and sym.name == var
 
 
+def _sqrt_frac_latex(q):
+    """LaTeX for \\sqrt{q}, q a positive Fraction, taking perfect-square
+    numerator/denominator components exactly (\\sqrt{9/5} -> 3/\\sqrt{5})."""
+    rn, rd = math.isqrt(q.numerator), math.isqrt(q.denominator)
+    num_s = str(rn) if rn * rn == q.numerator \
+        else f'\\sqrt{{{q.numerator}}}'
+    den_s = str(rd) if rd * rd == q.denominator \
+        else f'\\sqrt{{{q.denominator}}}'
+    if den_s == '1':
+        return num_s
+    return f'\\frac{{{num_s}}}{{{den_s}}}'
+
+
+def _arctan_integrate_ratfunc(rf, var):
+    """Antiderivative latex (no constant) for c/(a var^2 + b) with rational
+    literals a, b > 0 — the completed-square table family
+    \\int dx/(x^2 + 1) = \\arctan x closed under positive scaling:
+    \\int c/(a x^2 + b) dx = (c/\\sqrt{ab}) \\arctan(x \\sqrt{a/b}).
+    Returns None when the ratfunc is not this shape."""
+    if not rf.num.is_const():
+        return None
+    den = rf.den
+    if den.variables() - {var}:
+        return None
+    terms = dict(den.terms)
+    a = terms.pop(((var, 2),), None)
+    b = terms.pop((), None)
+    if a is None or b is None or terms or a <= 0 or b <= 0:
+        return None
+    c = rf.num.const_value()
+    if c == 0:
+        return '0'
+    arg_s = _sqrt_frac_latex(a / b)
+    arg = var if arg_s == '1' else _d_mul(arg_s, var)
+    inner = f'\\arctan\\left({arg}\\right)'
+    coeff_s = _sqrt_frac_latex(c * c / (a * b))
+    term = inner if coeff_s == '1' else _d_mul(coeff_s, inner)
+    return _d_neg(term) if c < 0 else term
+
+
+def _steer_completed_square(rf, var):
+    """A quadratic denominator with a linear term is one completing-the-
+    square rewrite away from the arctan family — say so instead of the
+    generic monomial-denominator refusal."""
+    den = rf.den
+    if den.variables() != {var}:
+        return
+    degs = {dict(mono).get(var, 0) for mono in den.terms}
+    if max(degs, default=0) == 2 and 1 in degs:
+        raise PrimitiveError(
+            'quadratic denominator with a linear term: complete the square '
+            'with integrate_rewrite to 1/(a (x+d)^2 + e), substitute the '
+            'shifted variable, then integrate_table closes 1/(a u^2 + b)')
+
+
 def _table_integrate(sym, notation, var, assumptions):
     """Mechanical antiderivative (no constant): power rule + logarithm +
-    basic functions of the bare variable, closed under sums and constant
-    factors. Raises PrimitiveError with an honest reason otherwise."""
+    arctan family + basic functions of the bare variable, closed under sums
+    and constant factors (fully constant integrands integrate to c·var).
+    Raises PrimitiveError with an honest reason otherwise."""
+    rf = None
     try:
         rf = to_ratfunc(sym, notation)
-        return _power_integrate_ratfunc(rf, var, assumptions, allow_log=True)
     except NotInFragment:
         pass
     except ZeroDivisionError:
         raise PrimitiveError('integrand contains division by zero')
+    if rf is not None:
+        try:
+            return _power_integrate_ratfunc(rf, var, assumptions,
+                                            allow_log=True)
+        except PrimitiveError:
+            alt = _arctan_integrate_ratfunc(rf, var)
+            if alt is not None:
+                return alt
+            _steer_completed_square(rf, var)
+            raise
+    if var not in free_symbols(sym, notation):
+        # var-free integrand outside the rational fragment (\sqrt{5}/5,
+        # 1+\sqrt{2}, ...): a constant integrates to c·var regardless of
+        # its spelling
+        c = write_latex(sym, notation)
+        return _d_mul(_paren(c) if _is_sum_str(c) else c, var)
     if not isinstance(sym, Symbol):
         raise PrimitiveError(f'cannot integrate term {sym!r}')
     f = notation.get(sym)
@@ -190,6 +263,48 @@ def _table_integrate(sym, notation, var, assumptions):
     if op == Notation.SLASH or op.name in FRAC_NAMES:
         num, den = f.args[0], f.args[1]
         if var in free_symbols(den, notation):
+            if var in free_symbols(num, notation):
+                raise PrimitiveError(
+                    'no table rule for a variable denominator beyond 1/x; '
+                    'use integrate_power_rule or substitution')
+            # var-free numerator over a variable denominator: c/g = c*(1/g).
+            # Split var-free factors out of a product denominator, then the
+            # reciprocal of the variable core re-enters the rational path
+            # (arctan family included). Termination: the rebuilt reciprocal
+            # has a literal-1 numerator and an unsplittable denominator, so
+            # every recursion strictly simplifies the fraction.
+            num_q = _rational_literal(num, notation)
+            num_s = _frac_latex(num_q) if num_q is not None and num_q > 0 \
+                else write_latex(_peel_groups(num, notation), notation)
+            dcore = _peel_groups(den, notation)
+            df = notation.getf(dcore, Notation.P_LIST)
+            dconsts, dvars = [], []
+            if df is not None and not any(
+                    isinstance(a, Symbol) and notation.get(a) is None
+                    and a.name in FUNC_NAMES for a in df.args):
+                for a in df.args:
+                    if isinstance(a, Symbol) and a.name in Notation.styles:
+                        continue
+                    (dconsts if var not in free_symbols(a, notation)
+                     else dvars).append(a)
+            if dconsts and len(dvars) == 1:
+                recip_sym, recip_n = parse_latex(
+                    f'\\frac{{1}}{{{write_latex(dvars[0], notation)}}}')
+                inner = _table_integrate(recip_sym, recip_n, var,
+                                         assumptions)
+                const_s = _d_mul(*[write_latex(a, notation)
+                                   for a in dconsts])
+                coeff = f'\\frac{{{num_s}}}{{{const_s}}}'
+                return _d_mul(coeff,
+                              _paren(inner) if _is_sum_str(inner) else inner)
+            if num_q != 1:
+                recip_sym, recip_n = parse_latex(
+                    f'\\frac{{1}}{{{write_latex(den, notation)}}}')
+                inner = _table_integrate(recip_sym, recip_n, var,
+                                         assumptions)
+                return _d_mul(
+                    _paren(num_s) if _is_sum_str(num_s) else num_s,
+                    _paren(inner) if _is_sum_str(inner) else inner)
             raise PrimitiveError(
                 'no table rule for a variable denominator beyond 1/x; '
                 'use integrate_power_rule or substitution')

@@ -181,6 +181,17 @@ class _GroupStripper(Replicator):
                 self.mapsym(sym), Func(Notation.SLASH, args))
         return super(_GroupStripper, self).enter_oper(sym, f)
 
+    def enter_plist(self, sym, f):
+        # explicit-\cdot marking is presentation only (the structural
+        # comparer ignores it); the comparison normal form must too, or
+        # linkage refuses honest respellings of one product
+        if 'cdot' in f.props:
+            args = self.build_list(f, self.enter_expr)
+            props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, args, **props))
+        return super(_GroupStripper, self).enter_plist(sym, f)
+
 
 def _normal_form(latex, allow_ellipsis=False):
     """Parse and print with {}-groups stripped: two strings with equal

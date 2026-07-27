@@ -946,6 +946,15 @@ class TestParsingEdges(unittest.TestCase):
         self.assertEqual(Core.equal_exprs('a \\cdot b * c', 'c b a')['verdict'],
                          'yes')
 
+    def test_cdot_is_presentation_only_in_normal_forms(self):
+        # the explicit-\cdot P_LIST prop is display marking: structural
+        # identity must not split on it (live: it severed a verified
+        # int! chain), while the passive round trip keeps the dots
+        self.assertTrue(P.same_expression('a \\cdot b', 'a b'))
+        self.assertFalse(P.same_expression('a \\cdot b', 'a + b'))
+        sym, n = P.parse_latex('1 \\cdot 2')
+        self.assertIn('\\cdot', P.write_latex(sym, n))
+
     def test_display_latex_prettifies_only_structural_product_stars(self):
         cases = {
             '3*x': '3 \\cdot x',
@@ -1061,6 +1070,56 @@ class TestIntegration(unittest.TestCase):
 
     def test_table_mixed_sum(self):
         self.ok(Integration.integrate_table('x + \\sin x', 'x'))
+
+    def test_table_arctan_unit(self):
+        r = self.ok(Integration.integrate_table('\\frac{1}{1+v^2}', 'v'))
+        self.assertEqual(r['result'], '\\arctan\\left(v\\right) + C')
+
+    def test_table_arctan_scaled(self):
+        # completed-square residue from the live Weierstrass run
+        r = self.ok(Integration.integrate_table(
+            '\\frac{1}{3 w^2 + \\frac{5}{3}}', 'w'))
+        self.assertIn('\\arctan', r['result'])
+
+    def test_table_arctan_constant_numerator_peel(self):
+        # numerator outside the rational fragment, denominator in it:
+        # the constant peels and the reciprocal reaches the arctan rule
+        r = self.ok(Integration.integrate_table(
+            '\\frac{\\sqrt{5}}{5 (z^2 + 1)}', 'z'))
+        self.assertIn('\\arctan', r['result'])
+
+    def test_table_arctan_denominator_constant_factor_split(self):
+        # var-free irrational factor inside the denominator (second live
+        # route): \sqrt{5}(v^2+1) splits so the variable core reaches the
+        # arctan rule; the whole product spelling closes too
+        r = self.ok(Integration.integrate_table(
+            '\\frac{1}{\\sqrt{5} (v^2 + 1)}', 'v'))
+        self.assertIn('\\arctan', r['result'])
+        r2 = self.ok(Integration.integrate_table(
+            '\\frac{1}{\\sqrt{5}} \\cdot \\frac{1}{v^2 + 1}', 'v'))
+        self.assertIn('\\arctan', r2['result'])
+
+    def test_table_quadratic_linear_term_steers_to_square(self):
+        r = Integration.integrate_table('\\frac{1}{3 u^2 + 2 u + 2}', 'u')
+        self.assertFalse(r['ok'])
+        self.assertIn('complete the square', r['error'])
+
+    def test_table_negative_shift_no_arctan(self):
+        # x^2 - 1 is not the arctan family (b < 0) and must not steer
+        # to completing the square either
+        r = Integration.integrate_table('\\frac{1}{x^2-1}', 'x')
+        self.assertFalse(r['ok'])
+        self.assertNotIn('complete the square', r['error'])
+
+    def test_table_irrational_constant_integrand(self):
+        # \frac{\sqrt{5}}{5} is var-free but outside the rational
+        # fragment; a constant integrates to c v regardless of spelling
+        r = self.ok(Integration.integrate_table('\\frac{\\sqrt{5}}{5}', 'v'))
+        self.assertEqual(r['result'], '\\frac {\\sqrt{5}} {5} v + C')
+
+    def test_table_sum_constant_integrand(self):
+        r = self.ok(Integration.integrate_table('1 + \\sqrt{2}', 'v'))
+        self.assertIn('v + C', r['result'])
 
     def test_table_refuses_product(self):
         r = Integration.integrate_table('x \\sin x', 'x')
