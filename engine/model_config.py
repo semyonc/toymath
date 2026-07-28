@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - dotenv ships with the kernel env
 
 
 MODEL_VAR = 'OPENROUTER_MODEL'
-DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
+DEFAULT_MODEL = 'google/gemini-3.6-flash'
 MODELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'models.yaml')
 
