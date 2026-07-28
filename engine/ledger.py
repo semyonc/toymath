@@ -382,6 +382,8 @@ class Ledger(object):
             step['sources'] = result['sources']
         if result.get('solutions') is not None:
             step['solutions'] = list(result['solutions'])
+        if result.get('unknowns') is not None:
+            step['unknowns'] = result['unknowns']
         if goal is not None:
             step['goal'] = goal
         if pending_branch is not None:
@@ -530,6 +532,7 @@ class Ledger(object):
         first, last = selected[0], selected[-1]
         endpoint = last['result']
         closure = None
+        premise = None
         if (_eq_yes(endpoint, claim['statement'])
                 and _relation_holds(endpoint)):
             closure = 'true-relation-endpoint'
@@ -543,6 +546,23 @@ class Ledger(object):
                 elif (_eq_yes(first.get('input'), rhs)
                         and _eq_yes(endpoint, lhs)):
                     closure = 'right-to-left'
+        if closure is None and _eq_yes(endpoint, claim['statement']):
+            # An answer-shaped claim ("A = 1/2") states what an unknown IS,
+            # so _relation_holds can never decide it: asking whether A
+            # equals 1/2 IS the open question. What the checked chain does
+            # establish is one-directional — from its own first input the
+            # endpoint follows — so the claim closes CONDITIONAL on that
+            # premise, which travels with the verdict.
+            candidate = first.get('input')
+            # deriving the claim from itself establishes nothing
+            if (candidate and _relation_parts(candidate) is not None
+                    and not _eq_yes(candidate, endpoint)):
+                decided = core_tactics.evaluate(candidate)
+                if decided.get('ok') and decided.get('holds') is False:
+                    raise ValueError(
+                        f'the chain starts from {candidate!r}, which is '
+                        'false; a claim derived from it holds vacuously')
+                closure, premise = 'derived-from-premise', candidate
         if closure is None:
             raise ValueError(
                 f'chain endpoint {endpoint!r} does not close claim '
@@ -564,14 +584,18 @@ class Ledger(object):
                 f'{assumptions[first]["text"]!r} and '
                 f'{assumptions[second]["text"]!r}; close each case as its '
                 f'own claim')
-        verdict = 'conditional' if assumptions else 'established'
-        return {
+        verdict = ('conditional' if assumptions or premise is not None
+                   else 'established')
+        conclusion = {
             'steps': list(step_ids),
             'endpoint': endpoint,
             'assumptions': assumptions,
             'closure': closure,
             'verdict': verdict,
         }
+        if premise is not None:
+            conclusion['premise'] = premise
+        return conclusion
 
     def conclude(self, claim_id, step_ids):
         """Mechanically close a claim from goal-owned, checked steps."""
@@ -1109,6 +1133,13 @@ class Ledger(object):
                 lines.append('')
                 lines.append('*No mechanically checked closing chain has '
                              'been recorded.*')
+            elif conclusion.get('premise'):
+                # the premise is the whole content of a conditional answer
+                # claim: it must never be one click away from the verdict
+                lines.append('')
+                lines.append(
+                    '*Derived from the stated premise '
+                    f'${_display_latex(conclusion["premise"])}$.*')
             lines.append('')
         ended_open = bool(self.selections and (self.selections[-1].get(
             'provenance') or {}).get('source') == 'open')
@@ -1222,6 +1253,13 @@ class Ledger(object):
                 expr = _display_latex(step['args'].get('expr', ''))
                 arg_note = (f" — values of ${expr}$ "
                             f"from `{src.get('roots', '?')}` → `{ids}`")
+            elif step['op'] == 'system_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('assignments', []))
+                unknowns = ', '.join(u['unknown']
+                                     for u in step.get('unknowns') or [])
+                arg_note = (f" — values for ${unknowns}$ from `{ids}`"
+                            if ids else f" — values for ${unknowns}$")
             goal = (f" → `{step['goal']}`" if step.get('goal') else '')
             out.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
                        f"— *{mark}*{branch}")
@@ -1286,6 +1324,8 @@ class Ledger(object):
             if verdict != 'OPEN':
                 detail = ('; steps ' + ','.join(conclusion.get('steps', []))
                           + f'; endpoint {conclusion.get("endpoint")}')
+                if conclusion.get('premise'):
+                    detail += f'; given {conclusion["premise"]}'
             lines.append(f"CLAIM {claim['id']}#{claim['hash']} [{verdict}] "
                          f"{claim['statement']}{detail}")
         for step in self.steps:
@@ -1331,6 +1371,13 @@ class Ledger(object):
                     '      sources: roots ' + src.get('roots', '?')
                     + '; values of ' + step['args'].get('expr', '?')
                     + ' from ' + ', '.join(src.get('values', [])))
+            elif step['op'] == 'system_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: values for '
+                    + ', '.join(u['unknown']
+                                for u in step.get('unknowns') or [])
+                    + ' from ' + ', '.join(src.get('assignments', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
         visible_assumptions = (topology['spine_assumptions']

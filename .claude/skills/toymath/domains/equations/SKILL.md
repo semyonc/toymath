@@ -21,6 +21,41 @@ These moves do not choose an elimination strategy or combine rows. Keep that
 strategy explicit: isolate a value, substitute it through the system, then use
 ordinary algebra tactics on the resulting relation as needed.
 
+## Answers with several unknowns
+
+A task like "find A, B and C" — matching an ansatz, or solving a system — ends
+in several statements at once, not in one expression. Derive each unknown
+however the problem allows until a step records `unknown = value`, one recorded
+step per unknown, then bind them into the answer:
+
+```text
+system_assemble TARGET STEP...
+
+# matching \frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}, with s6 recording
+# A = 1/2 and s10 recording B = -1/2:
+system_assemble "\frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}" s6 s10
+```
+
+`TARGET` is the equality (or comma system) the values have to satisfy — the
+ansatz being matched, the system being solved, or the defining equation of a
+single unknown. Never the answer: a target that already states a value
+substitutes to `value = value` and is refused. The tactic puts every recorded
+value back into the target, checks what comes out is an identity, and
+independently re-derives the whole association by binding each unknown to its
+own value, so a swapped pair of values is refused instead of assembled. The
+result is the answer `A=…,B=…`, and that is what `set_result` designates.
+
+It reads ledger step ids, never typed values. A value that still mentions
+another unknown is a half-solved system and is refused, and every assembled
+unknown must be one the target names. The record says the assignment satisfies
+the target; it never says it is the only one that does.
+
+A single unknown's value can also be stated as a claim. Such a claim can never
+be decided on its own — asking whether `A` equals its value IS the question —
+so it closes CONDITIONAL on the first input of the chain that derived it, and
+the ledger shows that premise beside the verdict. Give `conclude` the chain
+that starts at the equation the unknown came from.
+
 ## Inequalities and sign cases
 
 An inequality only keeps its direction when the factor moved across it has a

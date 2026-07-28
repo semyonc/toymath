@@ -192,6 +192,275 @@ def quadratic_roots(expr, var):
         return _error('quadratic_roots', args, str(exc))
 
 
+def assignment_pairs(assignments):
+    """Ordered ``{unknown, value}`` associations named by recorded relations.
+
+    Shared by the tactic and by replay provenance validation, so a recorded
+    association can never drift away from the results it was built from.
+    """
+    if not isinstance(assignments, (list, tuple)) or not assignments:
+        raise PrimitiveError(
+            'give one recorded step per unknown, each ending at '
+            '"unknown = value"')
+    out = []
+    for index, assignment in enumerate(assignments, 1):
+        if not isinstance(assignment, str) or not assignment.strip():
+            raise PrimitiveError(f'assignment {index} records no relation')
+        sym, notation = parse_latex(assignment)
+        comp = notation.getf(sym, Notation.COMP)
+        if comp is None or comp.sym.props.get('op') != '=':
+            raise PrimitiveError(
+                f'assignment {index} ({assignment!r}) is not an equality; '
+                'each unknown needs a recorded step ending at '
+                '"unknown = value"')
+        left = comp.args[0]
+        if not isinstance(left, Symbol) or notation.get(left) is not None:
+            raise PrimitiveError(
+                f'assignment {index} ({assignment!r}) must name a plain '
+                'unknown on the left')
+        for seen in out:
+            if seen['unknown'] == left.name:
+                raise PrimitiveError(
+                    f'{left.name!r} is assigned twice; give one recorded '
+                    'step per unknown')
+        out.append({'unknown': left.name,
+                    'value': write_latex(comp.args[1], notation)})
+    # An answer names each unknown once, on the left. A value that still
+    # mentions one of them is a half-solved system, not an answer, and the
+    # order the values were substituted in would silently decide it.
+    names = {pair['unknown'] for pair in out}
+    for pair in out:
+        vsym, vnotation = parse_latex(pair['value'])
+        remaining = sorted(free_symbols(vsym, vnotation) & names)
+        if remaining:
+            raise PrimitiveError(
+                f'the value recorded for {pair["unknown"]!r} still contains '
+                f'{remaining[0]!r}; an assembled answer states each unknown '
+                'in terms of the givens only')
+    return out
+
+
+def _target_relations(target):
+    """(member relations, root sym, notation) of an equality or comma system.
+
+    The target is what the assembled values must satisfy.  Only equalities
+    are accepted: verifying an assignment against an inequality would need a
+    decision procedure this layer deliberately does not have.
+    """
+    sym, notation = parse_latex(target)
+    head = notation.get(sym)
+    items = (list(head.args)
+             if head is not None and head.sym.name == Notation.C_LIST.name
+             else [sym])
+    relations = []
+    for item in items:
+        comp = notation.getf(item, Notation.COMP)
+        if comp is None:
+            raise PrimitiveError(
+                'the target must be an equality, or a comma system of '
+                'equalities, that the values satisfy')
+        if comp.sym.props.get('op') != '=':
+            raise PrimitiveError(
+                'system_assemble verifies equalities; '
+                f'{write_latex(item, notation)!r} is not one')
+        relations.append(write_latex(item, notation))
+    return relations, sym, notation
+
+
+def _system_check(relations, pairs, samples=8, seed=20260728, tol=1e-6):
+    """Independent check that the assignment satisfies every target relation.
+
+    The oracle binds each unknown to its own numeric reading of the recorded
+    value and evaluates both sides there, so it shares no substitution
+    machinery with the symbolic path.  Association is what this check sees: a
+    swapped pair of values shows up as a numeric disagreement.
+    """
+    try:
+        parsed = []
+        for relation in relations:
+            rsym, rnotation = parse_latex(relation)
+            comp = rnotation.getf(rsym, Notation.COMP)
+            if comp is None:
+                raise PrimitiveError('target member is not a relation')
+            parsed.append((relation, comp.args[0], comp.args[1], rnotation))
+        values = []
+        for pair in pairs:
+            vsym, vnotation = parse_latex(pair['value'])
+            values.append((pair['unknown'], vsym, vnotation))
+    except PrimitiveError as exc:
+        return {'status': 'skipped', 'reason': str(exc)}
+
+    unknowns = {name for name, _, _ in values}
+    variables = set()
+    for _, lhs, rhs, rnotation in parsed:
+        variables |= free_symbols(lhs, rnotation)
+        variables |= free_symbols(rhs, rnotation)
+    for _, vsym, vnotation in values:
+        variables |= free_symbols(vsym, vnotation)
+    variables -= unknowns
+    closed = not variables
+    wanted = 1 if closed else samples
+    rng = random.Random(seed)
+    agreed = 0
+    tried = 0
+    while agreed < wanted and tried < wanted * 8:
+        tried += 1
+        env = _sample_point(variables, rng)
+        usable = True
+        try:
+            for name, vsym, vnotation in values:
+                value = numeric_eval(vsym, vnotation, env)
+                if isinstance(value, list):
+                    raise EvalError('non-scalar assignment value')
+                env[name] = value
+        except (ValueError, ZeroDivisionError) as exc:
+            if closed:
+                return {'status': 'domain-differs', 'reason': str(exc)}
+            continue
+        except (EvalError, OverflowError):
+            continue
+        for relation, lhs, rhs, rnotation in parsed:
+            try:
+                left = numeric_eval(lhs, rnotation, env)
+                right = numeric_eval(rhs, rnotation, env)
+            except (ValueError, ZeroDivisionError) as exc:
+                # on closed data the relation simply has no value there:
+                # that is evidence, not ignorance
+                if closed:
+                    return {'status': 'domain-differs', 'relation': relation,
+                            'reason': str(exc)}
+                usable = False
+                break
+            except (EvalError, OverflowError):
+                usable = False
+                break
+            agree = _num_agree(left, right, tol)
+            if agree is None:
+                usable = False
+                break
+            if not agree:
+                return {'status': 'disagree', 'relation': relation,
+                        'left': left, 'right': right, 'point': env}
+        if usable:
+            agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    return {'status': 'agree', 'samples': agreed * len(parsed),
+            'method': 'independent evaluation at the assigned values'}
+
+
+def system_assemble(target, assignments):
+    """Assemble recorded per-unknown values into the answer for one stated
+    relation or comma system, verified by putting them back into it.
+
+    This is not a solver: every value comes from a step the agent already
+    recorded, and the tactic only checks that together they satisfy the
+    stated target, then binds them into one answer object.  The record says
+    the assignment satisfies the target — never that it is the only one that
+    does.  The do! tool and the CLI supply the values from ledger step ids
+    rather than letting the agent retype an answer.
+    """
+    args = {'target': target,
+            'assignments': list(assignments)
+            if isinstance(assignments, (list, tuple)) else assignments}
+    if not isinstance(assignments, (list, tuple)):
+        return _error('system_assemble', args,
+                      'assignments must be an ordered list')
+    try:
+        pairs = assignment_pairs(assignments)
+        relations, tsym, tnotation = _target_relations(target)
+    except PrimitiveError as exc:
+        return _error('system_assemble', args, str(exc))
+
+    named = free_symbols(tsym, tnotation)
+    for pair in pairs:
+        if pair['unknown'] not in named:
+            return _error(
+                'system_assemble', args,
+                f'{pair["unknown"]!r} does not occur in {target!r}; every '
+                'assembled unknown must be one the target names')
+
+    # A target that already states an unknown's value verifies nothing: the
+    # substitution turns it into "value = value". Live agents reach for the
+    # answer here, so the refusal names what the target is for.
+    for relation in relations:
+        rsym, rnotation = parse_latex(relation)
+        comp = rnotation.getf(rsym, Notation.COMP)
+        left = write_latex(comp.args[0], rnotation)
+        right = write_latex(comp.args[1], rnotation)
+        for pair in pairs:
+            if ((same_expression(left, pair['unknown'])
+                 and same_expression(right, pair['value']))
+                    or (same_expression(right, pair['unknown'])
+                        and same_expression(left, pair['value']))):
+                return _error(
+                    'system_assemble', args,
+                    f'{relation!r} just repeats the recorded value of '
+                    f'{pair["unknown"]!r}, so nothing would be verified; '
+                    'the target is the equality the values must SATISFY — '
+                    'the ansatz being matched, or the system being solved — '
+                    'never the answer itself')
+
+    for relation in relations:
+        current = relation
+        for pair in pairs:
+            csym, cnotation = parse_latex(current)
+            if pair['unknown'] not in free_symbols(csym, cnotation):
+                continue
+            substituted = substitute(current, pair['unknown'], pair['value'])
+            if not substituted.get('ok'):
+                return _error(
+                    'system_assemble', args,
+                    f'cannot put the value of {pair["unknown"]!r} back into '
+                    f'{relation!r}: '
+                    + substituted.get('error', 'unknown error'))
+            current = substituted['result']
+        try:
+            sym, notation = parse_latex(current)
+            comp = notation.getf(sym, Notation.COMP)
+            lhs = write_latex(comp.args[0], notation)
+            rhs = write_latex(comp.args[1], notation)
+        except (PrimitiveError, AttributeError):
+            return _error('system_assemble', args,
+                          f'internal: unreadable substitution of {relation!r}')
+        equality = equal_exprs(lhs, rhs)
+        if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+            # nothing here can tell an unknown from a genuine variable, so
+            # the repair is named without guessing which symbol it is: the
+            # commonest failure is one unknown left without a recorded value
+            unassigned = sorted(free_symbols(*parse_latex(current))
+                                - {p['unknown'] for p in pairs})
+            hint = (f'; still free there: {", ".join(unassigned)} — any '
+                    'unknown among them needs its own recorded value step'
+                    if unassigned else '')
+            return _error(
+                'system_assemble', args,
+                f'the recorded values do not satisfy {relation!r} '
+                f'(verdict: {equality.get("verdict", "error")}){hint}')
+
+    built = ','.join(f'{pair["unknown"]}={pair["value"]}' for pair in pairs)
+    try:
+        members, bsym, bnotation = _target_relations(built)
+        if len(members) != len(pairs):
+            raise PrimitiveError('assembled answer lost a member')
+        for member, pair in zip(members, pairs):
+            msym, mnotation = parse_latex(member)
+            comp = mnotation.getf(msym, Notation.COMP)
+            if not (write_latex(comp.args[0], mnotation) == pair['unknown']
+                    and same_expression(write_latex(comp.args[1], mnotation),
+                                        pair['value'])):
+                raise PrimitiveError('assembled answer lost its association')
+        result = write_latex(bsym, bnotation)
+    except PrimitiveError as exc:
+        return _error('system_assemble', args,
+                      f'internal: unusable assembly: {exc}')
+
+    rec = _result('system_assemble', args, target, result,
+                  extra={'unknowns': pairs})
+    rec['check'] = _system_check(relations, pairs)
+    return rec
+
+
 def _root_values(roots, var_name):
     """Ordered root values written by a recorded root-solution relation.
 

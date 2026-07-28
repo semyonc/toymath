@@ -114,6 +114,7 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('quadratic_roots EXPR VAR', equations)
         self.assertIn('points_assemble EXPR VAR ROOTS_STEP STEP...',
                       equations)
+        self.assertIn('system_assemble TARGET STEP...', equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
     def test_existing_cli_shapes_are_preserved(self):
@@ -171,6 +172,37 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(rec['sources'],
                          {'roots': 's2', 'values': ['s3', 's4']})
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_system_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'system.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('x+2-2 = 6-2'))
+        ledger.record(core.expand('y+1-1 = 3-1'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'system_assemble', 'x+y=6, x-y=2', 's1', 's2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], 'x=4,y=2')
+        self.assertEqual(rec['sources'], {'assignments': ['s1', 's2']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_system_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main(['system_assemble', 'x+y=6', 's1', 's2'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
 
     def test_cli_points_assemble_without_session_refuses(self):
         output = io.StringIO()

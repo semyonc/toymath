@@ -650,6 +650,102 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertIn('values of $x^3-3x$ from `s2` → `s4, s6`',
                       session.ledger.render_markdown())
 
+    ANSATZ = r'\frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}'
+
+    def _coefficient_session(self):
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        values = []
+        for equation, divisor in (('2A = 1', '2'), ('-2B = 1', '-2')):
+            applied = json.loads(api['apply'](equation, '/', divisor))
+            values.append(json.loads(
+                api['expand'](applied['result']))['step']['id'])
+        return session, api, values
+
+    def test_system_assemble_states_the_several_part_answer(self):
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertTrue(agent_do.primitives.same_expression(
+            rec['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
+        self.assertEqual(rec['sources'], {'assignments': values})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        self.assertIn('values for A, B from s2, s4', session.ledger.render())
+        self.assertIn('values for $A, B$ from `s2, s4`',
+                      session.ledger.render_markdown())
+
+    def test_system_assemble_refuses_a_value_that_fails_the_target(self):
+        # every cited step is itself checked; what this tactic adds is that
+        # the values TOGETHER satisfy the stated target
+        session, api, values = self._coefficient_session()
+        applied = json.loads(api['apply']('2B = 1', '/', '2'))
+        wrong = json.loads(api['expand'](applied['result']))['step']['id']
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ, values[0], wrong]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('do not satisfy', rec['error'])
+        self.assertEqual(len(session.ledger.steps), 6)
+
+    def test_assignment_order_never_stands_in_for_the_association(self):
+        # unlike a point list, each assignment names its own unknown, so
+        # citing the steps in the other order is a reordering, not a swap
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + list(reversed(values))))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertTrue(agent_do.primitives.same_expression(
+            rec['result'], r'B=-\frac{1}{2},A=\frac{1}{2}'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_system_assemble_needs_recorded_value_steps(self):
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ, values[0], 's99']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_replay_rejects_tampered_assignment_provenance(self):
+        session, api, values = self._coefficient_session()
+        json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        session.ledger.steps[-1]['sources']['assignments'][1] = values[0]
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_replay_rejects_a_retyped_assignment_association(self):
+        session, api, values = self._coefficient_session()
+        json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        session.ledger.steps[-1]['unknowns'][0]['value'] = '0'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('association mismatch', replay['reason'])
+
+    def test_an_unknowns_claim_closes_conditional_on_its_premise(self):
+        session = DoSession()
+        api = make_api(session)
+        claim = json.loads(api['claim'](r'A = \frac{1}{2}'))
+        applied = json.loads(api['apply']('2A = 1', '/', '2'))
+        expanded = json.loads(api['expand'](applied['result']))
+        closed = json.loads(api['conclude'](
+            claim['id'], [applied['step']['id'], expanded['step']['id']]))
+        self.assertTrue(closed['ok'], closed.get('error'))
+        self.assertEqual(closed['claim']['verdict'], 'conditional')
+        self.assertEqual(closed['claim']['conclusion']['premise'], '2A = 1')
+        self.assertEqual(closed['claim']['conclusion']['closure'],
+                         'derived-from-premise')
+        selected = json.loads(api['set_result'](expanded['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        self.assertIn('given 2A = 1', session.ledger.render())
+
     def test_points_assemble_refuses_swapped_value_steps(self):
         session, api, roots_id, values = self._stationary_session()
         rec = json.loads(api['points_assemble'](

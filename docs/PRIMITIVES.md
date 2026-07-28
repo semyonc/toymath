@@ -134,6 +134,14 @@ source graph closes the claim. A relation-valued endpoint must itself be
 mechanically true; an equivalent no-op rewrite cannot establish an arbitrary
 relation.
 
+A claim that states what an unknown IS (`A = 1/2`) can never be decided on its
+own — asking whether `A` equals the value is the claim itself. Such a claim
+closes only when the chain's endpoint is the claim, and then it closes
+CONDITIONAL on that chain's first input, which is recorded as the conclusion's
+premise and displayed with the verdict. The implication is one-directional and
+is all that is asserted; a chain starting from a mechanically false relation, or
+from the claim itself, is refused rather than closed vacuously.
+
 Re-recording a claim whose statement matches an existing same-parent claim —
 open or concluded — focuses that claim instead of minting a duplicate id, and
 a repeated `conclude` replaces the closing chain (for example with one that
@@ -197,6 +205,15 @@ root-to-value association is gated symbolically and then re-derived by the
 independent evaluator, which is what sees the pairing. A typed collection an
 agent writes out by hand is a claim about where each number came from, so it
 is not admissible as a result on its own.
+
+An answer that is several statements at once — the values of A, B and C, the
+assignment satisfying a system — is assembled the same way by `system_assemble`
+from one recorded `unknown = value` step per unknown. It puts the recorded
+values back into the stated target, gates the outcome symbolically, and has the
+independent evaluator re-derive the whole assignment by binding each unknown to
+its own value. The record says the assignment satisfies the target, never that
+it is the only one that does; a target that already states one of the values
+verifies nothing and is refused.
 
 The same principle governs inline notebook commands:
 

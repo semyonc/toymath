@@ -48,7 +48,9 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
   A refusal lists the available positions.
 - Use the two named factoring tactics instead of asking for a general factor.
 - Load the `equations` skill when a workflow needs a complete rational root
-  result for a quadratic; candidate checks alone are not a solution record.
+  result for a quadratic, or when the answer is several statements at once —
+  a system solved for two variables, "find A, B and C"; a run that ends by
+  selecting one of them has answered part of the question.
 - Use `equal` for a query; `unknown` is not verification.
 - There is deliberately no `solve`, `simplify`, or general `factor` tactic.
 

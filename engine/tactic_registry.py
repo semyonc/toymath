@@ -258,6 +258,26 @@ def _points_assemble_from_steps(context, args):
     return result
 
 
+def _system_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('system_assemble',
+                      'system_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    source_ids = args['value_steps']
+    values = []
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('system_assemble',
+                          f'unknown transforming step {source_id!r}')
+        values.append(source['result'])
+    result = equations.system_assemble(args['target'], values)
+    if result.get('ok'):
+        result['sources'] = {'assignments': list(source_ids)}
+    return result
+
+
 def _validate_limit_from_sides(step, seen):
     sources = step.get('sources') or {}
     args = step.get('args', {})
@@ -304,6 +324,28 @@ def _validate_points_assemble(step, seen):
             return 'unreadable point association'
         if recorded != expected:
             return 'point association mismatch'
+    return None
+
+
+def _validate_system_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    source_ids = sources.get('assignments') or []
+    values = args.get('assignments') or []
+    if len(source_ids) != len(values):
+        return 'assignment provenance mismatch'
+    for source_id, value in zip(source_ids, values):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != value:
+            return f'assignment provenance mismatch at {source_id}'
+    recorded = step.get('unknowns')
+    if recorded is not None:
+        try:
+            expected = equations.assignment_pairs(values)
+        except primitives.PrimitiveError:
+            return 'unreadable assignment'
+        if recorded != expected:
+            return 'assignment association mismatch'
     return None
 
 
@@ -451,6 +493,33 @@ TACTICS = (
                  'ordered value step ids, one per root', nargs='+')),
         cli_handler=_points_assemble_from_steps,
         provenance_validator=_validate_points_assemble),
+    TacticSpec(
+        'system_assemble', 'system_assemble', 'equations',
+        'assemble recorded per-unknown values into the checked answer for '
+        'a stated equality or comma system',
+        equations.system_assemble,
+        (_arg('target', 'TARGET',
+              'equality (or comma system) the values must satisfy — '
+              'the problem, never the answer'),
+         _arg('assignments', 'ASSIGNMENT',
+              'recorded "unknown = value" relations', nargs='+')),
+        agent_arguments=(
+            _arg('target', 'TARGET',
+                 'equality (or comma system) the values must satisfy — '
+                 'the problem, never the answer'),
+            _arg('value_steps', 'STEP',
+                 'ledger step ids, one per unknown, each recording '
+                 '"unknown = value"', nargs='+')),
+        agent_handler=_system_assemble_from_steps,
+        cli_arguments=(
+            _arg('target', 'TARGET',
+                 'equality (or comma system) the values must satisfy — '
+                 'the problem, never the answer'),
+            _arg('value_steps', 'STEP',
+                 'ledger step ids, one per unknown, each recording '
+                 '"unknown = value"', nargs='+')),
+        cli_handler=_system_assemble_from_steps,
+        provenance_validator=_validate_system_assemble),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',

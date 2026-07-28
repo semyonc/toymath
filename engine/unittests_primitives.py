@@ -933,6 +933,125 @@ class TestPointsAssemble(unittest.TestCase):
         self.assertEqual(check['root'], '0')
 
 
+ANSATZ = r'\frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}'
+
+
+class TestSystemAssemble(unittest.TestCase):
+    def test_assembles_the_several_part_answer(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['input'], ANSATZ)
+        self.assertEqual(r['unknowns'],
+                         [{'unknown': 'A', 'value': r'\frac {1} {2}'},
+                          {'unknown': 'B', 'value': r'- \frac {1} {2}'}])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertTrue(P.same_expression(
+            r['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
+
+    def test_result_is_a_system_of_equalities(self):
+        r = Equations.system_assemble('x+y=3, x-y=1', ['x=2', 'y=1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x=2,y=1')
+        sym, notation = P.parse_latex(r['result'])
+        head = notation.get(sym)
+        self.assertEqual(head.sym.name, Notation.C_LIST.name)
+        for item in head.args:
+            self.assertIsNotNone(notation.getf(item, Notation.COMP))
+
+    def test_symbolic_coefficients_stay_associated(self):
+        r = Equations.system_assemble(
+            'a = A + B, b = A - B',
+            [r'A = \frac{a+b}{2}', r'B = \frac{a-b}{2}'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertGreater(r['check']['samples'], 2)
+
+    def test_swapped_values_are_refused(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = -\frac{1}{2}', r'B = \frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('do not satisfy', r['error'])
+
+    def test_a_missing_unknown_names_what_is_still_free(self):
+        r = Equations.system_assemble(ANSATZ, [r'A = \frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('still free there', r['error'])
+        self.assertIn('B', r['error'])
+
+    def test_only_resolved_assignments_are_accepted(self):
+        unresolved = Equations.system_assemble(
+            ANSATZ, ['A = B', r'B = -\frac{1}{2}'])
+        self.assertFalse(unresolved['ok'])
+        self.assertIn("still contains 'B'", unresolved['error'])
+        inequality = Equations.system_assemble(
+            ANSATZ, [r'A > \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertFalse(inequality['ok'])
+        self.assertIn('is not an equality', inequality['error'])
+        compound = Equations.system_assemble(
+            ANSATZ, [r'2A = 1', r'B = -\frac{1}{2}'])
+        self.assertFalse(compound['ok'])
+        self.assertIn('plain unknown on the left', compound['error'])
+        twice = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'A = \frac{1}{2}'])
+        self.assertFalse(twice['ok'])
+        self.assertIn('assigned twice', twice['error'])
+
+    def test_the_answer_is_never_its_own_target(self):
+        # measured live: an agent passed the assignment list as the target,
+        # which substitutes to "value = value" and certifies nothing
+        r = Equations.system_assemble(
+            r'A = \frac{1}{2}, B = -\frac{1}{2}',
+            [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('just repeats the recorded value', r['error'])
+        flipped = Equations.system_assemble(
+            r'\frac{1}{2} = A', [r'A = \frac{1}{2}'])
+        self.assertFalse(flipped['ok'])
+        self.assertIn('never the answer itself', flipped['error'])
+        defining = Equations.system_assemble('2A = 1', [r'A = \frac{1}{2}'])
+        self.assertTrue(defining['ok'], defining.get('error'))
+        self.assertEqual(defining['check']['status'], 'agree')
+
+    def test_unknown_must_be_one_the_target_names(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}', 'C = 1'])
+        self.assertFalse(r['ok'])
+        self.assertIn("'C' does not occur", r['error'])
+
+    def test_only_equality_targets_are_verifiable(self):
+        r = Equations.system_assemble('x+y > 3', ['x=2', 'y=1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('verifies equalities', r['error'])
+        plain = Equations.system_assemble('x+y', ['x=2', 'y=1'])
+        self.assertFalse(plain['ok'])
+        self.assertIn('must be an equality', plain['error'])
+
+    def test_independent_check_sees_the_association(self):
+        relations = ['a = A + B', 'b = A - B']
+        aligned = Equations._system_check(
+            relations, [{'unknown': 'A', 'value': r'\frac{a+b}{2}'},
+                        {'unknown': 'B', 'value': r'\frac{a-b}{2}'}])
+        self.assertEqual(aligned['status'], 'agree')
+        swapped = Equations._system_check(
+            relations, [{'unknown': 'A', 'value': r'\frac{a-b}{2}'},
+                        {'unknown': 'B', 'value': r'\frac{a+b}{2}'}])
+        self.assertEqual(swapped['status'], 'disagree')
+        self.assertEqual(swapped['relation'], 'b = A - B')
+
+    def test_undefined_assignment_is_a_domain_signal(self):
+        check = Equations._system_check(
+            ['A = 1'], [{'unknown': 'A', 'value': r'\frac{1}{0}'}])
+        self.assertEqual(check['status'], 'domain-differs')
+
+    def test_assignment_pairs_is_the_shared_reader(self):
+        pairs = Equations.assignment_pairs(['x=2', 'y=1'])
+        self.assertEqual(pairs, [{'unknown': 'x', 'value': '2'},
+                                 {'unknown': 'y', 'value': '1'}])
+        with self.assertRaises(P.PrimitiveError):
+            Equations.assignment_pairs([])
+
+
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = Core.expand('2 \\cdot x \\cdot (x+1)')
@@ -1884,6 +2003,48 @@ class TestGoalAwareLedger(unittest.TestCase):
         step = ledger.record(Core.expand('x = 2'), goal=claim['id'])
         with self.assertRaisesRegex(ValueError, 'does not close claim'):
             ledger.conclude(claim['id'], [step['id']])
+
+    def _answer_chain(self, ledger, claim):
+        first = ledger.record(Core.apply_both_sides('2A = 1', '/', '2'),
+                              goal=claim['id'])
+        second = ledger.record(Core.expand(first['result']),
+                               goal=claim['id'])
+        return [first['id'], second['id']]
+
+    def test_answer_shaped_claim_closes_conditional_on_its_premise(self):
+        # "A = 1/2" states what an unknown IS: no standalone check can
+        # decide it, but the checked chain from 2A = 1 does establish it
+        ledger = Ledger()
+        claim = ledger.record_claim(r'A = \frac{1}{2}')
+        closed = ledger.conclude(claim['id'],
+                                 self._answer_chain(ledger, claim))
+        self.assertEqual(closed['verdict'], 'conditional')
+        self.assertEqual(closed['conclusion']['closure'],
+                         'derived-from-premise')
+        self.assertEqual(closed['conclusion']['premise'], '2A = 1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        self.assertIn('given 2A = 1', ledger.render())
+        self.assertIn('stated premise', ledger.render_markdown())
+
+    def test_premise_closure_is_replay_checked(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(r'A = \frac{1}{2}')
+        ledger.conclude(claim['id'], self._answer_chain(ledger, claim))
+        claim['conclusion']['premise'] = '3A = 1'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('conclusion mismatch', replay['reason'])
+
+    def test_a_claim_is_never_derived_from_a_false_premise(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('0 = 1')
+        first = ledger.record(Core.apply_both_sides('2 = 3', '-', '2'),
+                              goal=claim['id'])
+        second = ledger.record(Core.expand(first['result']),
+                               goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'which is false'):
+            ledger.conclude(claim['id'], [first['id'], second['id']])
+        self.assertEqual(claim['verdict'], 'open')
 
     def test_true_relation_endpoint_can_close_identity(self):
         ledger = Ledger()
