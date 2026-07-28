@@ -11,6 +11,13 @@ import os
 import unittest
 from unittest import mock
 
+# A developer may enable production tracing in the repository's .env.  The
+# scripted test suite must still make neither OpenRouter nor Langfuse calls;
+# the dedicated observability test below opts back in with an in-memory
+# exporter and an HTTP-mocked model transport.
+os.environ['TOYMATH_OBSERVABILITY'] = 'off'
+os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
+
 import agent_do
 import observability
 import plot_sandbox
@@ -1407,16 +1414,76 @@ class TestObservability(unittest.TestCase):
         })
 
     def test_active_run_emits_one_nested_langfuse_trace(self):
-        from agents import set_tracing_disabled
+        import asyncio
+
+        import httpx
+        from agents import (OpenAIChatCompletionsModel,
+                            set_tracing_disabled)
+        from langfuse import Langfuse
+        from openai import AsyncOpenAI
         from openinference.instrumentation.openai_agents import (
             OpenAIAgentsInstrumentor)
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter)
-        from langfuse import Langfuse
+
+        scripted_responses = []
+        for index, turn in enumerate(SOLVE_SCRIPT):
+            item = turn[0]
+            if isinstance(item, ResponseFunctionToolCall):
+                message_data = {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [{
+                        'id': item.call_id,
+                        'type': 'function',
+                        'function': {
+                            'name': item.name,
+                            'arguments': item.arguments,
+                        },
+                    }],
+                }
+                finish_reason = 'tool_calls'
+            else:
+                message_data = {
+                    'role': 'assistant',
+                    'content': item.content[0].text,
+                }
+                finish_reason = 'stop'
+            scripted_responses.append({
+                'id': f'chatcmpl-test-{index}',
+                'object': 'chat.completion',
+                'created': 0,
+                'model': 'test/provider-model',
+                'choices': [{
+                    'index': 0,
+                    'message': message_data,
+                    'finish_reason': finish_reason,
+                }],
+                'usage': {
+                    'prompt_tokens': 7,
+                    'completion_tokens': 3,
+                    'total_tokens': 10,
+                },
+            })
+
+        requests = []
+
+        def handle_request(request):
+            requests.append(request)
+            if not scripted_responses:
+                raise AssertionError('unexpected extra model request')
+            return httpx.Response(200, json=scripted_responses.pop(0))
 
         exporter = InMemorySpanExporter()
         lf = Langfuse(public_key='pk-lf-test', secret_key='sk-lf-test',
                       tracing_enabled=True, span_exporter=exporter)
+        http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle_request))
+        openai_client = AsyncOpenAI(
+            api_key='sk-test', base_url='https://mock.openrouter.test/v1',
+            http_client=http_client)
+        model = OpenAIChatCompletionsModel(
+            model='test/provider-model', openai_client=openai_client)
         set_tracing_disabled(False)
         observability._reset_for_tests()
 
@@ -1424,6 +1491,7 @@ class TestObservability(unittest.TestCase):
             OpenAIAgentsInstrumentor().uninstrument()
             observability._reset_for_tests()
             set_tracing_disabled(True)  # leave the process quiet again
+            asyncio.run(openai_client.close())
             lf.shutdown()
         self.addCleanup(cleanup)
 
@@ -1433,9 +1501,10 @@ class TestObservability(unittest.TestCase):
         ledger = Ledger()
         res = run_instruction(
             'solve 2x + 3 = 7 for x',
-            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]),
-            ledger=ledger)
+            model=model, ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(len(requests), 3)
+        self.assertFalse(scripted_responses)
         lf.flush()
 
         spans = exporter.get_finished_spans()
@@ -1453,6 +1522,25 @@ class TestObservability(unittest.TestCase):
         # the trusted-primitive calls appear as nested tool spans
         kinds = {s.attributes.get('openinference.span.kind') for s in spans}
         self.assertIn('TOOL', kinds)
+        llm_spans = [
+            s for s in spans
+            if s.attributes.get('openinference.span.kind') == 'LLM'
+        ]
+        self.assertEqual(len(llm_spans), 3)
+        for llm_span in llm_spans:
+            llm_attrs = dict(llm_span.attributes)
+            self.assertEqual(llm_attrs.get('llm.model_name'),
+                             'test/provider-model')
+            self.assertTrue(llm_attrs.get('input.value'))
+            self.assertTrue(llm_attrs.get('output.value'))
+            self.assertEqual(llm_attrs.get('llm.token_count.prompt'), 7)
+            self.assertEqual(llm_attrs.get('llm.token_count.completion'), 3)
+        self.assertIn('solve 2x + 3 = 7 for x',
+                      llm_spans[0].attributes['input.value'])
+        self.assertIn('run_tactic',
+                      llm_spans[0].attributes['output.value'])
+        self.assertIn('Subtracted 3 from both sides.',
+                      llm_spans[-1].attributes['output.value'])
         # tracing is observability only: the ledger is exactly what it would
         # be without it
         self.assertEqual([s['op'] for s in res['steps']],
