@@ -1004,7 +1004,7 @@ class TestSystemAssemble(unittest.TestCase):
             r'A = \frac{1}{2}, B = -\frac{1}{2}',
             [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
         self.assertFalse(r['ok'])
-        self.assertIn('just repeats the recorded value', r['error'])
+        self.assertIn('states the value of every unknown', r['error'])
         flipped = Equations.system_assemble(
             r'\frac{1}{2} = A', [r'A = \frac{1}{2}'])
         self.assertFalse(flipped['ok'])
@@ -1012,6 +1012,32 @@ class TestSystemAssemble(unittest.TestCase):
         defining = Equations.system_assemble('2A = 1', [r'A = \frac{1}{2}'])
         self.assertTrue(defining['ok'], defining.get('error'))
         self.assertEqual(defining['check']['status'], 'agree')
+
+    def test_a_respelled_answer_is_still_the_answer(self):
+        # the live int1 run: target in factored spelling, recorded values
+        # expanded, so a structural comparison saw two different objects
+        # while the substitution check passed trivially
+        target = (r'A = \frac{-b}{(n-1)(a^2-b^2)}, '
+                  r'B = \frac{a(2n-3)}{(n-1)(a^2-b^2)}, '
+                  r'C = \frac{-(n-2)}{(n-1)(a^2-b^2)}')
+        values = [r'A = \frac {-b} {a^{2}n-b^{2}n-a^{2}+b^{2}}',
+                  r'B = \frac {2an-3a} {a^{2}n-b^{2}n-a^{2}+b^{2}}',
+                  r'C = \frac {-n+2} {a^{2}n-b^{2}n-a^{2}+b^{2}}']
+        self.assertFalse(P.same_expression(
+            r'\frac{-b}{(n-1)(a^2-b^2)}', values[0].split('=', 1)[1]))
+        r = Equations.system_assemble(target, values)
+        self.assertFalse(r['ok'])
+        self.assertIn('every unknown (A, B, C)', r['error'])
+
+    def test_a_target_pinning_only_some_unknowns_is_real_evidence(self):
+        # a system genuinely containing the row `x = 3` still constrains y
+        r = Equations.system_assemble('x = 3, x+y = 5', ['x=3', 'y=2'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x=3,y=2')
+        self.assertEqual(r['check']['status'], 'agree')
+        constraint = Equations.system_assemble(
+            'A = 2B, A+B = 3', ['A=2', 'B=1'])
+        self.assertTrue(constraint['ok'], constraint.get('error'))
 
     def test_unknown_must_be_one_the_target_names(self):
         r = Equations.system_assemble(
@@ -1050,6 +1076,76 @@ class TestSystemAssemble(unittest.TestCase):
                                  {'unknown': 'y', 'value': '1'}])
         with self.assertRaises(P.PrimitiveError):
             Equations.assignment_pairs([])
+
+
+class TestLedgerPremises(unittest.TestCase):
+    """Inputs a session states rather than derives — where checking stops."""
+
+    def _washed(self):
+        # the live int1 shape: typed answers laundered into green steps by
+        # multiplying by 1 and canonicalizing
+        ledger = Ledger()
+        for equation in (r'A = -\frac{b}{(n-1)(a^2-b^2)}',
+                         r'B = \frac{a(2n-3)}{(n-1)(a^2-b^2)}'):
+            applied = ledger.record(
+                Core.apply_both_sides(equation, '*', '1'))
+            ledger.record(Core.expand(applied['result']))
+        return ledger
+
+    def test_a_derivation_reports_its_starting_point(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        self.assertEqual(ledger.premises(),
+                         [{'step': 's1', 'input': '(x+1)^2'}])
+
+    def test_a_continued_chain_adds_no_premise(self):
+        ledger = Ledger()
+        first = ledger.record(Core.apply_both_sides('2x+3 = 7', '-', '3'))
+        ledger.record(Core.expand(first['result']))
+        self.assertEqual([p['input'] for p in ledger.premises()],
+                         ['2x+3 = 7'])
+
+    def test_typed_assertions_surface_as_premises(self):
+        ledger = self._washed()
+        self.assertEqual([p['step'] for p in ledger.premises()],
+                         ['s1', 's3'])
+        self.assertIn('premises (stated, not derived here)', ledger.render())
+        self.assertIn(r'A = -\frac{b}{(n-1)(a^2-b^2)}', ledger.render())
+        self.assertIn('Rests on 2 stated premises',
+                      ledger.render_markdown())
+
+    def test_recorded_parts_of_a_result_are_derived_not_stated(self):
+        # linearity splits one object into pieces it records; working on a
+        # piece continues from recorded work even though no whole result
+        # equals that input
+        ledger = Ledger()
+        linearity = Integration.integrate_linearity(
+            r'\int (x^2 + x) \, dx', 'x')
+        ledger.record(linearity)
+        for piece in linearity['integrals']:
+            ledger.record(Integration.integrate_power_rule(piece, 'x'))
+        self.assertEqual([p['input'] for p in ledger.premises()],
+                         [r'\int (x^2 + x) \, dx'])
+
+    def test_the_same_given_is_stated_once(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute('(x+1)^2', 'x', '1'))
+        self.assertEqual(len(ledger.premises()), 1)
+
+    def test_premises_can_be_restricted_to_the_selected_spine(self):
+        ledger = self._washed()
+        self.assertEqual([p['step'] for p in ledger.premises(['s3', 's4'])],
+                         ['s3'])
+        topology = ledger.presentation_topology()
+        self.assertEqual([p['step'] for p in topology['spine_premises']],
+                         ['s1', 's3'])
+
+    def test_query_only_and_empty_ledgers_have_no_premises(self):
+        self.assertEqual(Ledger().premises(), [])
+        ledger = Ledger()
+        ledger.record_comment('a note is not a premise')
+        self.assertEqual(ledger.premises(), [])
 
 
 class TestParsingEdges(unittest.TestCase):

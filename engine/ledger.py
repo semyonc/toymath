@@ -178,6 +178,57 @@ def _relation_holds(statement):
     return rec.get('ok') and rec.get('holds') is True
 
 
+def _all_bracket_normal_form_equal(left, right):
+    """Structural sameness used only to dedupe presentation lists."""
+    import primitives
+    try:
+        return (primitives._all_bracket_normal_form(left)
+                == primitives._all_bracket_normal_form(right))
+    except Exception:
+        return False
+
+
+def _recorded_parts(step):
+    """Values a step recorded as named parts of its own result.
+
+    Linearity-style steps split one object into pieces and persist them as
+    `terms`; a later step working on a piece continued from recorded work
+    even though no whole result equals its input.
+    """
+    parts = []
+    for term in step.get('terms') or []:
+        if isinstance(term, str):
+            parts.append(term)
+        elif isinstance(term, dict):
+            parts.extend(value for key, value in term.items()
+                         if key != 'sign' and isinstance(value, str))
+    return parts
+
+
+def _is_derived(step, earlier):
+    """True when a step's input came from recorded work, not from typing.
+
+    Everything else is a PREMISE: an input this ledger never produced. That
+    is not an error — a derivation has to start somewhere, and a stated
+    given is legitimate — but it is the boundary of what the session
+    checked, so presentation must be able to name it.
+    """
+    current = step.get('input')
+    if current is None:
+        return True
+    if step.get('continues') is True:
+        return True
+    for previous in earlier:
+        result = previous.get('result')
+        if result is not None and (result == current
+                                   or _chain_links(result, current)):
+            return True
+        for part in _recorded_parts(previous):
+            if part == current or _chain_links(part, current):
+                return True
+    return False
+
+
 def _source_ids(step):
     """Flatten provenance ids from an assembly-style sources mapping."""
     out = []
@@ -945,6 +996,31 @@ class Ledger(object):
             edges.append(edge)
         return edges
 
+    def premises(self, step_ids=None):
+        """Inputs this session never derived, in ledger order.
+
+        A derivation must start somewhere, so a premise is not a fault — but
+        it is exactly where the checking stops, and a reader who cannot see
+        the premises cannot tell a derivation from a restatement. Returns
+        `[{step, input}]`, deduplicated by expression: the same given used
+        twice was stated once.
+        """
+        wanted = None if step_ids is None else set(step_ids)
+        premises = []
+        for index, step in enumerate(self.steps):
+            if wanted is not None and step['id'] not in wanted:
+                continue
+            if step.get('result') is None or _is_derived(step,
+                                                         self.steps[:index]):
+                continue
+            current = step['input']
+            if any(seen['input'] == current
+                   or _all_bracket_normal_form_equal(seen['input'], current)
+                   for seen in premises):
+                continue
+            premises.append({'step': step['id'], 'input': current})
+        return premises
+
     def presentation_topology(self, final_provenance=None, marker_ids=None):
         """Derive the selected spine and annotation-only abandoned paths.
 
@@ -1097,6 +1173,7 @@ class Ledger(object):
                 if assumption not in spine_assumptions:
                     spine_assumptions.append(assumption)
         return {
+            'spine_premises': self.premises(spine_ids or None),
             'selection': selection.get('id') if selection else None,
             'selected_goal': selected_goal,
             'edges': edges,
@@ -1162,6 +1239,19 @@ class Ledger(object):
                     f'{source_note} — {status}:** '
                     f'${_display_latex(selected["result"])}$')
                 lines.append('')
+
+        final_premises = (topology['spine_premises'] if topology['spine']
+                          else self.premises())
+        if final_premises:
+            # where the checking starts. A reader who cannot see this cannot
+            # tell a derivation from a restatement of its own answer.
+            stated = ', '.join(f'${_display_latex(p["input"])}$'
+                               for p in final_premises)
+            lines.append(
+                f'*Rests on {len(final_premises)} stated premise'
+                f'{"s" if len(final_premises) != 1 else ""}, not derived '
+                f'here: {stated}.*')
+            lines.append('')
 
         final_assumptions = (topology['spine_assumptions']
                              if topology['spine'] else self.assumptions)
@@ -1380,6 +1470,11 @@ class Ledger(object):
                     + ' from ' + ', '.join(src.get('assignments', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
+        visible_premises = (topology['spine_premises'] if topology['spine']
+                            else self.premises())
+        if visible_premises:
+            lines.append('premises (stated, not derived here): '
+                         + '; '.join(p['input'] for p in visible_premises))
         visible_assumptions = (topology['spine_assumptions']
                                if topology['spine'] else self.assumptions)
         if visible_assumptions:

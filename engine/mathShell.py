@@ -574,6 +574,19 @@ class MathShell(object):
                      if res.get('summary_unverified') else '')
             display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
                          f'{_html.escape(res["summary"])}</em></div>'))
+        if res.get('premises'):
+            # where this run's checking starts: inputs it stated rather than
+            # derived. Without them a laundered assertion is indistinguishable
+            # from a derivation.
+            import primitives
+            stated = ', '.join(
+                f'\\({primitives.display_latex(p["input"])}\\)'
+                for p in res['premises'])
+            count = len(res['premises'])
+            display(HTML(
+                f'<div style="color:#888">rests on {count} stated '
+                f'premise{"s" if count != 1 else ""}, not derived here: '
+                f'{stated}</div>'))
         if res['assumptions']:
             # alternative case hypotheses are listed apart: they hold one
             # at a time, never together

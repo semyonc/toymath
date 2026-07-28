@@ -976,6 +976,36 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
 
+    def test_a_run_reports_the_premises_it_stated(self):
+        # the live int1 failure: typed coefficients laundered into green
+        # steps by multiplying by 1. Every step is honestly checked; what
+        # was missing is that the answer rests on nothing but assertions.
+        script = [
+            [tool_call('apply', {'equation': 'A = \\frac{1}{2}',
+                                 'op': '*', 'arg': '1'}, 'c1')],
+            [tool_call('expand', {
+                'expr': 'A \\cdot \\left(1\\right) = '
+                        '\\frac {1} {2} \\cdot \\left(1\\right)'}, 'c2')],
+            [message('A determined')],
+        ]
+        res = run_instruction('find A', model=ScriptedModel(script))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual([p['input'] for p in res['premises']],
+                         ['A = \\frac{1}{2}'])
+
+    def test_premises_are_scoped_to_the_run_not_the_shared_ledger(self):
+        ledger = Ledger()
+        run_instruction('expand it', ledger=ledger, model=ScriptedModel(
+            [[tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+             [message('done')]]))
+        second = run_instruction('expand another', ledger=ledger,
+                                 model=ScriptedModel(
+            [[tool_call('expand', {'expr': '(y+1)^2'}, 'c2')],
+             [message('done')]]))
+        # the earlier cell's given belongs to that cell
+        self.assertEqual([p['input'] for p in second['premises']],
+                         ['(y+1)^2'])
+
     def test_set_result_admission_mirrors_chain_goal(self):
         # admission mirrors the composite closure gate (live: the agent
         # retyped hand-simplified algebra as its final expand input, the

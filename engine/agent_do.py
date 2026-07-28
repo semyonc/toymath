@@ -728,8 +728,10 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     model_name=None, providers=(), chain_goal=None):
     """Run one do! instruction through the agent.
 
-    Returns {ok, steps, assumptions, final_result, final_provenance,
-    branch_topology, abandoned_paths, summary[, error]}.
+    Returns {ok, steps, assumptions, premises, final_result,
+    final_provenance, branch_topology, abandoned_paths, summary[, error]}.
+    `premises` are the inputs this run stated rather than derived — the
+    boundary of what it checked.
     `steps` are the ledger steps this run added; `final_result` is the
     cell's chainable value. Figures reach
     `on_plot(caption, [{kind, data, height?}, ...])` where kind is
@@ -881,9 +883,16 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         final_assumptions = topology['spine_assumptions']
     else:
         final_assumptions = list(session.ledger.assumptions)
+    # premises this run STATED rather than derived: the boundary of what it
+    # checked. Restricted to steps this run recorded, so a shared notebook
+    # ledger does not re-attribute an earlier cell's givens to this one.
+    run_ids = [s['id'] for s in steps if s.get('result') is not None]
+    spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
+    final_premises = session.ledger.premises(spine or run_ids or None)
     out = {'ok': 'err' not in holder, 'steps': steps,
            'claims': session.new_claims(),
            'assumptions': final_assumptions,
+           'premises': final_premises,
            'final_result': final, 'final_provenance': provenance,
            'branch_topology': topology,
            'abandoned_paths': topology['abandoned_paths'],

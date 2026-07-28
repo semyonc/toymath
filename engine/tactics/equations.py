@@ -380,26 +380,34 @@ def system_assemble(target, assignments):
                 f'{pair["unknown"]!r} does not occur in {target!r}; every '
                 'assembled unknown must be one the target names')
 
-    # A target that already states an unknown's value verifies nothing: the
-    # substitution turns it into "value = value". Live agents reach for the
-    # answer here, so the refusal names what the target is for.
+    # A target that hands over every value verifies nothing: substitution
+    # turns each member into "value = value". The test is SYNTACTIC — a
+    # member reading "unknown = <no unknowns>" states the answer whatever
+    # spelling it uses — because comparing the member against the recorded
+    # value misses a respelling, which is exactly how a live run slipped an
+    # answer-as-target past the first version of this guard. A target that
+    # pins only SOME unknowns is still real evidence about the others (a
+    # system genuinely containing the row `x = 3`), so only a target that
+    # determines all of them is refused.
+    named = {pair['unknown'] for pair in pairs}
+    handed = {}
     for relation in relations:
         rsym, rnotation = parse_latex(relation)
         comp = rnotation.getf(rsym, Notation.COMP)
-        left = write_latex(comp.args[0], rnotation)
-        right = write_latex(comp.args[1], rnotation)
-        for pair in pairs:
-            if ((same_expression(left, pair['unknown'])
-                 and same_expression(right, pair['value']))
-                    or (same_expression(right, pair['unknown'])
-                        and same_expression(left, pair['value']))):
-                return _error(
-                    'system_assemble', args,
-                    f'{relation!r} just repeats the recorded value of '
-                    f'{pair["unknown"]!r}, so nothing would be verified; '
-                    'the target is the equality the values must SATISFY — '
-                    'the ansatz being matched, or the system being solved — '
-                    'never the answer itself')
+        for side, other in ((comp.args[0], comp.args[1]),
+                            (comp.args[1], comp.args[0])):
+            if (isinstance(side, Symbol) and rnotation.get(side) is None
+                    and side.name in named
+                    and not (free_symbols(other, rnotation) & named)):
+                handed[side.name] = relation
+    if len(handed) == len(pairs):
+        return _error(
+            'system_assemble', args,
+            f'the target already states the value of every unknown '
+            f'({", ".join(sorted(handed))}), so nothing would be verified; '
+            'the target is the equality the values must SATISFY — the '
+            'ansatz being matched, or the system being solved — never the '
+            'answer itself')
 
     for relation in relations:
         current = relation
