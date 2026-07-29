@@ -386,6 +386,96 @@ class TestAtomPowers(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestPoweredHeadMatching(unittest.TestCase):
+    # gen 58: the atomizer and the oracle already read \sin^2 x and
+    # (\sin x)^2 as one object; the structural matcher used to see two.
+    # \sin^2 x parses as P_LIST[INDEX(\sin, 2), x], so a pattern a^2 bound
+    # a to the bare function name and stranded the argument.
+
+    def test_powered_head_spelling_matches(self):
+        r = Core.rewrite('\\sin^2 x - \\cos^2 x', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin x+ \\cos x)( \\sin x- \\cos x)')
+
+    def test_both_spellings_give_the_same_result(self):
+        for lemma, powered, parens in (
+                ('diff_squares', '\\sin^2 x - \\cos^2 x',
+                 '(\\sin x)^2 - (\\cos x)^2'),
+                ('diff_cubes', '\\tan^3 x - 8', '(\\tan x)^3 - 8'),
+                ('sum_cubes', '\\sin^3 x + \\cos^3 x',
+                 '(\\sin x)^3 + (\\cos x)^3')):
+            a, b = Core.rewrite(powered, lemma), Core.rewrite(parens, lemma)
+            self.assertTrue(a['ok'], lemma)
+            self.assertEqual(a['result'], b['result'], lemma)
+
+    def test_compound_argument_matches(self):
+        r = Core.rewrite('\\sin^2 (2x) - \\cos^2 (2x)', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_expand_output_is_matchable(self):
+        # expand normalizes into the powered-head spelling, so its own
+        # output has to be consumable by rewrite
+        e = Core.expand('(\\sin x)^2 - (\\cos x)^2')
+        self.assertEqual(e['result'], '\\sin^{2}x- \\cos^{2}x')
+        r = Core.rewrite(e['result'], 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_inverse_power_is_not_normalized(self):
+        # \sin^{-1} must keep its own reading: no a^2 - b^2 match here
+        r = Core.rewrite('\\sin^{-1} x - \\cos^2 x', 'diff_squares')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_plain_variable_rewrites_unchanged(self):
+        self.assertEqual(Core.rewrite('x^2 - y^2', 'diff_squares')['result'],
+                         '(x+y)(x-y)')
+        self.assertEqual(Core.rewrite('x^2 - 9', 'diff_squares')['result'],
+                         '(x+3)(x-3)')
+
+
+class TestCollectNamedAtom(unittest.TestCase):
+    # gen 58: the agent may name an opaque atom (\cos x) as the collection
+    # variable; it resolves to the atom the atomizer already minted.
+
+    def test_collect_by_named_atom(self):
+        r = Core.collect('A\\cos^2 x + B\\cos x + C', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], 'A \\cos^{2}x+B \\cos x+C')
+
+    def test_coefficients_actually_combine(self):
+        r = Core.collect('A\\cos x + B\\cos^2 x + D\\cos x', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], 'B \\cos^{2}x+(A+D) \\cos x')
+
+    def test_either_spelling_names_the_same_atom(self):
+        a = Core.collect('A\\cos^2 x + B\\cos x', '\\cos x')
+        b = Core.collect('A(\\cos x)^2 + B(\\cos x)', '\\cos x')
+        self.assertEqual(a['result'], b['result'])
+
+    def test_relation_sides_collect_by_atom(self):
+        r = Core.collect('A\\cos^2 x + B\\cos x = 3\\cos x + 1', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('=', r['result'])
+
+    def test_absent_atom_is_refused(self):
+        # lookup only: naming an atom the expression lacks must not mint one
+        r = Core.collect('A\\cos^2 x + B\\cos x', '\\tan x')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_atom_is_still_usable_as_a_coefficient(self):
+        r = Core.collect('y\\cos^2 x + 2y\\cos x + y', 'y')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\cos^{2}x+2 \\cos x+1)y')
+
+
 class TestDifferentiate(unittest.TestCase):
     def check(self, expr, var='x'):
         r = Differentiation.differentiate(expr, var)

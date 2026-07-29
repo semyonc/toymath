@@ -908,20 +908,25 @@ class _AtomStore(object):
         self.by_key = {}   # normal-form key -> atom name
         self.exprs = {}    # atom name -> (sym, notation)
 
-    def atom(self, sym, notation):
+    def _identity(self, sym, notation):
+        """(key, canonical_sym, canonical_notation) for a subexpression.
+        The key is the atom's identity: transparent grouping is stripped,
+        so \\sin(x) and \\sin x share one atom."""
         canonical_n = Notation()
         canonical_s = _canonicalize_atom_payload(
             sym, notation, canonical_n)
         latex = _write_std(canonical_s, canonical_n)
         try:
-            # atom identity ignores all transparent grouping, so \sin(x)
-            # and \sin x share one atom
             s2, n2 = parse_latex(latex)
             out = Notation()
             key = _write_std(
                 _GroupStripper(n2, out, all_brackets=True)(s2), out)
         except PrimitiveError:
             key = latex
+        return key, canonical_s, canonical_n
+
+    def atom(self, sym, notation):
+        key, canonical_s, canonical_n = self._identity(sym, notation)
         name = self.by_key.get(key)
         if name is None:
             # 'zz#' prefix: sorts after single-letter variables, so
@@ -930,6 +935,12 @@ class _AtomStore(object):
             self.by_key[key] = name
             self.exprs[name] = (canonical_s, canonical_n)
         return Symbol(name)
+
+    def find(self, sym, notation):
+        """Atom name already minted for this subexpression, or None.
+        Lookup only — never mints one, so a caller naming an atom that the
+        expression does not contain gets a refusal, not a fresh variable."""
+        return self.by_key.get(self._identity(sym, notation)[0])
 
     def mapping(self):
         return {Symbol(name): se for name, se in self.exprs.items()}
@@ -1196,6 +1207,80 @@ def _plist_head_kind(a, notation):
     if _func_power(a, notation) is not None:
         return 'func'
     return None
+
+
+class _PoweredHeadNormalizer(Replicator):
+    """Rewrite \\sin^{n} x factors into the ( \\sin x)^{n} shape they are the
+    standard spelling of, so structural pattern matching sees one object
+    where the atomizer and the numeric oracle already see one. Only a plain
+    positive integer n >= 2 normalizes: \\sin^{-1} (the arcsin reading) and
+    non-integer powers keep their own shape, exactly as in the atomizer."""
+
+    def __init__(self, notation, output_notation):
+        Replicator.__init__(self, notation, output_notation)
+        self.changed = False
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        if any(isinstance(a, Symbol) and a.name in Notation.styles
+               for a in args):
+            # spacing factors would be dropped by the span scan; a product
+            # carrying them is left exactly as written
+            return Replicator.enter_plist(self, sym, f)
+
+        def is_head(a):
+            if (isinstance(a, Symbol) and self.notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                return True
+            fp = _func_power(a, self.notation)
+            return fp is not None and fp[0] in FUNC_NAMES
+
+        out_args, i = [], 0
+        while i < len(args):
+            a = args[i]
+            fp = _func_power(a, self.notation)
+            n = None
+            if fp is not None and fp[0] in FUNC_NAMES:
+                try:
+                    n = _index_power(fp[1], self.notation)
+                except (NotInFragment, PrimitiveError):
+                    n = None
+            span = None
+            if n is not None and n >= 2:
+                span, j = _func_arg_span(args, i, self.notation, is_head)
+            if span:
+                base = self.output_notation.setf(
+                    Notation.P_LIST,
+                    [Symbol(fp[0])] + [self.enter_expr(s) for s in span])
+                group = self.output_notation.setf(
+                    Notation.GROUP, (base,), br='()')
+                out_args.append(self.output_notation.setf(
+                    Notation.INDEX,
+                    (group, (None, None, IntegerValue(n), None))))
+                self.changed = True
+                i = j
+                continue
+            out_args.append(self.enter_expr(a))
+            i += 1
+        if len(out_args) == 1:
+            return out_args[0]
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, out_args, **f.props))
+
+
+def _normalize_powered_heads(sym, notation):
+    """(sym, notation) with every \\sin^{n}-style factor respelled as a
+    power of the application. Returns the input unchanged when nothing
+    matched, so untouched expressions keep their exact graph."""
+    out_n = Notation()
+    walker = _PoweredHeadNormalizer(notation, out_n)
+    try:
+        new_sym = walker(sym)
+    except (PrimitiveError, NotInFragment):
+        return sym, notation
+    if not walker.changed:
+        return sym, notation
+    return new_sym, out_n
 
 
 def _powered_func_payload(sym, notation):
@@ -1555,8 +1640,13 @@ def _collect_side(side, notation, var, require_var):
     except NotInFragment:
         store = _AtomStore()
         rf = _atomized_ratfunc(side, notation, store)
+    if store is not None and var not in rf.variables():
+        # the agent may name an opaque atom (\cos x) rather than a plain
+        # variable; resolve it to the atom the atomizer already minted, so
+        # grouping by powers of \cos x works in either spelling
+        var = _atom_variable(var, store) or var
     if require_var and var not in rf.variables():
-        note = (' (opaque subexpressions are not entered)'
+        note = (' (no such variable or opaque subexpression)'
                 if store is not None else '')
         raise PrimitiveError(
             f'variable {var!r} does not occur in expression{note}')
@@ -1572,6 +1662,16 @@ def _collect_side(side, notation, var, require_var):
     except PrimitiveError as e:
         raise PrimitiveError(f'internal: unparseable result: {e}')
     return result
+
+
+def _atom_variable(var, store):
+    """Internal atom name for a LaTeX subexpression the caller named
+    (\\cos x, \\sin^2 x is NOT one — that is the atom squared), or None."""
+    try:
+        v_sym, v_n = parse_latex(var)
+    except PrimitiveError:
+        return None
+    return store.find(v_sym, v_n)
 
 
 def _collect_rf_sym(rf, var, notation):
@@ -1910,6 +2010,11 @@ def rewrite(expr, lemma_name, direction='forward', at=None):
         sym, notation = parse_latex(expr)
     except PrimitiveError as e:
         return _error('rewrite', args, str(e))
+    # \sin^2 x binds the power to the bare function name, so a pattern like
+    # a^2 - b^2 would bind a to \sin and strand the argument. Match against
+    # the ( \sin x)^2 spelling instead; the writer prints the standard form
+    # back, and the oracle checks input against result either way.
+    sym, notation = _normalize_powered_heads(sym, notation)
 
     def stage_positions(pat_src, pat_params, powermap, stage, seen):
         """Matches of one pattern in position order: root first, then

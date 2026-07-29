@@ -433,7 +433,8 @@ TACTICS = (
                'canonicalize rational algebra and combine opaque atoms',
                core.expand, (E,)),
     TacticSpec('collect', 'collect', 'core',
-               'group an expression by powers of a variable',
+               'group an expression by powers of a variable '
+               'or of a function application like \\cos x',
                core.collect, (E, V)),
     TacticSpec('evaluate', 'evaluate', 'core',
                'evaluate closed arithmetic or a closed relation',
