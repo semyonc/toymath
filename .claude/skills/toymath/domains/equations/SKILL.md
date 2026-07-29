@@ -21,6 +21,32 @@ These moves do not choose an elimination strategy or combine rows. Keep that
 strategy explicit: isolate a value, substitute it through the system, then use
 ordinary algebra tactics on the resulting relation as needed.
 
+## Matching an ansatz
+
+When an ansatz has to hold for every value of a variable — a partial-fraction
+decomposition, an undetermined-coefficient guess — do not try to read the
+coefficients off by eye and propose the whole decomposition at once. Clear the
+denominators first so both sides are polynomials, then equate like powers:
+
+```text
+match_coefficients EXPR VAR
+
+# from \frac{x^2}{(1-x^2)^3}, having cleared denominators:
+match_coefficients "x^2 = A(x+1) + B(x-1)" x     ->  1 = A+B, 0 = A-B
+```
+
+It is not a solver. You say which variable to match in; it reports one
+equation per power, and the values still come from your own later steps —
+feed that system to `system_assemble` once each unknown has a recorded value.
+The coefficients are recovered a second time by evaluation alone, so a
+misread coefficient is refused rather than recorded.
+
+A degree that cannot balance shows up honestly as an impossible equation such
+as `1 = 0`: that means the ansatz itself is wrong, so fix the ansatz rather
+than the arithmetic. Guessing coefficients and testing them one at a time
+with `integrate_rewrite` or `expand` is the slow path — it burns the run's
+turns and records nothing when it fails.
+
 ## Answers with several unknowns
 
 A task like "find A, B and C" — matching an ansatz, or solving a system — ends

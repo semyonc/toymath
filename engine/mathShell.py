@@ -562,6 +562,15 @@ class MathShell(object):
             return
         if not res['ok']:
             self._do_error(res.get('error', 'agent failed'))
+        elif res.get('turn_limit_reached'):
+            # finished on its last turn: the result is designated and
+            # verified, but the run had no room left. Say so - a derivation
+            # that only just fit is worth knowing about before the next one.
+            display(HTML(
+                '<div style="color:#a60">do! note: the turn limit was '
+                'reached; the result below was committed and verified on '
+                'the final turn, so only the closing narrative is '
+                'missing.</div>'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
         chain = self.render_do_chain(

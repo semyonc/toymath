@@ -900,8 +900,23 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     if 'err' in holder:
         e = holder['err']
         if isinstance(e, MaxTurnsExceeded):
-            out['error'] = (f'stopped after {max_turns} turns - partial '
-                            f'derivation shown')
+            out['turn_limit_reached'] = True
+            # a run whose LAST turn committed a verified designated result
+            # is finished, not failed: only the closing prose was lost. The
+            # last-step fallback does not count - nothing there says the
+            # value answers the instruction - and an open claim or open
+            # outcome means the derivation really is unfinished.
+            open_claims = any((c.get('verdict') or 'open') == 'open'
+                              for c in out['claims'])
+            if (session.result_override is not None
+                    and (provenance or {}).get('status') == 'verified'
+                    and not open_claims
+                    and session.open_selection is None):
+                out['ok'] = True
+                out['summary'] = None
+            else:
+                out['error'] = (f'stopped after {max_turns} turns - partial '
+                                f'derivation shown')
         else:
             out['error'] = f'{type(e).__name__}: {e}'
     else:

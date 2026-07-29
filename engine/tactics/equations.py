@@ -11,13 +11,13 @@ import random
 from fractions import Fraction
 
 from notation import Notation, Symbol
-from polyrat import NotInFragment, to_ratfunc
+from polyrat import NotInFragment, Poly, to_ratfunc, poly_to_notation
 from primitives import (
     PrimitiveError, EvalError, parse_latex, write_latex, numeric_eval,
     free_symbols, same_expression, _num_agree, _sample_point,
     _result, _error,
 )
-from tactics.core import equal_exprs, substitute
+from tactics.core import equal_exprs, substitute, _comp_split
 
 
 def _plain_variable(var):
@@ -668,3 +668,157 @@ def points_assemble(expr, var, roots, values):
                   extra={'points': associations})
     rec['check'] = _points_check(expr, var_name, pairs)
     return rec
+
+
+def _coefficient_buckets(poly, var):
+    """{power of var: coefficient Poly in the remaining symbols}."""
+    buckets = {}
+    for mono, coeff in poly.terms.items():
+        d = dict(mono)
+        k = d.pop(var, 0)
+        buckets.setdefault(k, {})[tuple(sorted(d.items()))] = coeff
+    return {k: Poly(v) for k, v in buckets.items()}
+
+
+def _vandermonde_solve(xs, ys):
+    """Coefficients c with sum_j c[j] * x^j = y, by Gaussian elimination
+    with partial pivoting. Deliberately hand-rolled floating point: this is
+    the oracle leg's reading of the polynomial and must share nothing with
+    polyrat's symbolic monomial arithmetic."""
+    n = len(xs)
+    m = [[xs[i] ** j for j in range(n)] + [ys[i]] for i in range(n)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[piv][col]) < 1e-12:
+            return None
+        m[col], m[piv] = m[piv], m[col]
+        for r in range(n):
+            if r == col:
+                continue
+            f = m[r][col] / m[col][col]
+            for c in range(col, n + 1):
+                m[r][c] -= f * m[col][c]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+def _numeric_coefficients(sym, notation, var, env, degree):
+    """Coefficients of `sym` as a polynomial in `var`, recovered purely by
+    evaluation — an independent reading of the same object."""
+    xs, ys = [], []
+    for i in range(degree + 1):
+        xv = 0.5 + 0.37 * i
+        point = dict(env)
+        point[var] = xv
+        try:
+            val = numeric_eval(sym, notation, point)
+        except (EvalError, PrimitiveError, ZeroDivisionError,
+                ValueError, OverflowError):
+            return None
+        if val is None or isinstance(val, complex):
+            return None
+        xs.append(xv)
+        ys.append(float(val))
+    return _vandermonde_solve(xs, ys)
+
+
+def match_coefficients(expr, var):
+    """Equate like powers of `var` on the two sides of a polynomial
+    identity and record the resulting system of coefficient equations.
+
+    NOT a solver: the agent states which variable to match in, and the
+    values still come from its own later steps. The step's content is that
+    these ARE the coefficients — that equating them is equivalent to the
+    identity is a theorem about polynomials, not a per-instance claim."""
+    args = {'expr': expr, 'var': var}
+    try:
+        sym, notation = parse_latex(expr)
+        split = _comp_split(sym, notation)
+    except PrimitiveError as e:
+        return _error('match_coefficients', args, str(e))
+    if split is None:
+        return _error('match_coefficients', args,
+                      'expected an equality between two polynomials, '
+                      'for example "A x + B = 2x - 1"')
+    lhs, rhs, rel = split
+    if rel != '=':
+        return _error('match_coefficients', args,
+                      f'coefficients can only be matched across "=", '
+                      f'not {rel!r}')
+    try:
+        polys = []
+        for side in (lhs, rhs):
+            rf = to_ratfunc(side, notation)
+            if not rf.is_poly():
+                raise NotInFragment('side is not a polynomial')
+            polys.append(rf.num)
+    except NotInFragment as e:
+        return _error('match_coefficients', args,
+                      f'both sides must be polynomials in {var}: {e}')
+    except ZeroDivisionError:
+        return _error('match_coefficients', args,
+                      'expression contains division by zero')
+    left, right = (_coefficient_buckets(p, var) for p in polys)
+    if not any(var in p.variables() for p in polys):
+        return _error('match_coefficients', args,
+                      f'{var!r} does not occur on either side')
+    equations, out_n = [], Notation()
+    for k in sorted(set(left) | set(right), reverse=True):
+        a = left.get(k, Poly.const(0))
+        b = right.get(k, Poly.const(0))
+        if a == b:
+            continue  # already identical: it states nothing
+        equations.append((k,
+                          write_latex(poly_to_notation(a, out_n), out_n),
+                          write_latex(poly_to_notation(b, out_n), out_n)))
+    if not equations:
+        return _error('match_coefficients', args,
+                      'the two sides already have identical coefficients; '
+                      'there is nothing to equate')
+    result = ', '.join(f'{a} = {b}' for _, a, b in equations)
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('match_coefficients', args,
+                      f'internal: unparseable result: {e}')
+    rec = _result('match_coefficients', args, expr, result,
+                  extra={'matched_in': var,
+                         'powers': [k for k, _, _ in equations]})
+    rec['check'] = _check_coefficients(lhs, rhs, notation, var,
+                                       left, right, polys)
+    return rec
+
+
+def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
+    """Independent leg: recover each side's coefficients numerically and
+    confirm the symbolic extraction reports the same ones."""
+    others = sorted((free_symbols(lhs, notation)
+                     | free_symbols(rhs, notation)) - {var})
+    degree = max([p.degree(var) or 0 for p in polys] + [0])
+    rng = random.Random(0xC0EFF)
+    samples = 0
+    for _ in range(6):
+        env = _sample_point(others, rng) if others else {}
+        for side_sym, buckets in ((lhs, left), (rhs, right)):
+            got = _numeric_coefficients(side_sym, notation, var, env, degree)
+            if got is None:
+                return {'status': 'skipped',
+                        'reason': 'the oracle could not sample this shape'}
+            for k in range(degree + 1):
+                want = buckets.get(k)
+                try:
+                    if want is None:
+                        expect = 0.0
+                    else:
+                        coef_n = Notation()
+                        expect = float(numeric_eval(
+                            poly_to_notation(want, coef_n), coef_n, env))
+                except (EvalError, PrimitiveError, TypeError, ValueError,
+                        ZeroDivisionError, OverflowError):
+                    return {'status': 'skipped',
+                            'reason': 'coefficient not numerically readable'}
+                if not _num_agree(got[k], expect, 1e-6):
+                    return {'status': 'disagree', 'power': k,
+                            'symbolic': expect, 'numeric': got[k]}
+        samples += 1
+    return {'status': 'agree', 'samples': samples,
+            'method': 'coefficients recovered by evaluation'}

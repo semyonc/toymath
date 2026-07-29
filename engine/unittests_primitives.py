@@ -513,6 +513,71 @@ class TestRewriteAs(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestMatchCoefficients(unittest.TestCase):
+    # gen 61: the producer for system_assemble. A live int! run spent 55% of
+    # its turn budget hand-guessing partial-fraction coefficients, failing
+    # `integrate_rewrite ... verdict: no` nine times, because no move derived
+    # them. This derives them.
+
+    def test_matches_like_powers(self):
+        r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], 'A = 2, B = 0, C = 5')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_result_is_a_relation_system(self):
+        # the gen-35 comma container, which is what system_assemble consumes
+        r = Equations.match_coefficients('A x + B = 3x - 1', 'x')
+        sym, notation = P.parse_latex(r['result'])
+        self.assertIsNotNone(notation.getf(sym, Notation.C_LIST))
+
+    def test_partial_fraction_shape(self):
+        r = Equations.match_coefficients('x = A(x+1) + B(x-1)', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '1 = A+B, 0 = A-B')
+
+    def test_impossible_ansatz_is_reported_not_hidden(self):
+        # a degree that cannot balance must surface as 1 = 0, telling the
+        # agent the ansatz is wrong rather than the arithmetic
+        r = Equations.match_coefficients('x^2 = A(x+1) + B(x-1)', 'x')
+        self.assertTrue(r['ok'])
+        self.assertIn('1 = 0', r['result'])
+
+    def test_symbolic_on_both_sides(self):
+        r = Equations.match_coefficients('A x^2 + B = C x^2 + D', 'x')
+        self.assertEqual(r['result'], 'A = C, B = D')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_check_is_independent_of_the_symbolic_extraction(self):
+        # corrupting the symbolic buckets must be caught by the oracle leg
+        original = Equations._coefficient_buckets
+
+        def corrupt(poly, var):
+            buckets = original(poly, var)
+            if buckets:
+                buckets[sorted(buckets)[0]] = Poly.const(999)
+            return buckets
+
+        Equations._coefficient_buckets = corrupt
+        try:
+            r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5',
+                                             'x')
+            self.assertEqual(r['check']['status'], 'disagree')
+        finally:
+            Equations._coefficient_buckets = original
+
+    def test_refusals(self):
+        for expr, var, msg in (
+                ('A x + B', 'x', 'equality'),
+                ('A x \\lt B x', 'x', 'only be matched'),
+                ('A = B', 'x', 'does not occur'),
+                ('A x + B = A x + B', 'x', 'nothing to equate'),
+                ('\\frac{1}{x} = A', 'x', 'must be polynomials')):
+            r = Equations.match_coefficients(expr, var)
+            self.assertFalse(r['ok'], expr)
+            self.assertIn(msg, r['error'], expr)
+
+
 class TestDomainNarrowingAssumptions(unittest.TestCase):
     # gen 60: cancelling a factor drops the points where it vanished. The
     # canonical leg decides equality as rational functions and the numeric

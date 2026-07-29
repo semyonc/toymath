@@ -1158,7 +1158,35 @@ class TestScriptedAgent(unittest.TestCase):
                               max_turns=2)
         self.assertFalse(res['ok'])
         self.assertIn('turns', res['error'])
+        self.assertTrue(res['turn_limit_reached'])
         self.assertEqual(len(res['steps']), 2)  # partial work is kept
+
+    def test_result_committed_on_the_last_turn_is_not_a_failure(self):
+        # gen 61: a live int! run committed a verified result with its 64th
+        # of 64 turns and was reported as "Max turns exceeded", discarding a
+        # correct answer. Only the closing prose was actually lost.
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'x^{2}+2x+1'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('expand it', model=ScriptedModel(script),
+                              max_turns=2)
+        self.assertTrue(res['ok'])
+        self.assertIsNone(res.get('error'))
+        self.assertTrue(res['turn_limit_reached'])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+
+    def test_unverified_designation_at_the_limit_still_fails(self):
+        # the last-step fallback is not a designation; nothing says that
+        # value answers the instruction, so exhaustion stays a failure
+        script = [[tool_call('expand', {'expr': f'x + {i}x'}, f'c{i}')]
+                  for i in range(10)]
+        res = run_instruction('loop', model=ScriptedModel(script),
+                              max_turns=3)
+        self.assertFalse(res['ok'])
+        self.assertIn('turns', res['error'])
 
     def test_prove_mode_closes_root_claim(self):
         script = [

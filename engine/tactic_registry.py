@@ -478,6 +478,10 @@ TACTICS = (
     TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',
                'find every rational root of a quadratic expression or '
                'equality', equations.quadratic_roots, (E, V)),
+    TacticSpec('match_coefficients', 'match_coefficients', 'equations',
+               'equate like powers of a variable on both sides of a '
+               'polynomial identity, giving the coefficient system',
+               equations.match_coefficients, (E, V)),
     TacticSpec(
         'points_assemble', 'points_assemble', 'equations',
         'assemble recorded roots and their recorded values into the '

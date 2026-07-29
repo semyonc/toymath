@@ -32,8 +32,14 @@ chain that lets the cell accept your final value.
    (u := the expression in x).
 3. Use `integrate_by_parts` for one proposed `u·dv` split. Continue from its
    `remaining_integral` handle.
-4. For algebraic massage or partial fractions, propose the new integrand with
-   `integrate_rewrite`; core equality must confirm it.
+4. For algebraic massage, propose the new integrand with
+   `integrate_rewrite`; core equality must confirm it. For PARTIAL
+   FRACTIONS, do not propose the finished decomposition — a rejected guess
+   records nothing, and guessing the coefficients one sign at a time is how
+   a run exhausts its turns. Load the `equations` skill and derive them:
+   clear the denominators, `match_coefficients` in the variable, solve the
+   small system, then propose the decomposition once with
+   `integrate_rewrite` knowing it will pass.
 5. Split a top-level sum with `integrate_linearity`, solve every returned
    integral independently, pin per-piece constants to zero with core
    `substitute` (C := 0), then call `integrate_assemble` citing the PINNED
