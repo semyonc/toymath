@@ -7,6 +7,7 @@ import re
 from fractions import Fraction
 from itertools import combinations
 
+from frac_utils import is_frac, get_denominator
 from LatexParser import MathParser
 from notation import Notation, Symbol, Func
 from value import Value, IntegerValue, FracValue, FloatValue
@@ -1603,7 +1604,8 @@ def expand(expr):
                           'expression contains division by zero')
         return _checked(_result(
             'expand', args, expr, result,
-            assumptions=fold[3] if fold is not None else None,
+            assumptions=_with_domain_assumption(
+                fold[3] if fold is not None else None, expr, result),
             extra={'opaque_atoms': n_atoms}))
     try:
         out_n = Notation()
@@ -1612,9 +1614,12 @@ def expand(expr):
             result = fold[2](result)
     except PrimitiveError as e:
         return _error('expand', args, str(e))
+    # cancelling a factor drops the points where it vanished; the numeric
+    # legs cannot see that (measure-zero), so state it as an assumption
     return _checked(_result(
         'expand', args, expr, result,
-        assumptions=fold[3] if fold is not None else None))
+        assumptions=_with_domain_assumption(
+            fold[3] if fold is not None else None, expr, result)))
 
 
 def collect(expr, var):
@@ -2005,6 +2010,101 @@ def _lemma_power_variants(src, params):
     return variants
 
 
+def _written_denominators(expr, store):
+    """Every distinct written denominator in the expression as
+    (latex, Poly), plus their product. Deliberately SYNTACTIC: to_ratfunc
+    cancels in its constructor, and what a cancellation excluded is exactly
+    what is invisible afterwards. Returns None outside the fragment."""
+    sym, notation = parse_latex(expr)
+    parts, total, seen = [], Poly.const(1), set()
+    # EVERY denominator, not just a top-level one: the first live simplify!
+    # run was a SUM of fractions, whose excluded points are the union of its
+    # parts' — a top-level-only scan reported none of them.
+    for node in [sym] + list(notation.rel):
+        if not is_frac(notation, node):
+            continue
+        den = get_denominator(notation, node)
+        key = write_latex(den, notation)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            rf = to_ratfunc(den, notation)
+        except NotInFragment:
+            # \sin x is a perfectly good denominator; atomize so the trig
+            # cases simplify! actually meets are covered too. The store is
+            # SHARED across both sides by the caller — separate stores would
+            # give one subexpression two atom names and never divide out.
+            rf = _atomized_ratfunc(den, notation, store)
+        if not rf.is_poly():
+            return None
+        parts.append((key, rf.num))
+        total = total * rf.num
+    return parts, total
+
+
+def _poly_latex(poly, store):
+    out_n = Notation()
+    try:
+        sym = poly_to_notation(poly, out_n)
+        if store.exprs:
+            fin_n = Notation()
+            sym = Substitutor(out_n, fin_n, store.mapping())(sym)
+            sym, out_n = _relax_atom_parens(sym, fin_n)
+        return write_latex(sym, out_n)
+    except PrimitiveError:
+        return None
+
+
+def _domain_narrowing(expr, new_expr):
+    """The conditions a rewrite drops: what the written input excluded and
+    the result no longer states. Returns a list of LaTeX factors, empty when
+    nothing is lost or the shapes are outside what this can decide. It
+    reports only what it can establish, and the numeric legs cannot help at
+    all here — a removable singularity is a measure-zero set that sampling
+    never lands on."""
+    store = _AtomStore()
+    try:
+        left = _written_denominators(expr, store)
+        right = _written_denominators(new_expr, store)
+    except (PrimitiveError, NotInFragment, ZeroDivisionError):
+        return []
+    if left is None or right is None:
+        return []
+    (parts_a, da), (parts_b, db) = left, right
+    # symmetric: the equality holds only where BOTH sides are defined, so a
+    # denominator introduced into the result excludes points just as one
+    # divided away does
+    lost, parts = da.div_exact(db), parts_a
+    if lost is None or lost.is_const():
+        lost, parts = db.div_exact(da), parts_b
+    if lost is None or lost.is_const():
+        return []
+    # attribute the loss to the denominators as WRITTEN where they account
+    # for it exactly - two readable conditions beat one expanded product
+    named, acc = [], Poly.const(1)
+    for key, poly in parts:
+        if not poly.is_const() and lost.div_exact(poly) is not None:
+            named.append(key)
+            acc = acc * poly
+    if named and acc.div_exact(lost) is not None \
+            and lost.div_exact(acc) is not None:
+        return named
+    single = _poly_latex(lost, store)
+    return [single] if single else []
+
+
+def _with_domain_assumption(assumptions, expr, result):
+    """`assumptions` plus the `factor \\ne 0` a cancellation dropped, if
+    any. Shared by every tactic whose result can be defined where its input
+    was not."""
+    lost = _domain_narrowing(expr, result)
+    if not lost:
+        return assumptions
+    return list(assumptions or []) + [
+        {'text': f'{factor} \\ne 0', 'nonzero': factor} for factor in lost]
+
+
 def rewrite_as(expr, new_expr):
     """Congruence with an agent-supplied witness: replace an expression by
     a proposed one that equal? confirms is the same. The equality IS the
@@ -2032,7 +2132,12 @@ def rewrite_as(expr, new_expr):
         return _error('rewrite_as', args,
                       f'the proposal is not mechanically equal to the '
                       f'expression ({detail})')
-    rec = _result('rewrite_as', args, expr, new_expr)
+    # a cancelled factor narrows the domain silently: the canonical leg
+    # decides equality as rational functions, and sampling cannot see a
+    # measure-zero exclusion. Record it rather than lose it.
+    rec = _result('rewrite_as', args, expr, new_expr,
+                  assumptions=_with_domain_assumption(
+                      None, expr, new_expr))
     check = {'status': 'agree',
              'method': f'proposal equality via equal? ({eq["method"]})'}
     if 'samples' in eq:

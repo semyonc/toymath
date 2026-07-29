@@ -513,6 +513,79 @@ class TestRewriteAs(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestDomainNarrowingAssumptions(unittest.TestCase):
+    # gen 60: cancelling a factor drops the points where it vanished. The
+    # canonical leg decides equality as rational functions and the numeric
+    # legs CANNOT see the loss (a removable singularity is measure-zero, so
+    # sampling never lands on it), so it has to be stated symbolically.
+
+    def nonzero(self, rec):
+        return [a.get('nonzero') for a in rec.get('assumptions') or []]
+
+    def test_sampling_cannot_see_it(self):
+        # the premise of the whole feature: both spot-checks say 'agree'
+        for a, b in (('\\frac{x^2-1}{x-1}', 'x+1'),
+                     ('\\frac{(x+y)(x-z)}{(x+y)(x-w)}',
+                      '\\frac{x-z}{x-w}')):
+            self.assertEqual(P.numeric_spot_check(a, b)['status'], 'agree')
+
+    def test_expand_records_a_cancelled_factor(self):
+        self.assertEqual(self.nonzero(Core.expand('\\frac{x^2-1}{x-1}')),
+                         ['x-1'])
+        self.assertEqual(self.nonzero(Core.expand('\\frac{x}{x}')), ['x'])
+
+    def test_expand_records_a_cancelled_opaque_atom(self):
+        # the trig case simplify! actually meets; needs one shared atom
+        # store across both denominators or the names never line up
+        r = Core.expand('\\frac{\\sin x \\cos x}{\\sin x}')
+        self.assertEqual(r['result'], '\\cos x')
+        self.assertEqual(self.nonzero(r), ['\\sin x'])
+
+    def test_rewrite_as_records_a_cancelled_factor(self):
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('\\frac{x^2-1}{x-1}', 'x+1')),
+            ['x-1'])
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as(
+                '\\frac{(x+y)(x-z)}{(x+y)(x-w)}', '\\frac{x-z}{x-w}')),
+            ['x+y'])
+
+    def test_a_sum_of_fractions_reports_every_lost_condition(self):
+        # found by the FIRST live simplify! run: a top-level-only scan saw
+        # no fraction here and reported nothing, losing both conditions
+        r = Core.expand(
+            '\\frac{\\sin x \\cos x}{\\sin x} + \\frac{x^2-1}{x-1}')
+        self.assertEqual(self.nonzero(r), ['\\sin x', 'x-1'])
+
+    def test_loss_is_attributed_to_the_written_denominators(self):
+        # a partial factor reports just the cancelled part, not the whole
+        # denominator it came from
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as(
+                '\\frac{(x+y)(x-z)}{(x+y)(x-w)}', '\\frac{x-z}{x-w}')),
+            ['x+y'])
+
+    def test_it_is_symmetric(self):
+        # introducing a denominator excludes points just as removing one does
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('x+1', '\\frac{x^2-1}{x-1}')),
+            ['x-1'])
+
+    def test_assumption_uses_the_established_shape(self):
+        a = (Core.expand('\\frac{x^2-1}{x-1}')['assumptions'] or [])[0]
+        self.assertEqual(a['text'], 'x-1 \\ne 0')
+        self.assertEqual(a['nonzero'], 'x-1')
+
+    def test_no_assumption_when_nothing_is_lost(self):
+        for expr in ('(x+1)^2', '\\frac{1}{x+1}', '2\\sin x + 3\\sin x',
+                     '\\frac{x^2+1}{x-1}', '\\frac{\\cos x}{\\sin x}'):
+            self.assertEqual(self.nonzero(Core.expand(expr)), [], expr)
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('\\sin^2 x + \\cos^2 x', '1')), [])
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('(x+1)^2', 'x^2+2x+1')), [])
+
+
 class TestCollectNamedAtom(unittest.TestCase):
     # gen 58: the agent may name an opaque atom (\cos x) as the collection
     # variable; it resolves to the atom the atomizer already minted.
