@@ -7,6 +7,7 @@ import re
 from fractions import Fraction
 from itertools import combinations
 
+from LatexParser import MathParser
 from notation import Notation, Symbol, Func
 from value import Value, IntegerValue, FracValue, FloatValue
 from replicator import Replicator
@@ -1268,6 +1269,20 @@ class _PoweredHeadNormalizer(Replicator):
             self.mapsym(sym), Func(Notation.P_LIST, out_args, **f.props))
 
 
+def _normalized_pattern(pat_src, params):
+    """A lemma pattern comparer whose \\sin^{n}-style factors are respelled
+    exactly as the matched expression's are. Both sides of the match must be
+    normalized or a lemma written in the standard spelling (\\sin^2 t = 1 -
+    \\cos^2 t) matches nothing at all. Mirrors comparer.pattern's own parse
+    path so lemma sources keep parsing exactly as before."""
+    notation = Notation()
+    sym = MathParser(notation).parse(pat_src)
+    if sym is None:
+        return comparer.pattern(pat_src, params)
+    sym, notation = _normalize_powered_heads(sym, notation)
+    return comparer.NotationParametrizedComparer(sym, notation, params)
+
+
 def _normalize_powered_heads(sym, notation):
     """(sym, notation) with every \\sin^{n}-style factor respelled as a
     power of the application. Returns the input unchanged when nothing
@@ -1990,6 +2005,44 @@ def _lemma_power_variants(src, params):
     return variants
 
 
+def rewrite_as(expr, new_expr):
+    """Congruence with an agent-supplied witness: replace an expression by
+    a proposed one that equal? confirms is the same. The equality IS the
+    checked content, so this reaches identities with no registered lemma
+    and spellings the structural matcher cannot bind — at the cost of
+    equal?'s trust level, which the check record names. The agent supplies
+    the target; nothing is searched for it."""
+    args = {'expr': expr, 'new_expr': new_expr}
+    try:
+        parse_latex(expr)
+        parse_latex(new_expr)
+    except PrimitiveError as e:
+        return _error('rewrite_as', args, str(e))
+    if same_expression(expr, new_expr):
+        return _error('rewrite_as', args,
+                      'the proposal is the same expression; a step that '
+                      'changes nothing is not a rewrite')
+    eq = equal_exprs(new_expr, expr)
+    if not eq.get('ok'):
+        return _error('rewrite_as', args, str(eq.get('error')))
+    if eq.get('verdict') != 'yes':
+        detail = f'verdict: {eq.get("verdict")}'
+        if eq.get('counterexample'):
+            detail += f', counterexample {eq["counterexample"]}'
+        return _error('rewrite_as', args,
+                      f'the proposal is not mechanically equal to the '
+                      f'expression ({detail})')
+    rec = _result('rewrite_as', args, expr, new_expr)
+    check = {'status': 'agree',
+             'method': f'proposal equality via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    if eq.get('assuming'):
+        check['assuming'] = eq['assuming']
+    rec['check'] = check
+    return rec
+
+
 def rewrite(expr, lemma_name, direction='forward', at=None):
     """Apply a registered equality lemma at the root, or at the subterm
     selected by `at` (target LaTeX or 1-based match index)."""
@@ -2023,8 +2076,8 @@ def rewrite(expr, lemma_name, direction='forward', at=None):
         bind perfect n-th power monomials, whose roots are returned bound
         to the original lemma parameter. A node already claimed by an
         earlier stage keeps that stage's binding."""
-        pat = comparer.pattern(pat_src,
-                               [(p, NotationParam.Any) for p in pat_params])
+        pat = _normalized_pattern(
+            pat_src, [(p, NotationParam.Any) for p in pat_params])
 
         def validate(s):
             bound = {}

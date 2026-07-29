@@ -448,6 +448,11 @@ TACTICS = (
                 _arg('at', 'AT', 'target subterm LaTeX or 1-based match '
                      'index when several subterms match', default=None,
                      option='--at'))),
+    TacticSpec('rewrite_as', 'rewrite_as', 'core',
+               'replace an expression by a mechanically equal proposal',
+               core.rewrite_as,
+               (E, _arg('new_expr', 'NEW_EXPR',
+                        'the proposed equal expression'))),
     TacticSpec('factor_gcd', 'factor_gcd', 'core',
                'pull out a common factor', core.factor_gcd, (E,)),
     TacticSpec('factor_quadratic', 'factor_quadratic', 'core',

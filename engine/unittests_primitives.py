@@ -435,6 +435,83 @@ class TestPoweredHeadMatching(unittest.TestCase):
         self.assertEqual(Core.rewrite('x^2 - 9', 'diff_squares')['result'],
                          '(x+3)(x-3)')
 
+    def test_lemma_pattern_is_normalized_too(self):
+        # gen 59: normalizing only the expression side left a lemma written
+        # in the standard spelling matching NOTHING, which would have
+        # shipped a registry whose own headline lemma silently never fired
+        Core.register_lemma('g59_pyth', '\\sin^2 t', '1 - \\cos^2 t',
+                            ['t'], 'pythagorean')
+        try:
+            for expr in ('\\sin^2 x', '(\\sin x)^2', '\\sin^2 (2x)'):
+                r = Core.rewrite(expr, 'g59_pyth')
+                self.assertTrue(r['ok'], expr)
+                self.assertEqual(r['check']['status'], 'agree', expr)
+        finally:
+            Core.LEMMAS.pop('g59_pyth', None)
+
+    def test_both_lemma_spellings_behave_alike(self):
+        Core.register_lemma('g59_a', '\\sin^2 t', '1 - \\cos^2 t', ['t'])
+        Core.register_lemma('g59_b', '(\\sin t)^2', '1 - (\\cos t)^2', ['t'])
+        try:
+            a = Core.rewrite('\\sin^2 x', 'g59_a')
+            b = Core.rewrite('\\sin^2 x', 'g59_b')
+            self.assertEqual(a['result'], b['result'])
+        finally:
+            Core.LEMMAS.pop('g59_a', None)
+            Core.LEMMAS.pop('g59_b', None)
+
+
+class TestRewriteAs(unittest.TestCase):
+    # gen 59: congruence with an agent-supplied witness. Reaches identities
+    # with no registered lemma and spellings the structural matcher cannot
+    # bind; equal? is the check, and its trust level is reported, not hidden.
+
+    def test_reaches_an_identity_with_no_lemma(self):
+        r = Core.rewrite_as('\\sin(2x)', '2\\sin x \\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '2\\sin x \\cos x')
+
+    def test_reaches_what_the_matcher_cannot_bind(self):
+        # bare product units: structural rewrite refuses this shape
+        r = Core.rewrite_as(
+            '(\\sin x)^2 - 2\\sin x \\cos x + (\\cos x)^2',
+            '( \\sin x - \\cos x)^2')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_trust_level_is_named_not_hidden(self):
+        exact = Core.rewrite_as('(x+1)^2', 'x^2+2x+1')
+        probabilistic = Core.rewrite_as('\\sin^2 x + \\cos^2 x', '1')
+        self.assertIn('canonical', exact['check']['method'])
+        self.assertIn('numeric-oracle', probabilistic['check']['method'])
+        self.assertIn('samples', probabilistic['check'])
+
+    def test_refuses_a_false_proposal_with_a_counterexample(self):
+        r = Core.rewrite_as('(\\sin x - \\cos x)^2', '\\sin^2 x - \\cos^2 x')
+        self.assertFalse(r['ok'])
+        self.assertIn('not mechanically equal', r['error'])
+        self.assertIn('counterexample', r['error'])
+
+    def test_refuses_an_unknown_verdict(self):
+        r = Core.rewrite_as('f(x)', 'g(x)')
+        self.assertFalse(r['ok'])
+        self.assertIn('not mechanically equal', r['error'])
+
+    def test_refuses_a_no_op(self):
+        r = Core.rewrite_as('x+1', 'x+1')
+        self.assertFalse(r['ok'])
+        self.assertIn('changes nothing', r['error'])
+
+    def test_refuses_an_unparseable_proposal(self):
+        r = Core.rewrite_as('x+1', '\\frac{')
+        self.assertFalse(r['ok'])
+
+    def test_accepts_an_equal_relation(self):
+        r = Core.rewrite_as('x+1 = 2', '1+x = 2')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
 
 class TestCollectNamedAtom(unittest.TestCase):
     # gen 58: the agent may name an opaque atom (\cos x) as the collection
