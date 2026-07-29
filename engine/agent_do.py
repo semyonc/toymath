@@ -35,6 +35,9 @@ except ImportError:  # pragma: no cover - dotenv ships with the kernel env
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
 DEFAULT_MAX_TURNS = 64
+# providers intermittently return a zero-token, empty assistant message;
+# ask again rather than let it end the derivation
+EMPTY_RESPONSE_RETRIES = 3
 
 _SKILL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -703,6 +706,49 @@ def make_tools(session):
 # runner
 # ---------------------------------------------------------------------------
 
+def _is_empty_model_response(response):
+    """True when the model returned nothing actionable: no tool call and no
+    text. Providers do this intermittently (a zero-token completion), and
+    the Agents SDK reads it as the final answer."""
+    for item in (getattr(response, 'output', None) or []):
+        kind = getattr(item, 'type', None)
+        if kind is not None and kind != 'message':
+            return False  # a tool call, or anything else to act on
+        for part in (getattr(item, 'content', None) or []):
+            if getattr(part, 'refusal', None):
+                return False
+            text = getattr(part, 'text', None)
+            if text and text.strip():
+                return False
+    return True
+
+
+def _retrying_model(base_cls):
+    """`base_cls` with empty completions retried.
+
+    A provider that returns an empty assistant message ends the run where it
+    stands, and the harness then presents whatever step came last as the
+    answer - a half-finished derivation looking like a result. That is a
+    transport hiccup, not a decision by the agent, so ask again instead of
+    accepting it. Bounded, and the last response is returned either way so a
+    genuinely mute model still terminates.
+    """
+
+    class RetryEmptyResponses(base_cls):
+        async def get_response(self, *args, **kwargs):
+            import asyncio
+            response = None
+            for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
+                response = await super().get_response(*args, **kwargs)
+                if not _is_empty_model_response(response):
+                    return response
+                if attempt < EMPTY_RESPONSE_RETRIES:
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+            return response
+
+    return RetryEmptyResponses
+
+
 def build_model(model_name=None):
     """OpenRouter-backed chat-completions model for the Agents SDK."""
     key = os.environ.get(API_KEY_VAR)
@@ -717,7 +763,7 @@ def build_model(model_name=None):
     # no traces are shipped to OpenAI's backend.
     set_tracing_disabled(not observability.active())
     client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
-    return OpenAIChatCompletionsModel(
+    return _retrying_model(OpenAIChatCompletionsModel)(
         model=model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL),
         openai_client=client)
 

@@ -1161,6 +1161,70 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertTrue(res['turn_limit_reached'])
         self.assertEqual(len(res['steps']), 2)  # partial work is kept
 
+    def test_empty_model_response_is_retried_not_accepted(self):
+        # gen 61: a live int1 run died at turn 5 when the provider returned a
+        # zero-token empty message (trace 4c93d48b01599905e10933c7d0e55d3d).
+        # The SDK reads that as the final answer, so the run ended holding an
+        # unfinished integral. Ask again instead.
+        empty = ResponseOutputMessage(
+            id='m', role='assistant', status='completed', type='message',
+            content=[])
+        calls = {'n': 0}
+
+        class FlakyModel(ScriptedModel):
+            async def get_response(self, *args, **kwargs):
+                calls['n'] += 1
+                if calls['n'] == 2:      # one empty blip mid-derivation
+                    return ModelResponse(output=[empty], usage=Usage(),
+                                         response_id=None)
+                return await ScriptedModel.get_response(self, *args, **kwargs)
+
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'x^{2}+2x+1'}, 'c2')],
+            [message('done')],
+        ]
+        model = agent_do._retrying_model(FlakyModel)(script)
+        res = run_instruction('expand it', model=model)
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(calls['n'], 4)  # 3 scripted turns + 1 retried blip
+
+    def test_persistently_empty_model_still_terminates(self):
+        empty = ResponseOutputMessage(
+            id='m', role='assistant', status='completed', type='message',
+            content=[])
+
+        class MuteModel(ScriptedModel):
+            def __init__(self):
+                ScriptedModel.__init__(self, [])
+                self.calls = 0
+
+            async def get_response(self, *args, **kwargs):
+                self.calls += 1
+                return ModelResponse(output=[empty], usage=Usage(),
+                                     response_id=None)
+
+        model = agent_do._retrying_model(MuteModel)()
+        res = run_instruction('anything', model=model)
+        self.assertTrue(res['ok'])          # ends, does not hang or raise
+        self.assertEqual(model.calls, agent_do.EMPTY_RESPONSE_RETRIES + 1)
+
+    def test_a_real_response_is_never_retried(self):
+        calls = {'n': 0}
+
+        class CountingModel(ScriptedModel):
+            async def get_response(self, *args, **kwargs):
+                calls['n'] += 1
+                return await ScriptedModel.get_response(self, *args, **kwargs)
+
+        script = [[tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+                  [message('done')]]
+        model = agent_do._retrying_model(CountingModel)(script)
+        res = run_instruction('expand it', model=model)
+        self.assertTrue(res['ok'])
+        self.assertEqual(calls['n'], 2)
+
     def test_result_committed_on_the_last_turn_is_not_a_failure(self):
         # gen 61: a live int! run committed a verified result with its 64th
         # of 64 turns and was reported as "Max turns exceeded", discarding a
