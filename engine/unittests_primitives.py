@@ -461,6 +461,147 @@ class TestPoweredHeadMatching(unittest.TestCase):
             Core.LEMMAS.pop('g59_b', None)
 
 
+class TestProductUnitMatching(unittest.TestCase):
+    # gen 62: gen 58 grouped POWERED heads at the matching boundary and left
+    # bare product units open, so `2 \sin x \cos x` did not match `2ab` while
+    # `2(\sin x)(\cos x)` did -- the backward direction of every trig lemma,
+    # which is the direction that collapses. Spans come from the oracle's own
+    # _func_arg_span, so a grouping cannot disagree with the numeric leg.
+
+    def test_bare_product_of_applications_matches(self):
+        r = Core.rewrite('2 \\sin x \\cos x', 'sin_double', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '\\sin 2x')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_both_product_spellings_give_one_result(self):
+        bare = Core.rewrite('2 \\sin x \\cos x', 'sin_double', 'backward')
+        grouped = Core.rewrite('2 (\\sin x)(\\cos x)', 'sin_double',
+                               'backward')
+        self.assertTrue(bare['ok'])
+        self.assertEqual(bare['result'], grouped['result'])
+
+    def test_matches_a_product_inside_a_sum(self):
+        r = Core.rewrite('y + 2 \\sin x \\cos x', 'sin_double', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], 'y+ \\sin 2x')
+
+    def test_argument_binding_is_preserved_not_flattened(self):
+        # `2 \sin x \cos x y` reads as 2*sin(x)*cos(x*y) -- the same span rule
+        # the oracle uses -- so it genuinely is NOT the double-angle shape and
+        # must refuse rather than flatten into a match
+        r = Core.rewrite('2 \\sin x \\cos x y', 'sin_double', 'backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_whole_product_application_stays_matchable(self):
+        # a product that IS one application must not be wrapped: a ()-group
+        # matches no pattern at all, so wrapping it would hide the root
+        r = Core.rewrite('\\sin 2x', 'sin_double')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '2 \\sin x \\cos x')
+
+    def test_backward_square_lemmas_close_over_bare_trig(self):
+        # the round trip gen 58 opened and could only half close
+        for lemma, expr in (
+                ('square_of_diff',
+                 '\\sin^2 x - 2\\sin x \\cos x + \\cos^2 x'),
+                ('square_of_sum',
+                 '\\sin^2 x + 2\\sin x \\cos x + \\cos^2 x')):
+            r = Core.rewrite(expr, lemma, 'backward')
+            self.assertTrue(r['ok'], lemma)
+            self.assertEqual(r['check']['status'], 'agree', lemma)
+
+    def test_plain_products_are_untouched(self):
+        self.assertEqual(Core.rewrite('x^2 - y^2', 'diff_squares')['result'],
+                         '(x+y)(x-y)')
+
+
+class TestSubstitutedGroupIsSelfDelimiting(unittest.TestCase):
+    # gen 62: Substitutor wrapped every non-symbol replacement in (), even one
+    # that already was a ()-group, and the relax pass cannot reach inside an
+    # INDEX base -- so the doubled layer survived into user-visible results.
+
+    def test_substitute_does_not_double_parens(self):
+        r = Core.substitute('a^2 + 1', 'a', '(x+1)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '(x+1)^{2}+1')
+
+    def test_lemma_destination_keeps_one_layer(self):
+        r = Core.rewrite('(x+1)^3 + y^3', 'sum_cubes')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'],
+                         '((x+1)+y)((x+1)^{2}-(x+1)y+y^{2})')
+
+    def test_function_binding_in_an_index_base(self):
+        r = Core.rewrite('\\sin^2 x - 2\\sin x \\cos x + \\cos^2 x',
+                         'square_of_diff', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '(( \\sin x)-( \\cos x))^{2}')
+
+
+class TestTrigLemmaCatalog(unittest.TestCase):
+    # gen 62: the capability behind four recorded agent asks. A lemma is an
+    # EXACT structural rewrite where the same move through rewrite_as is
+    # numerically sampled, so the catalog is a trust improvement, not just a
+    # convenience. Registering it needed no loader and no always-on budget.
+
+    TRIG = ('pythagorean', 'sin_squared', 'cos_squared', 'sin_double',
+            'cos_double')
+
+    def test_registered_and_discoverable(self):
+        names = {l['name'] for l in Core.list_lemmas()['lemmas']}
+        for name in self.TRIG:
+            self.assertIn(name, names)
+            self.assertTrue(Core.LEMMAS[name].description)
+
+    def test_every_trig_lemma_applies_forward(self):
+        for name in self.TRIG:
+            src = Core.LEMMAS[name].lhs.replace('a', 'x')
+            r = Core.rewrite(src, name)
+            self.assertTrue(r['ok'], name)
+            self.assertEqual(r['check']['status'], 'agree', name)
+
+    def test_solved_forms_apply_backward(self):
+        # pythagorean is excluded on purpose: its right side is the bare
+        # literal 1, so backward leaves the parameter unbound
+        for name in ('sin_squared', 'cos_squared', 'sin_double',
+                     'cos_double'):
+            dst = Core.LEMMAS[name].rhs.replace('a', 'x')
+            r = Core.rewrite(dst, name, 'backward')
+            self.assertTrue(r['ok'], name)
+            self.assertEqual(r['check']['status'], 'agree', name)
+
+    def test_pythagorean_backward_refuses_cleanly(self):
+        r = Core.rewrite('1', 'pythagorean', 'backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('unbound', r['error'])
+
+    def test_gen57_critical_path_lemma(self):
+        # the int1 failure needed exactly this rewrite on its critical path
+        r = Core.rewrite('\\sin^2 t \\cos t', 'sin_squared')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\cos^{2}t', r['result'])
+
+    def test_compound_arguments_bind(self):
+        r = Core.rewrite('\\sin^2 (3y)', 'sin_squared')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_two_term_pattern_needs_the_whole_sum(self):
+        # measured limit, not a bug: matching is structural, so a two-term
+        # pattern does not select two terms out of a longer sum. The granular
+        # route is sin_squared forward, then expand.
+        self.assertTrue(Core.rewrite('\\sin^2 x + \\cos^2 x',
+                                     'pythagorean')['ok'])
+        self.assertFalse(Core.rewrite('y + \\sin^2 x + \\cos^2 x',
+                                      'pythagorean')['ok'])
+        step = Core.rewrite('y + \\sin^2 x + \\cos^2 x', 'sin_squared')
+        self.assertTrue(step['ok'])
+        self.assertEqual(Core.expand(step['result'])['result'], 'y+1')
+
+
 class TestRewriteAs(unittest.TestCase):
     # gen 59: congruence with an agent-supplied witness. Reaches identities
     # with no registered lemma and spellings the structural matcher cannot

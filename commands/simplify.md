@@ -25,6 +25,16 @@ or not a lemma is registered — `rewrite x lemma` is worth using when a
 registered lemma names exactly the step, because it is an exact structural
 match rather than a sampled one. Check `lemmas` to see what is registered.
 
+The trig identities are registered, so reach for them before proposing:
+`pythagorean`, `sin_squared`, `cos_squared`, `sin_double`, `cos_double`, each
+usable `--direction backward` to go the other way. Two limits worth knowing
+before you spend a turn on them. A lemma matches structurally, so a two-term
+pattern like `pythagorean` fires only on a sum that *is* those two terms —
+inside a longer sum, rewrite `sin_squared` forward and let `expand` collapse
+the rest. And `expand` may reorder a product into its own canonical order, so
+match a double angle *before* expanding; afterwards the factor order may no
+longer be the one the lemma is written in, and `rewrite_as` is the way back.
+
 Prefer several small proposals over one large leap. A single jump from the
 input to the answer is checkable, but it teaches the reader nothing and hides
 where the work happened.

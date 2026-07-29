@@ -1406,6 +1406,14 @@ class Substitutor(Replicator):
         copied = Replicator(value_notation, self.output_notation)(value_sym)
         if isinstance(copied, Symbol) and self.output_notation.get(copied) is None:
             return copied
+        g = self.output_notation.getf(copied, Notation.GROUP)
+        if g is not None and g.props.get('br') == '()':
+            # already self-delimited: a second () layer is what made
+            # substitute('a^2+1','a','(x+1)') read ((x+1))^{2}+1, and it
+            # survives wherever the relax pass cannot reach (an INDEX base,
+            # a product factor). The wrapper exists to delimit, so a node
+            # that is already delimited needs no other.
+            return copied
         return self.output_notation.setf(Notation.GROUP, (copied,), br='()')
 
     def enter_symbol(self, sym):

@@ -1212,11 +1212,15 @@ def _plist_head_kind(a, notation):
 
 
 class _PoweredHeadNormalizer(Replicator):
-    """Rewrite \\sin^{n} x factors into the ( \\sin x)^{n} shape they are the
-    standard spelling of, so structural pattern matching sees one object
-    where the atomizer and the numeric oracle already see one. Only a plain
-    positive integer n >= 2 normalizes: \\sin^{-1} (the arcsin reading) and
-    non-integer powers keep their own shape, exactly as in the atomizer."""
+    """Rewrite the function applications inside a product into the explicitly
+    grouped shape they are the standard spelling of, so structural pattern
+    matching sees one object where the atomizer and the numeric oracle already
+    see one: \\sin^{n} x becomes ( \\sin x)^{n} and a bare \\sin x \\cos x
+    becomes ( \\sin x)( \\cos x). Only a plain positive integer n >= 2
+    normalizes a power: \\sin^{-1} (the arcsin reading) and non-integer powers
+    keep their own shape, exactly as in the atomizer. Argument spans come from
+    the oracle's own `_func_arg_span`, so a grouping can never disagree with
+    the reading the numeric leg checks against."""
 
     def __init__(self, notation, output_notation):
         Replicator.__init__(self, notation, output_notation)
@@ -1237,6 +1241,12 @@ class _PoweredHeadNormalizer(Replicator):
             fp = _func_power(a, self.notation)
             return fp is not None and fp[0] in FUNC_NAMES
 
+        def bare_head(a):
+            if (isinstance(a, Symbol) and self.notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                return a.name
+            return None
+
         out_args, i = [], 0
         while i < len(args):
             a = args[i]
@@ -1247,18 +1257,30 @@ class _PoweredHeadNormalizer(Replicator):
                     n = _index_power(fp[1], self.notation)
                 except (NotInFragment, PrimitiveError):
                     n = None
-            span = None
+            head, span = None, None
             if n is not None and n >= 2:
+                head = fp[0]
                 span, j = _func_arg_span(args, i, self.notation, is_head)
+            elif n is None and bare_head(a) is not None:
+                cand, cj = _func_arg_span(args, i, self.notation, is_head)
+                # Only a genuine product UNIT earns a wrapper. An application
+                # that is the whole product is already one object, and
+                # wrapping it in () would hide that node from the matcher
+                # (a ()-group matches no pattern at all).
+                if cand and cj - i < len(args):
+                    head, span, j = bare_head(a), cand, cj
             if span:
                 base = self.output_notation.setf(
                     Notation.P_LIST,
-                    [Symbol(fp[0])] + [self.enter_expr(s) for s in span])
+                    [Symbol(head)] + [self.enter_expr(s) for s in span])
                 group = self.output_notation.setf(
                     Notation.GROUP, (base,), br='()')
-                out_args.append(self.output_notation.setf(
-                    Notation.INDEX,
-                    (group, (None, None, IntegerValue(n), None))))
+                if n is None:
+                    out_args.append(group)
+                else:
+                    out_args.append(self.output_notation.setf(
+                        Notation.INDEX,
+                        (group, (None, None, IntegerValue(n), None))))
                 self.changed = True
                 i = j
                 continue
@@ -1872,6 +1894,22 @@ register_lemma('diff_cubes', 'a^3 - b^3', '(a - b)(a^2 + a b + b^2)',
                ['a', 'b'], 'difference of cubes')
 register_lemma('sum_cubes', 'a^3 + b^3', '(a + b)(a^2 - a b + b^2)',
                ['a', 'b'], 'sum of cubes')
+
+# Trigonometric identities. These are structural rewrites, so they are EXACT
+# where the same move proposed through rewrite_as is numerically sampled --
+# reach for a lemma first whenever one matches. Patterns are written in the
+# spelling a user would write; both sides are powered-head normalized at the
+# matching boundary, so \sin^2 a and ( \sin a)^2 are one object here.
+register_lemma('pythagorean', '\\sin^2 a + \\cos^2 a', '1',
+               ['a'], 'pythagorean identity')
+register_lemma('sin_squared', '\\sin^2 a', '1 - \\cos^2 a',
+               ['a'], 'square of sine as a cosine expression')
+register_lemma('cos_squared', '\\cos^2 a', '1 - \\sin^2 a',
+               ['a'], 'square of cosine as a sine expression')
+register_lemma('sin_double', '\\sin 2a', '2 \\sin a \\cos a',
+               ['a'], 'sine double angle')
+register_lemma('cos_double', '\\cos 2a', '\\cos^2 a - \\sin^2 a',
+               ['a'], 'cosine double angle')
 
 
 def list_lemmas():
