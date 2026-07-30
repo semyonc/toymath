@@ -53,6 +53,42 @@ test('the model is painted into the kernel-name button', () => {
   );
 });
 
+test('an experimental backend is named in the label and the tooltip', () => {
+  const button = new FakeButton();
+
+  const painted = applyModelTitle(
+    item(button),
+    'gpt-5.6-luna',
+    'Toy Math',
+    'codex'
+  );
+
+  assert.equal(painted, true);
+  assert.equal(button.label.textContent, 'Toy Math · codex · gpt-5.6-luna');
+  assert.match(button.title, /codex · gpt-5\.6-luna/);
+});
+
+test('the default backend is not repeated in the label', () => {
+  // an OpenRouter model id already implies its backend
+  const button = new FakeButton();
+
+  applyModelTitle(item(button), 'x-ai/grok-5', 'Toy Math', 'openrouter');
+
+  assert.equal(button.label.textContent, 'Toy Math · x-ai/grok-5');
+  assert.match(button.title, /openrouter · x-ai\/grok-5/);
+});
+
+test('switching backend repaints the label', () => {
+  const button = new FakeButton();
+  applyModelTitle(item(button), 'x-ai/grok-5', 'Toy Math', 'openrouter');
+
+  assert.equal(
+    applyModelTitle(item(button), 'x-ai/grok-5', 'Toy Math', 'codex'),
+    true
+  );
+  assert.equal(button.label.textContent, 'Toy Math · codex · x-ai/grok-5');
+});
+
 test('repainting an unchanged title writes nothing', () => {
   const button = new FakeButton();
   applyModelTitle(item(button), 'x-ai/grok-5', 'Toy Math');

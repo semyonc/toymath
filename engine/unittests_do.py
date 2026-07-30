@@ -6,8 +6,14 @@ Everything here runs offline: the agent loop is exercised with a scripted
 fake Model. Set TOYMATH_LIVE_TESTS=1 to also run one real OpenRouter
 round-trip (requires OPEN_ROUTER in the environment/.env).
 """
+import _thread
+import dataclasses
 import json
 import os
+import shutil
+import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -18,12 +24,16 @@ from unittest import mock
 os.environ['TOYMATH_OBSERVABILITY'] = 'off'
 os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
 
+import agent_config
 import agent_do
 import observability
 import plot_sandbox
 import tactic_registry
 from tactics import core as core_tactics
 from tactics import integration as integration_tactics
+from agent_backends import (base as agent_base, codex as codex_backend,
+                            codex_transport,
+                            openrouter as openrouter_backend)
 from agent_do import DoSession, make_api, run_instruction
 from ledger import Ledger
 
@@ -33,6 +43,64 @@ from agents.usage import Usage
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseOutputMessage,
                                     ResponseOutputText)
+
+
+_NO_BROWSER = None
+_SANDBOX_HOME = None
+_CLEARED_ENV = None
+
+#: Notebook-default routing this module must decide for itself. ToyMath loads
+#: `.env`, so leaving these set makes the suite assert against whatever the
+#: developer happens to have configured - a `TOYMATH_CODEX_MODEL` in a working
+#: `.env` failed three routing tests that are about ToyMath's own defaults.
+#: Tests that care about a value set it explicitly with `mock.patch.dict`.
+_ENV_DEFAULTS = ('TOYMATH_CODEX_MODEL', 'OPENROUTER_MODEL',
+                 'TOYMATH_AGENT_BACKEND')
+
+
+def setUpModule():
+    """No test may reach a real browser, the real Codex home, or the
+    developer's own agent configuration.
+
+    Browser: `login!` hands its one-time sign-in URL to the OS browser
+    instead of printing it, so any test touching that path would otherwise
+    open a real window — pointed at the fake app-server's
+    `auth.openai.test`, which is not a real page. Individual tests still
+    patch `mathShell._open_browser` when they assert on the outcome; this is
+    the backstop that makes forgetting harmless.
+
+    Home: backend auto-resolution probes for a signed-in Codex account, and
+    that probe starts a real app-server against `~/.toymath/codex-home` —
+    the user's own authenticated home — which then lives for the rest of the
+    process. An offline suite must not spawn that, read that account, or
+    write to that directory, so the whole module runs against a throwaway
+    home instead.
+
+    Environment: `.env` is loaded for real runs, so the routing defaults are
+    cleared here and reinstated afterwards.
+    """
+    global _NO_BROWSER, _SANDBOX_HOME, _CLEARED_ENV
+    _NO_BROWSER = mock.patch('webbrowser.open', return_value=False)
+    _NO_BROWSER.start()
+    _SANDBOX_HOME = tempfile.mkdtemp(prefix='toymath-test-codex-home-')
+    os.environ[codex_backend.HOME_VAR] = _SANDBOX_HOME
+    # `load_dotenv()` runs at import of each module that needs it, and
+    # `toymathkernel` is imported lazily inside tests - late enough to put a
+    # cleared variable straight back. Force the remaining loads to happen
+    # first, so clearing them below actually sticks.
+    import toymathkernel                                       # noqa: F401
+    _CLEARED_ENV = {name: os.environ.pop(name)
+                    for name in _ENV_DEFAULTS if name in os.environ}
+
+
+def tearDownModule():
+    if _NO_BROWSER is not None:
+        _NO_BROWSER.stop()
+    codex_backend.close_runtime()
+    if _SANDBOX_HOME is not None:
+        os.environ.pop(codex_backend.HOME_VAR, None)
+        shutil.rmtree(_SANDBOX_HOME, True)
+    os.environ.update(_CLEARED_ENV or {})
 
 
 class ScriptedModel(Model):
@@ -1267,7 +1335,7 @@ class TestScriptedAgent(unittest.TestCase):
             [tool_call('set_result', {'expr': 'x^{2}+2x+1'}, 'c2')],
             [message('done')],
         ]
-        model = agent_do._retrying_model(FlakyModel)(script)
+        model = openrouter_backend._retrying_model(FlakyModel)(script)
         res = run_instruction('expand it', model=model)
         self.assertTrue(res['ok'])
         self.assertEqual(res['final_result'], 'x^{2}+2x+1')
@@ -1288,10 +1356,10 @@ class TestScriptedAgent(unittest.TestCase):
                 return ModelResponse(output=[empty], usage=Usage(),
                                      response_id=None)
 
-        model = agent_do._retrying_model(MuteModel)()
+        model = openrouter_backend._retrying_model(MuteModel)()
         res = run_instruction('anything', model=model)
         self.assertTrue(res['ok'])          # ends, does not hang or raise
-        self.assertEqual(model.calls, agent_do.EMPTY_RESPONSE_RETRIES + 1)
+        self.assertEqual(model.calls, openrouter_backend.EMPTY_RESPONSE_RETRIES + 1)
 
     def test_a_real_response_is_never_retried(self):
         calls = {'n': 0}
@@ -1303,7 +1371,7 @@ class TestScriptedAgent(unittest.TestCase):
 
         script = [[tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
                   [message('done')]]
-        model = agent_do._retrying_model(CountingModel)(script)
+        model = openrouter_backend._retrying_model(CountingModel)(script)
         res = run_instruction('expand it', model=model)
         self.assertTrue(res['ok'])
         self.assertEqual(calls['n'], 2)
@@ -1540,6 +1608,1938 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(len(res['steps']), 1)  # only this run's slice
 
 
+class TestCanonicalToolBindings(unittest.TestCase):
+    """One tool surface, defined once, converted per provider."""
+
+    def test_binding_schema_matches_the_agents_sdk_derivation(self):
+        # the canonical schema is generated by ToyMath, not by a provider
+        # SDK - that is what lets two backends advertise the same tool. Pin
+        # it against the Agents SDK's own reading of the same handlers so a
+        # docstring edit can never silently change only one of them.
+        from agents import function_tool
+        session = DoSession(plot_backend=FakePlotBackend(),
+                            tikz_backend=FakeTikzBackend())
+        api = make_api(session)
+        bindings = agent_do.make_tool_bindings(session)
+        self.assertEqual([b.name for b in bindings], [
+            'load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
+            'set_result', 'set_open', 'plot', 'tikz'])
+        for binding in bindings:
+            derived = function_tool(api[binding.name])
+            self.assertEqual(binding.description, derived.description,
+                             binding.name)
+            self.assertEqual(binding.input_schema,
+                             derived.params_json_schema, binding.name)
+
+    def test_figure_bindings_appear_only_with_their_backends(self):
+        names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
+        self.assertNotIn('plot', names)
+        self.assertNotIn('tikz', names)
+        only_tikz = agent_do.make_tool_bindings(
+            DoSession(tikz_backend=FakeTikzBackend()))
+        self.assertEqual([b.name for b in only_tikz][-1], 'tikz')
+
+    def test_tactic_adapters_are_never_model_visible(self):
+        session = DoSession()
+        names = {b.name for b in agent_do.make_tool_bindings(session)}
+        self.assertIn('expand', make_api(session))     # internal test API
+        self.assertNotIn('expand', names)              # not a model tool
+        self.assertFalse(names & set(tactic_registry.BY_NAME))
+
+    def test_arguments_are_validated_against_the_canonical_schema(self):
+        schema = {b.name: b.input_schema
+                  for b in agent_do.make_tool_bindings(DoSession())}
+        validate = agent_base.validate_arguments
+        # an omitted optional argument falls back to its schema default,
+        # and an explicit null reads as omission (no field is nullable)
+        self.assertEqual(validate(schema['comment'], {'text': 'hi'}),
+                         {'text': 'hi', 'from_step': ''})
+        self.assertEqual(
+            validate(schema['comment'], {'text': 'hi', 'from_step': None}),
+            {'text': 'hi', 'from_step': ''})
+        with self.assertRaises(agent_base.ToolArgumentError):
+            validate(schema['comment'], {'from_step': 's1'})
+        with self.assertRaises(agent_base.ToolArgumentError):
+            validate(schema['run_tactic'],
+                     {'tactic': 'expand', 'arguments': 'x+1'})
+        with self.assertRaises(agent_base.ToolArgumentError):
+            validate(schema['run_tactic'],
+                     {'tactic': 'expand', 'arguments': [7]})
+
+
+class TestBackendToolParity(unittest.TestCase):
+    """Two backends, one tool surface. Adapters convert; they never define."""
+
+    def _dispatcher(self, **kwargs):
+        session = DoSession(**kwargs)
+        return session, agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(session),
+            agent_base.CancellationToken())
+
+    def test_both_adapters_advertise_the_same_tools(self):
+        _, dispatcher = self._dispatcher(plot_backend=FakePlotBackend(),
+                                         tikz_backend=FakeTikzBackend())
+        sdk = openrouter_backend.function_tools(dispatcher)
+        codex = codex_backend.dynamic_tools(dispatcher)
+        self.assertEqual([tool.name for tool in sdk],
+                         [tool['name'] for tool in codex])
+        for tool, record in zip(sdk, codex):
+            self.assertEqual(record['type'], 'function')
+            self.assertEqual(tool.description, record['description'])
+            self.assertEqual(tool.params_json_schema, record['inputSchema'])
+            self.assertEqual(sorted(record['inputSchema']['required']),
+                             sorted(record['inputSchema']['properties']))
+            self.assertFalse(record['inputSchema']['additionalProperties'])
+
+    def test_optional_figure_tools_track_their_backends_in_both(self):
+        _, plain = self._dispatcher()
+        names = [tool['name'] for tool in codex_backend.dynamic_tools(plain)]
+        self.assertNotIn('plot', names)
+        self.assertNotIn('tikz', names)
+        _, with_plot = self._dispatcher(plot_backend=FakePlotBackend())
+        self.assertIn('plot', [t['name'] for t
+                               in codex_backend.dynamic_tools(with_plot)])
+
+    def test_the_version_contract_lists_the_reviewed_residual_tools(self):
+        # the exact model-visible set: canonical ToyMath tools plus the
+        # three residual native names the project accepted for 0.144.4.
+        # Anything else must fail closed before a live model runs.
+        _, dispatcher = self._dispatcher()
+        self.assertEqual(codex_backend.expected_model_tools(dispatcher), (
+            'load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
+            'set_result', 'set_open',
+            'update_plan', 'request_user_input', 'view_image'))
+
+    def test_tactic_names_never_reach_the_codex_surface(self):
+        _, dispatcher = self._dispatcher()
+        names = {tool['name']
+                 for tool in codex_backend.dynamic_tools(dispatcher)}
+        self.assertFalse(names & set(tactic_registry.BY_NAME))
+
+
+class TestCodexToolCallBridge(unittest.TestCase):
+    """`item/tool/call` semantics: what ran versus what failed to run."""
+
+    def setUp(self):
+        self.ledger = Ledger()
+        self.session = DoSession(ledger=self.ledger)
+        self.cancellation = agent_base.CancellationToken()
+        self.dispatcher = agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(self.session), self.cancellation,
+            serialize=True)
+
+    def _call(self, tool, arguments=None, **extra):
+        params = {'tool': tool, 'arguments': arguments or {},
+                  'callId': 'c1', 'threadId': 't1', 'turnId': 'r1'}
+        params.update(extra)
+        return codex_backend.tool_call_result(self.dispatcher, params)
+
+    def _text(self, reply):
+        return reply['contentItems'][0]['text']
+
+    def test_a_checked_step_comes_back_as_one_input_text_item(self):
+        reply = self._call('run_tactic',
+                           {'tactic': 'expand', 'arguments': ['(x+1)^2']})
+        self.assertTrue(reply['success'])
+        self.assertEqual([item['type'] for item in reply['contentItems']],
+                         ['inputText'])
+        record = json.loads(self._text(reply))
+        self.assertTrue(record['ok'])
+        self.assertEqual(record['result'], 'x^{2}+2x+1')
+        self.assertEqual(record['step']['id'], 's1')
+        self.assertEqual(record['check']['status'], 'agree')
+
+    def test_a_refused_tactic_is_a_successful_call_the_model_can_repair(self):
+        # ToyMath answering {"ok": false} is a tool that RAN and said no;
+        # calling that a transport failure would hide the reason
+        reply = self._call('run_tactic',
+                           {'tactic': 'factor_quadratic',
+                            'arguments': ['x^{2}+2x+3', 'x']})
+        self.assertTrue(reply['success'])
+        record = json.loads(self._text(reply))
+        self.assertFalse(record['ok'])
+        self.assertTrue(record['error'])
+        self.assertEqual(len(self.ledger.steps), 0)
+
+    def test_unknown_tools_malformed_calls_and_namespaces_are_distinct(self):
+        unknown = self._call('shell', {'command': 'ls'})
+        self.assertFalse(unknown['success'])
+        self.assertIn("'shell' is not a ToyMath tool", self._text(unknown))
+        self.assertIn('run_tactic', self._text(unknown))
+
+        malformed = self._call('run_tactic', {'tactic': 'expand'})
+        self.assertFalse(malformed['success'])
+        self.assertIn('missing required argument', self._text(malformed))
+
+        namespaced = self._call('run_tactic', {}, namespace='mcp__helper')
+        self.assertFalse(namespaced['success'])
+        self.assertIn('unknown tool namespace', self._text(namespaced))
+
+        shapeless = codex_backend.tool_call_result(self.dispatcher, 'nope')
+        self.assertFalse(shapeless['success'])
+
+    def test_raw_json_arguments_are_accepted_and_validated(self):
+        reply = self._call('run_tactic',
+                           json.dumps({'tactic': 'expand',
+                                       'arguments': ['(x+1)^2']}))
+        self.assertTrue(reply['success'])
+        broken = self._call('run_tactic', '{"tactic": ')
+        self.assertFalse(broken['success'])
+        self.assertIn('not valid JSON', self._text(broken))
+
+    def test_dispatch_is_serial_so_step_ids_stay_deterministic(self):
+        # provenance depends on step order; the Codex bridge serializes
+        # rather than inheriting the SDK's tool-call concurrency
+        order = []
+        original = self.ledger.record
+
+        def watched(result, **kwargs):
+            order.append(result['op'])
+            return original(result, **kwargs)
+
+        self.ledger.record = watched
+        workers = [threading.Thread(
+            target=self._call, args=('run_tactic',
+                                     {'tactic': 'expand',
+                                      'arguments': [f'(x+{i})^2']}))
+            for i in range(1, 5)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertEqual(len(order), 4)
+        self.assertEqual([s['id'] for s in self.ledger.steps],
+                         ['s1', 's2', 's3', 's4'])
+        self.assertEqual(self.ledger.replay()['status'], 'verified')
+
+    def test_a_stopped_run_refuses_further_calls_at_the_bridge(self):
+        self.assertTrue(self._call(
+            'run_tactic',
+            {'tactic': 'expand', 'arguments': ['(x+1)^2']})['success'])
+        self.cancellation.cancel('user')
+        self.session.close('user')
+        reply = self._call('run_tactic',
+                           {'tactic': 'expand', 'arguments': ['(x+2)^2']})
+        self.assertTrue(reply['success'])   # the transport worked
+        record = json.loads(self._text(reply))
+        self.assertFalse(record['ok'])      # the run did not
+        self.assertTrue(record['cancelled'])
+        self.assertEqual(len(self.ledger.steps), 1)
+
+
+class TestCodexTranscriptDriver(unittest.TestCase):
+    """A whole derivation over the fake app-server, no account, no network."""
+
+    def _run(self, transcript, ledger=None):
+        session = DoSession(ledger=ledger)
+        cancellation = agent_base.CancellationToken()
+        dispatcher = agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(session), cancellation,
+            serialize=True)
+        transport = codex_transport.TranscriptTransport(transcript)
+        request = codex_transport.CodexThreadRequest(
+            instruction='solve it', developer_instructions='rules',
+            dynamic_tools=tuple(codex_backend.dynamic_tools(dispatcher)))
+        outcome = transport.run_thread(
+            request,
+            lambda params: codex_backend.tool_call_result(dispatcher,
+                                                          params))
+        return session, transport, outcome
+
+    def test_a_scripted_solve_produces_the_same_ledger_as_openrouter(self):
+        ledger = Ledger()
+        session, _, outcome = self._run([
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'apply',
+                           'arguments': ['2x + 3 = 7', '-', '3']}},
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand',
+                           'arguments': ['2x+3 - 3 = 7 - 3']}},
+            {'tool': 'set_result', 'arguments': {'expr': '2x = 4'}},
+            {'message': 'Subtracted 3 from both sides.'},
+        ], ledger=ledger)
+        self.assertEqual(outcome.status, 'completed')
+        self.assertEqual([s['op'] for s in ledger.steps],
+                         ['apply_both_sides', 'expand'])
+        self.assertEqual(session.result_override, '2x = 4')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+        # the OpenRouter path over the same moves lands on the same ledger
+        other = Ledger()
+        res = run_instruction('solve 2x + 3 = 7 for x', ledger=other,
+                              model=ScriptedModel(
+                                  [list(t) for t in SOLVE_SCRIPT]))
+        self.assertEqual([s['op'] for s in other.steps],
+                         [s['op'] for s in ledger.steps])
+        self.assertEqual([s['result'] for s in other.steps],
+                         [s['result'] for s in ledger.steps])
+        self.assertTrue(res['ok'])
+
+    def test_codex_prose_alone_cannot_designate_a_result(self):
+        session, _, outcome = self._run([
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+1)^2']}},
+            {'message': 'And therefore x = 2, trust me.'},
+        ])
+        self.assertEqual(outcome.final_text, 'And therefore x = 2, trust me.')
+        self.assertIsNone(session.result_override)
+        # the value exists only in the narrative: no ledger step establishes
+        # it, so it cannot be designated
+        self.assertIsNone(session.designate_result('x = 2'))
+        self.assertEqual(session.designate_result('x^{2}+2x+1')['status'],
+                         'verified')
+
+    def test_an_interrupt_stops_the_transcript_where_it_stands(self):
+        session = DoSession()
+        cancellation = agent_base.CancellationToken()
+        dispatcher = agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(session), cancellation)
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+1)^2']}},
+            {'block': True},
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+9)^2']}},
+            {'message': 'never reached'},
+        ])
+        outcome = {}
+        worker = threading.Thread(target=lambda: outcome.update(
+            value=transport.run_thread(
+                request=codex_transport.CodexThreadRequest(
+                    instruction='x', developer_instructions='y'),
+                on_tool_call=lambda params: codex_backend.tool_call_result(
+                    dispatcher, params))))
+        worker.start()
+        transport._released.wait(5)
+        transport.interrupt_turn('t1', 'r1')
+        worker.join(10)
+        self.assertEqual(outcome['value'].status, 'interrupted')
+        self.assertEqual(outcome['value'].tool_calls, ('run_tactic',))
+        self.assertEqual(transport.interrupts, [('t1', 'r1')])
+        self.assertEqual(len(session.ledger.steps), 1)
+
+
+SOLVE_TRANSCRIPT = [
+    {'tool': 'run_tactic',
+     'arguments': {'tactic': 'apply', 'arguments': ['2x + 3 = 7', '-', '3']}},
+    {'tool': 'run_tactic',
+     'arguments': {'tactic': 'expand', 'arguments': ['2x+3 - 3 = 7 - 3']}},
+    {'tool': 'set_result', 'arguments': {'expr': '2x = 4'}},
+    {'message': 'Subtracted 3 from both sides.'},
+]
+
+
+class TestCodexExecution(unittest.TestCase):
+    """A whole do! run over the Codex path, offline."""
+
+    def _backend(self, transcript, transport=None, **kwargs):
+        transport = transport or codex_transport.TranscriptTransport(
+            transcript)
+        return codex_backend.CodexBackend(transport=transport, **kwargs)
+
+    def test_a_derivation_lands_the_same_ledger_as_openrouter(self):
+        ledger = Ledger()
+        res = run_instruction('solve 2x + 3 = 7 for x', ledger=ledger,
+                              backend=self._backend(SOLVE_TRANSCRIPT))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['status'], 'completed')
+        self.assertEqual(res['final_result'], '2x = 4')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        self.assertEqual(res['summary'], 'Subtracted 3 from both sides.')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+        other = Ledger()
+        run_instruction('solve 2x + 3 = 7 for x', ledger=other,
+                        model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]))
+        self.assertEqual([(s['op'], s['input'], s['result'], s['hash'])
+                          for s in other.steps],
+                         [(s['op'], s['input'], s['result'], s['hash'])
+                          for s in ledger.steps])
+
+    def test_a_signed_out_machine_is_told_to_log_in(self):
+        transport = codex_transport.TranscriptTransport(
+            SOLVE_TRANSCRIPT,
+            account=codex_transport.CodexAccountStatus())
+        with self.assertRaises(agent_do.DoAgentError) as caught:
+            run_instruction('solve it', backend=self._backend(
+                None, transport=transport))
+        self.assertIn('login!', str(caught.exception))
+        self.assertEqual(transport.requests, [])   # no tokens spent
+
+    def test_the_thread_carries_the_generated_policy_and_the_tools(self):
+        transport = codex_transport.TranscriptTransport(SOLVE_TRANSCRIPT)
+        run_instruction('solve 2x + 3 = 7 for x',
+                        backend=self._backend(None, transport=transport))
+        thread = transport.requests[0]
+        names = [tool['name'] for tool in thread.dynamic_tools]
+        self.assertEqual(names[:7], list(agent_do.TOOL_NAMES))
+        # the per-thread instructions enumerate, then carry the do! rules
+        self.assertTrue(thread.developer_instructions.startswith(
+            codex_backend.POLICY_HEADER))
+        for name in names:
+            self.assertIn(name, thread.developer_instructions)
+        self.assertIn('## do! mode', thread.developer_instructions)
+
+    def test_the_thread_policy_lists_every_tool_the_session_offers(self):
+        # the regression: the allowlist the model is given must be the
+        # session's real surface, figure tools included. A policy naming
+        # fewer tools than are offered makes the model refuse the rest.
+        transport = codex_transport.TranscriptTransport(SOLVE_TRANSCRIPT)
+        run_instruction('solve 2x + 3 = 7 for x',
+                        backend=self._backend(None, transport=transport),
+                        plot_backend=FakePlotBackend(),
+                        tikz_backend=FakeTikzBackend())
+        thread = transport.requests[0]
+        offered = [tool['name'] for tool in thread.dynamic_tools]
+        self.assertIn('plot', offered)
+        self.assertIn('tikz', offered)
+        allowlist = thread.developer_instructions.split('\n\n')[1]
+        for name in offered:
+            self.assertIn(name, allowlist,
+                          f'{name} is offered but missing from the policy')
+
+    def test_the_thread_is_ephemeral_read_only_and_outside_the_repository(
+            self):
+        home = tempfile.mkdtemp(prefix='toymath-codex-home-')
+        self.addCleanup(shutil.rmtree, home, True)
+        _, workdir = codex_backend.ensure_home(home=home)
+        transport = codex_transport.AppServerTransport(
+            binary='/nonexistent', home=home, cwd=workdir)
+        params = transport.thread_params(
+            codex_transport.CodexThreadRequest(
+                instruction='x', developer_instructions='y'))
+        self.assertTrue(params['ephemeral'])
+        self.assertEqual(params['sandbox'], 'read-only')
+        self.assertEqual(params['approvalPolicy'], 'never')
+        self.assertEqual(params['cwd'], workdir)
+        repository = os.path.dirname(os.path.dirname(
+            os.path.abspath(agent_do.__file__)))
+        self.assertFalse(os.path.abspath(params['cwd']).startswith(
+            repository))
+        self.assertNotIn('model', params)      # the account's own default
+
+    def test_tool_dispatch_is_serialized_on_the_codex_path(self):
+        seen = {}
+        original = agent_base.ToolDispatcher.__init__
+
+        def record(self, bindings, *args, **kwargs):
+            seen['serialize'] = kwargs.get('serialize')
+            return original(self, bindings, *args, **kwargs)
+
+        with mock.patch.object(agent_base.ToolDispatcher, '__init__', record):
+            run_instruction('solve it',
+                            backend=self._backend(SOLVE_TRANSCRIPT))
+        self.assertTrue(seen['serialize'])
+
+    def test_every_run_gets_a_fresh_thread(self):
+        # ephemeral threads: no hidden conversational state carries from
+        # one do! cell to the next
+        transport = codex_transport.TranscriptTransport(SOLVE_TRANSCRIPT)
+        backend = self._backend(None, transport=transport)
+        run_instruction('solve it', backend=backend)
+        run_instruction('solve it again', backend=backend)
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual([r.instruction for r in transport.requests],
+                         ['solve it', 'solve it again'])
+
+
+class TestCodexCancellation(unittest.TestCase):
+    def _blocking(self, transport_class=None):
+        transport_class = (transport_class
+                           or codex_transport.TranscriptTransport)
+        return transport_class([
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+1)^2']}},
+            {'block': True},
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+9)^2']}},
+            {'message': 'never reached'},
+        ])
+
+    def _stop_when_blocked(self, transport):
+        """Press Stop once the transcript has parked."""
+        def stopper():
+            transport._released.wait(5)
+            time.sleep(0.05)
+            _thread.interrupt_main()
+        threading.Thread(target=stopper, daemon=True).start()
+
+    def test_stop_interrupts_the_exact_turn_and_keeps_the_steps(self):
+        ledger = Ledger()
+        transport = self._blocking()
+        self._stop_when_blocked(transport)
+        res = run_instruction('expand it', ledger=ledger, grace_period=1.0,
+                              backend=codex_backend.CodexBackend(
+                                  transport=transport))
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertTrue(res['cancelled'])
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(transport.interrupts, [('t1', 'r1')])
+        self.assertEqual([s['op'] for s in res['steps']], ['expand'])
+        self.assertEqual(res['partial_result'], 'x^{2}+2x+1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_runtime_that_ignores_the_interrupt_is_poisoned(self):
+        transport = self._blocking(codex_transport.StubbornTransport)
+        codex_backend.set_runtime(transport)
+        self.addCleanup(codex_backend.set_runtime, None)
+        self.addCleanup(transport._released.set)
+        self._stop_when_blocked(transport)
+        res = run_instruction('expand it', grace_period=0.2,
+                              backend=codex_backend.CodexBackend(
+                                  transport=transport))
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertTrue(res['error'])
+        self.assertTrue(transport.poisoned)
+        self.assertEqual(len(res['steps']), 1)
+
+    def test_a_residual_native_tool_invalidates_the_run(self):
+        ledger = Ledger()
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'run_tactic',
+             'arguments': {'tactic': 'expand', 'arguments': ['(x+1)^2']}},
+            {'tool': 'set_result', 'arguments': {'expr': 'x^{2}+2x+1'}},
+            {'native': 'update_plan'},
+            {'message': 'the answer is above'},
+        ])
+        res = run_instruction('expand it', ledger=ledger, grace_period=1.0,
+                              backend=codex_backend.CodexBackend(
+                                  transport=transport))
+        self.assertEqual(res['status'], 'capability_violation')
+        self.assertTrue(res['cancelled'])
+        self.assertIsNone(res['final_result'])   # nothing chainable
+        self.assertIsNone(res['summary'])        # the prose is discarded
+        self.assertIn('update_plan', res['error'])
+        # the mechanically checked step still stands and still replays
+        self.assertEqual([s['op'] for s in res['steps']], ['expand'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_the_budget_stops_a_codex_run_with_its_own_status(self):
+        res = run_instruction(
+            'expand forever', grace_period=1.0,
+            budget=agent_base.AgentBudget(max_tool_calls=1),
+            backend=codex_backend.CodexBackend(
+                transport=codex_transport.TranscriptTransport(
+                    SOLVE_TRANSCRIPT)))
+        self.assertEqual(res['status'], 'budget_exhausted')
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(len(res['steps']), 1)
+
+    def test_unknown_thread_items_fail_closed(self):
+        # a native capability ToyMath has never seen must not be waved
+        # through just because it is unrecognised
+        self.assertIsNone(codex_transport.native_capability('agentMessage'))
+        self.assertIsNone(
+            codex_transport.native_capability('dynamicToolCall'))
+        self.assertEqual(codex_transport.native_capability('plan'),
+                         'update_plan')
+        self.assertEqual(codex_transport.native_capability('commandExecution'),
+                         'shell')
+        self.assertEqual(codex_transport.native_capability('brandNewTool'),
+                         'brandNewTool')
+
+
+class TestCodexServerRequests(unittest.TestCase):
+    """Server-initiated requests: only a ToyMath tool call is answered.
+
+    The methods come from the pinned runtime's own `ServerRequest` schema.
+    Each refusal has to be that method's own shape - a generic `{}` is not
+    a valid response for most of them - and each has to invalidate the run.
+    """
+
+    def setUp(self):
+        self.seen = []
+
+    def _serve(self, method, params=None):
+        return codex_transport.serve_request(
+            method, params or {},
+            on_tool_call=lambda p: {'success': True, 'contentItems': []},
+            on_native_tool=self.seen.append)
+
+    def test_a_toymath_tool_call_is_the_only_thing_answered_normally(self):
+        reply = self._serve('item/tool/call', {'tool': 'comment'})
+        self.assertTrue(reply['success'])
+        self.assertEqual(self.seen, [])
+
+    def test_each_approval_gets_its_own_schemas_refusal(self):
+        cases = {
+            'item/commandExecution/requestApproval': {'decision': 'decline'},
+            'item/fileChange/requestApproval': {'decision': 'decline'},
+            'mcpServer/elicitation/request': {'action': 'decline'},
+            'item/permissions/requestApproval': {'permissions': {}},
+            'applyPatchApproval': {'decision': 'denied'},
+            'execCommandApproval': {'decision': 'denied'},
+        }
+        for method, expected in cases.items():
+            with self.subTest(method=method):
+                self.assertEqual(self._serve(method), expected)
+        self.assertEqual(self.seen, ['shell', 'apply_patch', 'mcp',
+                                     'permissions', 'apply_patch', 'shell'])
+
+    def test_a_token_refresh_is_refused_rather_than_answered(self):
+        # the only valid response carries an accessToken; ToyMath never
+        # holds one, so this must be an error, not a shaped reply
+        reply = self._serve('account/chatgptAuthTokens/refresh',
+                            {'reason': 'unauthorized'})
+        self.assertIsInstance(reply, codex_transport.ServerRefusal)
+        self.assertEqual(self.seen, ['chatgpt_auth_tokens'])
+
+    def test_asking_the_user_a_question_invalidates_the_run(self):
+        reply = self._serve('item/tool/requestUserInput', {'questions': []})
+        self.assertIsInstance(reply, codex_transport.ServerRefusal)
+        self.assertEqual(self.seen, ['request_user_input'])
+
+    def test_an_unknown_server_request_fails_closed(self):
+        reply = self._serve('capability/inventedLater', {})
+        self.assertIsInstance(reply, codex_transport.ServerRefusal)
+        self.assertEqual(self.seen, ['capability/inventedLater'])
+
+    def test_every_schema_method_but_the_tool_call_invalidates_the_run(self):
+        # the full ServerRequest set from the pinned runtime's schema
+        for method in codex_transport.SERVER_REQUEST_CAPABILITY:
+            with self.subTest(method=method):
+                self.seen.clear()
+                self._serve(method)
+                self.assertEqual(len(self.seen), 1)
+        self.assertNotIn('item/tool/call',
+                         codex_transport.SERVER_REQUEST_CAPABILITY)
+
+    def test_a_refused_request_reaches_the_wire_as_an_error(self):
+        written = []
+        transport = codex_transport.AppServerTransport.__new__(
+            codex_transport.AppServerTransport)
+        transport._write = written.append
+        transport._answer({'id': 'r1', 'method': 'attestation/generate'},
+                          lambda method, params: codex_transport.ServerRefusal(
+                              'nope'))
+        self.assertEqual(written[0]['id'], 'r1')
+        self.assertNotIn('result', written[0])
+        self.assertEqual(written[0]['error']['message'], 'nope')
+        self.assertEqual(written[0]['error']['code'],
+                         codex_transport.METHOD_REFUSED)
+
+
+class TestCodexHomeAndPolicy(unittest.TestCase):
+    """The dedicated home, and the one generated role/tool policy."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='toymath-codex-home-')
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.names = [b.name for b
+                      in agent_do.make_tool_bindings(DoSession())]
+
+    def test_the_policy_allowlist_is_generated_from_the_bindings(self):
+        # no second handwritten tactic list in Markdown: the allowed names
+        # come from the canonical binding map
+        policy = codex_backend.role_policy(self.names)
+        for name in self.names:
+            self.assertIn(name, policy)
+        for residual in codex_backend.RESIDUAL_NATIVE_TOOLS:
+            self.assertIn(residual, policy)
+        self.assertIn('Use only the client-provided ToyMath dynamic tools',
+                      policy)
+        self.assertIn('Model prose is', policy)
+        # "use only these tools", never "never use tools" - the derivation
+        # agent must call the verified surface
+        self.assertNotIn('Never use tools', policy)
+
+    def test_the_durable_home_policy_names_no_tools(self):
+        # It outlives the session that would define the list. `plot` and
+        # `tikz` exist only when the figure sandboxes resolved, so a home
+        # file written by `login!` once listed seven tools while the thread
+        # offered nine - and the model obeyed the stricter one, refusing to
+        # draw a diagram it had a working `tikz` for.
+        home, workdir = codex_backend.ensure_home(home=self.home)
+        with open(os.path.join(home, 'AGENTS.md'), encoding='utf-8') as fh:
+            written = fh.read()
+        self.assertEqual(written, codex_backend.role_policy())
+        for name in self.names:
+            self.assertNotIn(name, written)
+        self.assertIn('supplied with each thread', written)
+        # the prohibitions do not vary, so they stay in the durable form
+        for residual in codex_backend.RESIDUAL_NATIVE_TOOLS:
+            self.assertIn(residual, written)
+        # the runtime cwd is empty and inside the dedicated home, so no
+        # project AGENTS.md can join the instruction chain
+        self.assertEqual(os.listdir(workdir), [])
+        self.assertTrue(workdir.startswith(home))
+
+    def test_the_durable_policy_defers_to_the_threads_list(self):
+        # the two reach the model together, so the durable one must not
+        # read as a competing allowlist
+        durable = codex_backend.role_policy()
+        self.assertIn('treat that\nlist as authoritative', durable)
+
+    def test_the_home_is_never_the_general_codex_home(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(codex_backend.HOME_VAR, None)
+            default = codex_backend.home_path()
+        self.assertNotEqual(os.path.normpath(default),
+                            os.path.normpath(os.path.expanduser('~/.codex')))
+        self.assertIn('toymath', default)
+        with mock.patch.dict(os.environ,
+                             {codex_backend.HOME_VAR: self.home}):
+            self.assertEqual(codex_backend.home_path(), self.home)
+
+    def test_rewriting_the_policy_is_idempotent(self):
+        codex_backend.ensure_home(home=self.home)
+        path = os.path.join(self.home, 'AGENTS.md')
+        stamp = os.stat(path).st_mtime_ns
+        codex_backend.ensure_home(home=self.home)
+        self.assertEqual(os.stat(path).st_mtime_ns, stamp)
+
+    def test_a_missing_extra_names_the_install_command(self):
+        with mock.patch.object(codex_backend, 'runtime_binary',
+                               return_value=None):
+            self.assertFalse(codex_backend.available())
+            with self.assertRaises(agent_do.DoAgentError) as caught:
+                codex_backend.require_available()
+        # the hint must name a command that actually resolves: ToyMath is
+        # installed from a clone, so `toymath[codex]` is not on PyPI
+        self.assertIn('.[codex]', str(caught.exception))
+
+    # -- ownership: ensure_home rewrites AGENTS.md, so it must own the dir --
+    def test_pointing_the_home_at_the_general_one_is_refused(self):
+        general = os.path.join(self.home, 'dot-codex')
+        os.makedirs(general)
+        with mock.patch.dict(os.environ, {codex_backend.HOME_VAR: general,
+                                          'CODEX_HOME': general}):
+            with self.assertRaises(agent_do.DoAgentError) as caught:
+                codex_backend.home_path()
+        self.assertIn('general Codex home', str(caught.exception))
+
+    def test_an_unrelated_populated_directory_is_never_adopted(self):
+        # a mistyped TOYMATH_CODEX_HOME must not silently overwrite the
+        # AGENTS.md of whatever it happened to name
+        project = os.path.join(self.home, 'someones-project')
+        os.makedirs(project)
+        policy = os.path.join(project, 'AGENTS.md')
+        with open(policy, 'w', encoding='utf-8') as handle:
+            handle.write('# Their project instructions\n')
+        with self.assertRaises(agent_do.DoAgentError) as caught:
+            codex_backend.ensure_home(home=project)
+        self.assertIn('not created by ToyMath', str(caught.exception))
+        with open(policy, encoding='utf-8') as handle:
+            self.assertEqual(handle.read(), '# Their project instructions\n')
+
+    def test_a_home_toymath_created_earlier_is_adopted_and_marked(self):
+        # the layout ToyMath wrote before the ownership marker existed
+        os.makedirs(os.path.join(self.home, codex_backend.WORKDIR))
+        with open(os.path.join(self.home, 'AGENTS.md'), 'w',
+                  encoding='utf-8') as handle:
+            handle.write(codex_backend.role_policy())
+        codex_backend.ensure_home(home=self.home)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.home, codex_backend.OWNER_MARKER)))
+
+    def test_a_fresh_home_is_marked_as_toymaths_own(self):
+        codex_backend.ensure_home(home=self.home)
+        codex_backend.ensure_home(home=self.home)   # idempotent
+        self.assertTrue(os.path.exists(
+            os.path.join(self.home, codex_backend.OWNER_MARKER)))
+
+    # -- MCP containment ---------------------------------------------------
+    def _write_config(self, text):
+        with open(os.path.join(self.home, codex_backend.CONFIG_FILE), 'w',
+                  encoding='utf-8') as handle:
+            handle.write(text)
+
+    def test_no_config_means_no_mcp_overrides(self):
+        self.assertEqual(codex_backend.mcp_overrides(self.home), ())
+
+    def test_every_configured_mcp_server_is_disabled_by_name(self):
+        # measured against the real runtime: a whole-table override merges
+        # instead of replacing, so each server must be named individually
+        self._write_config('[mcp_servers.alpha]\ncommand = "a"\n\n'
+                           '[mcp_servers.beta]\ncommand = "b"\n')
+        self.assertEqual(
+            codex_backend.mcp_overrides(self.home),
+            ('mcp_servers.alpha.enabled=false',
+             'mcp_servers.beta.enabled=false'))
+
+    def test_a_server_name_that_cannot_be_disabled_is_a_hard_error(self):
+        # a dotted/quoted key cannot be addressed by a dotted override, and
+        # leaving one enabled is not an option
+        self._write_config('[mcp_servers."a.b"]\ncommand = "x"\n')
+        with self.assertRaises(agent_do.DoAgentError) as caught:
+            codex_backend.mcp_overrides(self.home)
+        self.assertIn('cannot reliably disable', str(caught.exception))
+
+    def test_an_unreadable_config_fails_closed(self):
+        self._write_config('this is not = = toml\n')
+        with self.assertRaises(agent_do.DoAgentError) as caught:
+            codex_backend.mcp_overrides(self.home)
+        self.assertIn('could not be read', str(caught.exception))
+
+
+class TestCodexAuthentication(unittest.TestCase):
+    """Managed ChatGPT sign-in: a URL and a status, never a token."""
+
+    def setUp(self):
+        self.transport = codex_transport.TranscriptTransport(
+            account=codex_transport.CodexAccountStatus())
+        codex_backend.set_runtime(self.transport)
+        self.addCleanup(codex_backend.set_runtime, None)
+
+    def test_browser_login_shows_a_url_and_reports_the_account(self):
+        seen = []
+        status = codex_backend.login('chatgpt', on_challenge=seen.append)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].auth_url.startswith('https://'))
+        self.assertIsNone(seen[0].user_code)
+        self.assertTrue(status.logged_in)
+        self.assertEqual(status.auth_mode, 'chatgpt')
+        self.assertEqual(status.plan_type, 'plus')
+
+    def test_device_login_shows_a_verification_url_and_code(self):
+        seen = []
+        codex_backend.login('chatgptDeviceCode', on_challenge=seen.append)
+        self.assertEqual(seen[0].kind, 'chatgptDeviceCode')
+        self.assertTrue(seen[0].verification_uri)
+        self.assertEqual(seen[0].user_code, 'ABCD-EFGH')
+
+    def test_only_managed_modes_are_accepted(self):
+        # no externally managed chatgptAuthTokens flow, and no way to hand
+        # ToyMath a raw token
+        for mode in ('apiKey', 'chatgptAuthTokens', 'token'):
+            with self.assertRaises(ValueError):
+                self.transport.login_start(mode)
+
+    def test_only_a_managed_chatgpt_account_may_run_a_derivation(self):
+        # `logged_in` is also true for the runtime's apiKey and
+        # amazonBedrock account types, which bill a different - possibly
+        # organizational - credential. Running on one by accident is the
+        # kind of mistake the user finds out about on an invoice.
+        session = DoSession()
+        dispatcher = agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(session),
+            agent_base.CancellationToken())
+        request = agent_base.AgentRequest(
+            instruction='x', developer_instructions='y',
+            dispatcher=dispatcher, cancellation=dispatcher.cancellation)
+        for mode in ('apiKey', 'amazonBedrock'):
+            with self.subTest(mode=mode):
+                transport = codex_transport.TranscriptTransport(
+                    account=codex_transport.CodexAccountStatus(
+                        logged_in=True, auth_mode=mode))
+                backend = codex_backend.CodexBackend(transport=transport)
+                with self.assertRaises(agent_do.DoAgentError) as caught:
+                    backend.start(request)
+                self.assertIn('managed ChatGPT', str(caught.exception))
+                self.assertIn(mode, str(caught.exception))
+
+    def test_a_signed_out_account_still_says_to_run_login(self):
+        transport = codex_transport.TranscriptTransport(
+            account=codex_transport.CodexAccountStatus())
+        with self.assertRaises(agent_do.DoAgentError) as caught:
+            codex_backend.require_managed_account(transport.account_read())
+        self.assertIn('login!', str(caught.exception))
+
+    def test_usable_is_stricter_than_logged_in(self):
+        managed = codex_transport.CodexAccountStatus(logged_in=True,
+                                                     auth_mode='chatgpt')
+        self.assertTrue(managed.usable)
+        self.assertTrue(codex_backend.require_managed_account(managed))
+        for mode in ('apiKey', 'amazonBedrock', None):
+            status = codex_transport.CodexAccountStatus(logged_in=True,
+                                                        auth_mode=mode)
+            self.assertTrue(status.logged_in)
+            self.assertFalse(status.usable)
+
+    def test_an_interrupted_login_is_cancelled_on_the_app_server(self):
+        self.transport.pending_login = threading.Event()
+        cancellation = agent_base.CancellationToken()
+        worker = threading.Thread(
+            target=lambda: self._swallow(cancellation))
+        worker.start()
+        for _ in range(200):
+            if self.transport.logins:
+                break
+            time.sleep(0.01)
+        cancellation.cancel('user')
+        self.transport.pending_login.set()
+        worker.join(10)
+        self.assertEqual(self.transport.cancelled_login,
+                         self.transport.logins[0])
+
+    def _swallow(self, cancellation):
+        try:
+            codex_backend.login('chatgpt', cancellation=cancellation,
+                                timeout=5)
+        except agent_do.DoAgentError:
+            pass
+
+    def test_login_cancellation_has_its_own_short_deadline(self):
+        # this runs on the Stop path: the transport's ordinary 60s request
+        # timeout would hold the kernel long after the user gave up
+        self.transport.pending_login = threading.Event()
+        cancellation = agent_base.CancellationToken()
+        worker = threading.Thread(target=lambda: self._swallow(cancellation))
+        worker.start()
+        for _ in range(200):
+            if self.transport.logins:
+                break
+            time.sleep(0.01)
+        cancellation.cancel('user')
+        self.transport.pending_login.set()
+        worker.join(10)
+        self.assertEqual(self.transport.cancel_timeout,
+                         codex_backend.LOGIN_CANCEL_TIMEOUT)
+        self.assertLess(codex_backend.LOGIN_CANCEL_TIMEOUT,
+                        codex_transport.AppServerTransport.REQUEST_TIMEOUT)
+
+    def test_a_runtime_that_will_not_cancel_a_login_is_replaced(self):
+        # an unacknowledged cancellation means the challenge is still open;
+        # that runtime is not trusted again
+        transport = codex_transport.TranscriptTransport()
+
+        def refuse(login_id, timeout=None):
+            raise codex_transport.CodexUnavailable('no answer')
+
+        transport.login_cancel = refuse
+        codex_backend.set_runtime(transport)
+        codex_backend._cancel_login(transport, 'login-1')
+        self.assertTrue(transport.poisoned)
+        # dropped from the kernel runtime slot, so the next command builds
+        # a fresh one rather than reusing it
+        self.assertIsNone(codex_backend._runtime['transport'])
+
+    def test_status_and_logout_go_through_the_managed_endpoints(self):
+        codex_backend.login('chatgpt')
+        self.assertTrue(codex_backend.account_status().logged_in)
+        self.assertFalse(codex_backend.logout().logged_in)
+
+    def test_the_account_record_carries_no_identifier(self):
+        # app-server reports an email; ToyMath must not keep it, so no log
+        # line, exception, ledger record, or trace can leak one
+        transport = codex_transport.AppServerTransport(binary='/nonexistent')
+        payload = {'requiresOpenaiAuth': False,
+                   'account': {'type': 'chatgpt', 'planType': 'pro',
+                               'email': 'someone@example.com'}}
+        with mock.patch.object(transport, 'request', return_value=payload):
+            status = transport.account_read()
+        self.assertEqual(status.plan_type, 'pro')
+        self.assertNotIn('email', dataclasses.asdict(status))
+        self.assertNotIn('example.com', repr(status))
+
+
+class TestBackendResolution(unittest.TestCase):
+    """Auto-selection, and the rule that a run never fails over."""
+
+    def setUp(self):
+        # the observed-account cache is process-wide; no test may inherit it
+        agent_config.forget_codex_account()
+        self.addCleanup(agent_config.forget_codex_account)
+
+    def _env(self, **overrides):
+        env = {key: value for key, value in os.environ.items()
+               if key not in (agent_config.BACKEND_VAR,
+                              agent_config.OPENROUTER_KEY_VAR)}
+        env.update(overrides)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_an_explicit_notebook_choice_wins(self):
+        route = agent_config.AgentRoute(backend='codex')
+        with self._env(**{agent_config.BACKEND_VAR: 'openrouter',
+                          agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            resolution = agent_config.resolve(route)
+        self.assertEqual(resolution.backend, 'codex')
+        self.assertIn('notebook', resolution.reason)
+
+    def test_the_environment_setting_comes_next(self):
+        with self._env(**{agent_config.BACKEND_VAR: 'codex',
+                          agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            resolution = agent_config.resolve(agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'codex')
+        self.assertIn(agent_config.BACKEND_VAR, resolution.reason)
+
+    def test_an_existing_openrouter_install_is_unchanged(self):
+        # the precedence that matters for everyone already using ToyMath
+        with self._env(**{agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            with mock.patch.object(agent_config, '_codex_usable',
+                                   side_effect=AssertionError('probed')):
+                resolution = agent_config.resolve(agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'openrouter')
+
+    def test_codex_is_chosen_only_when_signed_in(self):
+        with self._env():
+            with mock.patch.object(agent_config, '_codex_usable',
+                                   return_value=True):
+                self.assertEqual(
+                    agent_config.resolve(agent_config.AgentRoute()).backend,
+                    'codex')
+            with mock.patch.object(agent_config, '_codex_usable',
+                                   return_value=False):
+                with self.assertRaises(agent_do.DoAgentError) as caught:
+                    agent_config.resolve(agent_config.AgentRoute())
+        message = str(caught.exception)
+        self.assertIn('login!', message)
+        self.assertIn(agent_config.OPENROUTER_KEY_VAR, message)
+
+    def test_an_api_key_account_is_never_auto_selected(self):
+        # logged in, but on a credential this backend refuses to spend
+        status = codex_transport.CodexAccountStatus(logged_in=True,
+                                                    auth_mode='apiKey')
+        with self._env():
+            with mock.patch('agent_backends.codex.available',
+                            return_value=True):
+                with mock.patch('agent_backends.codex.account_status',
+                                return_value=status):
+                    with self.assertRaises(agent_do.DoAgentError):
+                        agent_config.resolve(agent_config.AgentRoute())
+
+    def test_a_failing_account_probe_never_escapes(self):
+        with self._env():
+            with mock.patch('agent_backends.codex.account_status',
+                            side_effect=RuntimeError('runtime is down')):
+                self.assertFalse(agent_config._codex_usable())
+
+    def test_preview_never_starts_a_codex_runtime(self):
+        with self._env():
+            with mock.patch('agent_backends.codex.account_status',
+                            side_effect=AssertionError('probed')):
+                resolution = agent_config.preview(agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'auto')
+
+    def test_preview_agrees_with_routing_once_the_account_is_known(self):
+        # a signed-in user must not be told the notebook is unconfigured
+        # while do! would in fact route to Codex
+        status = codex_transport.CodexAccountStatus(logged_in=True,
+                                                    auth_mode='chatgpt')
+        with self._env():
+            self.assertEqual(
+                agent_config.preview(agent_config.AgentRoute()).backend,
+                'auto')                       # nothing has looked yet
+            agent_config.note_codex_account(status)
+            with mock.patch('agent_backends.codex.available',
+                            return_value=True):
+                with mock.patch('agent_backends.codex.account_status',
+                                side_effect=AssertionError('probed')):
+                    resolution = agent_config.preview(
+                        agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'codex')
+
+    def test_signing_out_stops_advertising_codex(self):
+        with self._env():
+            with mock.patch('agent_backends.codex.available',
+                            return_value=True):
+                agent_config.note_codex_account(
+                    codex_transport.CodexAccountStatus(logged_in=True,
+                                                       auth_mode='chatgpt'))
+                self.assertEqual(
+                    agent_config.preview(agent_config.AgentRoute()).backend,
+                    'codex')
+                agent_config.note_codex_account(
+                    codex_transport.CodexAccountStatus())
+                self.assertEqual(
+                    agent_config.preview(agent_config.AgentRoute()).backend,
+                    'auto')
+
+    def test_switching_backend_resets_the_model_to_that_backend_default(self):
+        route = agent_config.AgentRoute(backend='openrouter',
+                                        model='z-ai/glm-5.2',
+                                        providers=('Cerebras',))
+        moved = route.with_backend('codex')
+        self.assertEqual(moved.backend, 'codex')
+        self.assertEqual(moved.providers, ())
+        self.assertIsNone(moved.model)      # the account's own default
+        self.assertTrue(moved.experimental)
+
+    def test_a_run_never_falls_back_to_the_other_backend(self):
+        # a Codex failure must not silently create OpenRouter charges
+        transport = codex_transport.TranscriptTransport(
+            [], account=codex_transport.CodexAccountStatus())
+        with mock.patch.dict(os.environ,
+                             {agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            with self.assertRaises(agent_do.DoAgentError):
+                run_instruction('solve it',
+                                backend=codex_backend.CodexBackend(
+                                    transport=transport))
+
+    def test_backend_completion_offers_the_three_names(self):
+        code = 'backend! co'
+        reply = agent_config.complete_backend_command(code, len(code))
+        self.assertEqual(reply['matches'], ['codex'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'co')
+        self.assertIn('experimental',
+                      reply['metadata']['_jupyter_types_experimental'][0]
+                      ['type'])
+        self.assertEqual(
+            agent_config.complete_backend_command('backend! ', 9)['matches'],
+            ['auto', 'openrouter', 'codex'])
+        self.assertIsNone(
+            agent_config.complete_backend_command('solve! x', 8))
+
+    def test_login_completion_offers_its_options(self):
+        code = 'login! st'
+        reply = agent_config.complete_login_command(code, len(code))
+        self.assertEqual(reply['matches'], ['status'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'st')
+        self.assertEqual(reply['status'], 'ok')
+        self.assertEqual(
+            agent_config.complete_login_command('login! ', 7)['matches'],
+            ['device', 'status', 'logout'])
+        self.assertIsNone(agent_config.complete_login_command('solve! x', 8))
+
+    def test_every_completed_login_option_reaches_its_own_handler(self):
+        # sharing one list makes the popup and the validation agree by
+        # construction; what it cannot prevent is an option that passes
+        # validation and then falls through to the wrong branch - a new
+        # entry with no dispatch of its own would silently become a
+        # browser sign-in. Assert where each offered option actually lands.
+        import engine
+        import mathShell
+        import IPython.display
+        engine.setHandler(lambda *objs, **kw: None)
+        self.addCleanup(engine.setHandler, IPython.display.display)
+        shell = mathShell.MathShell()
+        expected = {'device': ('login', 'chatgptDeviceCode'),
+                    'status': ('account_status', None),
+                    'logout': ('logout', None),
+                    '': ('login', 'chatgpt')}
+        offered = agent_config.complete_login_command('login! ', 7)['matches']
+        self.assertTrue(offered)
+        for option in list(offered) + ['']:      # '' is the bare `login!`
+            with self.subTest(option=option):
+                self.assertIn(option, expected,
+                              'a login! option with no expected handler')
+                called = []
+                patches = {name: mock.DEFAULT for name in
+                           ('login', 'logout', 'account_status')}
+                with mock.patch.object(mathShell.MathShell, '_render_account'):
+                    with mock.patch.multiple('agent_backends.codex',
+                                             **patches) as mocks:
+                        shell.exec_login(option)
+                        called = [name for name, m in mocks.items()
+                                  if m.called]
+                        handler, mode = expected[option]
+                        self.assertEqual(called, [handler])
+                        if mode is not None:
+                            self.assertEqual(mocks['login'].call_args[0][0],
+                                             mode)
+
+    def test_completion_only_fires_at_an_argument_position(self):
+        # the frontend opens the popup unprompted, so a line that merely
+        # mentions a command must not produce completions
+        for code in ('backend!', 'login!', 'x + backend! ', '$login! '):
+            with self.subTest(code=code):
+                self.assertIsNone(
+                    agent_config.complete_backend_command(code, len(code)))
+                self.assertIsNone(
+                    agent_config.complete_login_command(code, len(code)))
+
+    def test_completion_reads_the_line_holding_the_cursor(self):
+        code = 'x^2\nlogin! dev'
+        reply = agent_config.complete_login_command(code, len(code))
+        self.assertEqual(reply['matches'], ['device'])
+        self.assertEqual(code[reply['cursor_start']:reply['cursor_end']],
+                         'dev')
+
+
+class TestBackendCommand(unittest.TestCase):
+    def setUp(self):
+        import engine
+        self.displays = []
+        engine.setHandler(lambda *objs, **kw: self.displays.extend(objs))
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def test_backend_is_a_reserved_dispatcher_command(self):
+        import prompt_commands
+        self.assertIn('backend', prompt_commands.RESERVED)
+        with self.assertRaises(ValueError):
+            prompt_commands.parse_command(
+                '---\nname: backend\ndescription: d\n---\n$ARGUMENTS',
+                'backend')
+
+    def test_selection_is_notebook_local_and_explicit(self):
+        self.shell.exec('backend! codex', 1)
+        self.assertEqual(self.shell.route.backend, 'codex')
+        self.assertIn('experimental', self._html())
+        from mathShell import MathShell
+        self.assertEqual(MathShell().route.backend, 'auto')
+
+    def test_a_fresh_notebook_carries_no_backend_specific_model(self):
+        # an OpenRouter model id means nothing to Codex: until the notebook
+        # chooses one, each backend supplies its own default, so
+        # auto-resolution can never hand one backend the other's model
+        self.assertIsNone(self.shell.route.model)
+        self.shell.exec('backend! codex', 1)
+        self.assertIsNone(self.shell.route.model)
+        self.assertIn('codex default', self._html())
+
+    def test_an_unknown_backend_is_refused(self):
+        self.shell.exec('backend! anthropic', 1)
+        self.assertIn('backend! error', self._html())
+        self.assertEqual(self.shell.route.backend, 'auto')
+
+    def test_bare_backend_shows_the_effective_routing_and_why(self):
+        with mock.patch.dict(os.environ,
+                             {agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            self.shell.exec('backend!', 1)
+        out = self._html()
+        self.assertIn('openrouter', out)
+        self.assertIn(agent_config.OPENROUTER_KEY_VAR, out)
+        self.assertIn('agent model', out)
+
+    def test_switching_backend_resets_the_model_and_notifies_once(self):
+        seen = []
+        self.shell.model_change_handler = seen.append
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        self.shell.exec('backend! codex', 2)
+        self.assertEqual([route.backend for route in seen],
+                         ['auto', 'codex'])
+        self.assertIsNone(self.shell.route.model)
+        self.assertEqual(self.shell.route.providers, ())
+
+    def test_a_legacy_two_argument_handler_still_works(self):
+        seen = []
+        self.shell.model_change_handler = (
+            lambda model, providers: seen.append((model, providers)))
+        self.shell.exec('model! z-ai/glm-5.2', 1)
+        self.assertEqual(seen, [('z-ai/glm-5.2', ('Cerebras', 'Fireworks'))])
+
+    def test_codex_model_selection_uses_the_account_catalog(self):
+        transport = codex_transport.TranscriptTransport([])
+        codex_backend.set_runtime(transport)
+        self.addCleanup(codex_backend.set_runtime, None)
+        self.shell.exec('backend! codex', 1)
+        self.displays.clear()
+        self.shell.exec('model!', 2)
+        self.assertIn('gpt-5.6-luna', self._html())
+        self.displays.clear()
+        self.shell.exec('model! gpt-5.6-luna', 3)
+        self.assertEqual(self.shell.route.model, 'gpt-5.6-luna')
+        self.displays.clear()
+        # a model this account does not offer, and provider routing, are
+        # both refused rather than silently sent
+        self.shell.exec('model! z-ai/glm-5.2', 4)
+        self.assertIn('model! error', self._html())
+        self.displays.clear()
+        self.shell.exec('model! gpt-5.6-luna, Cerebras', 5)
+        self.assertIn('no provider routing', self._html())
+        self.assertEqual(self.shell.route.model, 'gpt-5.6-luna')
+
+    def test_the_kernel_payload_carries_backend_and_model(self):
+        from toymathkernel import MathKernel
+        kernel = mock.Mock(spec=['mathShell'])
+        kernel.mathShell = self.shell
+        with mock.patch.dict(os.environ,
+                             {agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            payload = MathKernel._model_payload(kernel)
+        self.assertEqual(payload['backend'], 'openrouter')
+        self.assertFalse(payload['experimental'])
+        self.assertTrue(payload['model'])
+        self.shell.exec('backend! codex', 1)
+        payload = MathKernel._model_payload(kernel)
+        self.assertEqual(payload['backend'], 'codex')
+        self.assertTrue(payload['experimental'])
+        self.assertEqual(payload['model'], 'codex default')
+
+
+class TestLoginCommand(unittest.TestCase):
+    def setUp(self):
+        import engine
+        self.displays = []
+        engine.setHandler(lambda *objs, **kw: self.displays.extend(objs))
+        from mathShell import MathShell
+        self.shell = MathShell()
+        self.transport = codex_transport.TranscriptTransport(
+            account=codex_transport.CodexAccountStatus())
+        codex_backend.set_runtime(self.transport)
+        self.addCleanup(codex_backend.set_runtime, None)
+        # every test in this class exercises login!; none of them may open a
+        # browser, so the default is "no browser available" and the tests
+        # that care about the opened path say so explicitly
+        import mathShell
+        patch = mock.patch.object(mathShell, '_open_browser',
+                                  return_value=False)
+        self.opened = patch.start()
+        self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def test_login_is_a_reserved_dispatcher_command(self):
+        import prompt_commands
+        self.assertIn('login', prompt_commands.RESERVED)
+        with self.assertRaises(ValueError):
+            prompt_commands.parse_command(
+                '---\nname: login\ndescription: d\n---\n$ARGUMENTS', 'login')
+
+    def test_browser_flow_keeps_the_one_time_link_out_of_the_notebook(self):
+        # Jupyter persists cell output into the .ipynb, so the sign-in URL
+        # goes to the OS browser instead of into the saved file
+        import mathShell
+        with mock.patch.object(mathShell, '_open_browser',
+                               return_value=True) as opened:
+            self.shell.exec('login!', 1)
+        opened.assert_called_once()
+        self.assertTrue(opened.call_args[0][0].startswith('https://'))
+        out = self._html()
+        self.assertNotIn('auth.openai.test', out)
+        self.assertIn('not stored in this notebook', out)
+        self.assertIn('signed in', out)
+        self.assertIn('plus plan', out)
+
+    def test_without_a_browser_the_link_is_shown_and_labelled(self):
+        self.shell.exec('login!', 1)               # setUp: no browser
+        out = self._html()
+        self.assertIn('auth.openai.test', out)     # the only way in
+        self.assertIn('No browser could be opened', out)
+        self.opened.assert_called_once()
+
+    def test_no_test_can_reach_a_real_browser(self):
+        # the module-level backstop behind the per-class patch: a forgotten
+        # patch must not open a window at auth.openai.test
+        import webbrowser
+        self.assertFalse(webbrowser.open('https://auth.openai.test/activate'))
+        self.assertIsInstance(webbrowser.open, mock.MagicMock)
+
+    def test_no_test_can_reach_the_real_codex_home(self):
+        # backend auto-resolution probes for a signed-in account, which
+        # starts an app-server against the user's own authenticated home
+        # and keeps it for the rest of the process. Not from a test suite.
+        home = codex_backend.home_path()
+        self.assertEqual(home, _SANDBOX_HOME)
+        self.assertNotEqual(
+            os.path.realpath(home),
+            os.path.realpath(os.path.expanduser('~/.toymath/codex-home')))
+
+    def test_device_flow_renders_the_code(self):
+        self.shell.exec('login! device', 1)
+        out = self._html()
+        self.assertIn('ABCD-EFGH', out)
+        self.assertIn('auth.openai.test/device', out)
+
+    def test_a_spent_challenge_is_cleared_from_the_cell(self):
+        # the device code has to be readable while the user types it, and
+        # must not survive into the saved notebook afterwards
+        import engine
+        seen = []
+        engine.setHandler(lambda *objs, **kw: seen.append((objs, kw)))
+        self.shell.exec('login! device', 1)
+        challenge, account = seen[0], seen[-1]
+        self.assertIn('ABCD-EFGH', challenge[0][0].data)
+        self.assertFalse(challenge[1].get('clear_output'))
+        self.assertIn('signed in', account[0][0].data)
+        self.assertTrue(account[1].get('clear_output'))
+
+    def test_an_interrupted_login_also_clears_the_challenge(self):
+        import engine
+        seen = []
+        engine.setHandler(lambda *objs, **kw: seen.append((objs, kw)))
+        with mock.patch.object(codex_backend, 'login',
+                               side_effect=KeyboardInterrupt):
+            self.shell.exec('login! device', 1)
+        self.assertIn('login cancelled', seen[-1][0][0].data)
+        self.assertTrue(seen[-1][1].get('clear_output'))
+
+    def test_status_and_logout(self):
+        self.shell.exec('login! status', 1)
+        self.assertIn('signed out', self._html())
+        self.displays.clear()
+        self.shell.exec('login!', 2)
+        self.displays.clear()
+        self.shell.exec('login! logout', 3)
+        self.assertIn('signed out', self._html())
+
+    def test_unknown_option_is_refused_with_the_usage(self):
+        self.shell.exec('login! sk-secret-token-value', 1)
+        out = self._html()
+        self.assertIn('login! error', out)
+        self.assertIn('login! device', out)
+        self.assertEqual(self.transport.logins, [])
+        self.assertNotIn('sk-secret-token-value', repr(self.transport))
+
+    def test_signing_in_never_changes_the_selected_model_routing(self):
+        before = (self.shell.model_name, self.shell.model_providers)
+        self.shell.exec('login!', 1)
+        self.assertEqual((self.shell.model_name, self.shell.model_providers),
+                         before)
+        self.assertEqual(len(self.shell.ledger.steps), 0)
+
+    def test_signing_in_republishes_the_effective_backend(self):
+        # on `backend! auto` the effective backend is a function of the
+        # login state, so it can change without the route changing at all.
+        # The toolbar would otherwise keep advertising the pre-login answer.
+        agent_config.forget_codex_account()
+        self.addCleanup(agent_config.forget_codex_account)
+        published = []
+        self.shell.model_change_handler = published.append
+        env = {key: value for key, value in os.environ.items()
+               if key not in (agent_config.BACKEND_VAR,
+                              agent_config.OPENROUTER_KEY_VAR)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch('agent_backends.codex.available',
+                            return_value=True):
+                self.assertEqual(self.shell.backend_name, 'auto')
+                self.shell.exec('login!', 1)
+                self.assertEqual(self.shell.backend_name, 'codex')
+                self.assertEqual(len(published), 1)
+                self.displays.clear()
+                self.shell.exec('login! logout', 2)
+                self.assertEqual(self.shell.backend_name, 'auto')
+                self.assertEqual(len(published), 2)
+
+    def test_an_unusable_account_is_reported_as_such(self):
+        self.transport.account = codex_transport.CodexAccountStatus(
+            logged_in=True, auth_mode='apiKey')
+        self.shell.exec('login! status', 1)
+        out = self._html()
+        self.assertIn('apiKey', out)
+        self.assertIn('ToyMath does not use', out)
+        self.assertNotIn('<strong>signed in</strong>', out)
+
+
+class TestToolDispatcher(unittest.TestCase):
+    def _dispatcher(self, session=None, **kwargs):
+        session = session if session is not None else DoSession()
+        cancellation = kwargs.pop('cancellation', None)
+        return session, agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(session),
+            cancellation or agent_base.CancellationToken(), **kwargs)
+
+    def test_a_refusing_tactic_is_still_a_successful_dispatch(self):
+        # a ToyMath record answering {"ok": false} ran and rejected the
+        # request; only transport-level failures are dispatch errors, so
+        # the model can still repair
+        _, dispatcher = self._dispatcher()
+        record = json.loads(dispatcher.dispatch(
+            'run_tactic', {'tactic': 'expand', 'arguments': ['\\frac{1}{']}))
+        self.assertFalse(record['ok'])
+        self.assertTrue(record.get('error'))
+
+    def test_a_queued_serialized_call_does_not_start_after_cancellation(self):
+        # the checks before the queue happened while the run was alive; a
+        # call that waited behind an executing handler must re-check, or it
+        # begins work on a session that was stopped meanwhile
+        cancellation = agent_base.CancellationToken()
+        session, dispatcher = self._dispatcher(cancellation=cancellation,
+                                               serialize=True)
+        holding = threading.Event()
+        release = threading.Event()
+        started = []
+
+        def slow(payload):
+            started.append('first')
+            holding.set()
+            release.wait(5)
+            return '{"ok": true}'
+
+        def second(payload):
+            started.append('second')
+            return '{"ok": true}'
+
+        binding = dispatcher.bindings['comment']
+        dispatcher.bindings['first'] = agent_base.ToolBinding(
+            'first', 'd', binding.input_schema, slow)
+        dispatcher.bindings['second'] = agent_base.ToolBinding(
+            'second', 'd', binding.input_schema, second)
+
+        replies = {}
+        args = {'text': 'x'}
+        threading.Thread(
+            target=lambda: replies.setdefault(
+                'first', dispatcher.dispatch('first', args)),
+            daemon=True).start()
+        self.assertTrue(holding.wait(5))
+        queued = threading.Thread(
+            target=lambda: replies.setdefault(
+                'second', dispatcher.dispatch('second', args)),
+            daemon=True)
+        queued.start()
+        time.sleep(0.1)                      # 'second' is now behind the lock
+        cancellation.cancel(agent_base.USER)
+        release.set()
+        queued.join(5)
+
+        self.assertEqual(started, ['first'])
+        self.assertTrue(json.loads(replies['second'])['cancelled'])
+
+    def test_unknown_tool_and_malformed_arguments_are_distinguished(self):
+        _, dispatcher = self._dispatcher()
+        with self.assertRaises(agent_base.UnknownToolError):
+            dispatcher.dispatch('frobnicate', {})
+        with self.assertRaises(agent_base.ToolArgumentError):
+            dispatcher.dispatch('run_tactic', '{not json')
+        with self.assertRaises(agent_base.ToolArgumentError):
+            dispatcher.dispatch('run_tactic', {'tactic': 'expand'})
+
+    def test_no_new_tool_call_starts_after_cancellation(self):
+        session, dispatcher = self._dispatcher()
+        dispatcher.dispatch('run_tactic',
+                            {'tactic': 'expand', 'arguments': ['(x+1)^2']})
+        dispatcher.cancellation.cancel('user')
+        session.close('user')
+        reply = json.loads(dispatcher.dispatch(
+            'run_tactic', {'tactic': 'expand', 'arguments': ['(x+2)^2']}))
+        self.assertFalse(reply['ok'])
+        self.assertTrue(reply['cancelled'])
+        self.assertEqual(len(session.ledger.steps), 1)
+
+    def test_tool_budget_stops_the_run_and_keeps_earlier_steps(self):
+        session, dispatcher = self._dispatcher(
+            budget=agent_base.AgentBudget(max_tool_calls=1))
+        first = json.loads(dispatcher.dispatch(
+            'run_tactic', {'tactic': 'expand', 'arguments': ['(x+1)^2']}))
+        self.assertTrue(first['ok'])
+        second = json.loads(dispatcher.dispatch(
+            'run_tactic', {'tactic': 'expand', 'arguments': ['(x+2)^2']}))
+        self.assertFalse(second['ok'])
+        self.assertEqual(dispatcher.cancellation.reason, agent_base.BUDGET)
+        self.assertEqual(len(session.ledger.steps), 1)
+
+
+class TestCancellationToken(unittest.TestCase):
+    def test_first_reason_wins_and_cancel_is_idempotent(self):
+        token = agent_base.CancellationToken()
+        self.assertFalse(token.cancelled)
+        self.assertTrue(token.cancel('user'))
+        self.assertFalse(token.cancel('budget'))
+        self.assertTrue(token.cancelled)
+        self.assertEqual(token.reason, 'user')
+
+    def test_listeners_run_once_and_never_lose_a_race(self):
+        token = agent_base.CancellationToken()
+        seen = []
+        token.add_listener(seen.append)
+        token.cancel('budget')
+        token.cancel('user')
+        self.assertEqual(seen, ['budget'])
+        late = []
+        token.add_listener(late.append)   # registered after the fact
+        self.assertEqual(late, ['budget'])
+
+    def test_a_failing_listener_cannot_break_cancellation(self):
+        token = agent_base.CancellationToken()
+        seen = []
+
+        def boom(reason):
+            raise RuntimeError('listener bug')
+        token.add_listener(boom)
+        token.add_listener(seen.append)
+        self.assertTrue(token.cancel('user'))
+        self.assertEqual(seen, ['user'])
+
+    def test_reason_maps_to_the_outcome_status(self):
+        self.assertEqual(agent_base.status_for_reason('user'),
+                         agent_base.INTERRUPTED)
+        self.assertEqual(agent_base.status_for_reason('budget'),
+                         agent_base.BUDGET_EXHAUSTED)
+        self.assertEqual(agent_base.status_for_reason('capability'),
+                         agent_base.CAPABILITY_VIOLATION)
+
+
+class TestSessionClosure(unittest.TestCase):
+    """Closing is the ledger mutation boundary of a cancelled run."""
+
+    def setUp(self):
+        self.ledger = Ledger()
+        self.session = DoSession(ledger=self.ledger,
+                                 plot_backend=FakePlotBackend(),
+                                 tikz_backend=FakeTikzBackend())
+        self.api = make_api(self.session)
+
+    def test_close_is_idempotent_and_records_the_first_reason(self):
+        self.assertTrue(self.session.close('user'))
+        self.assertFalse(self.session.close('budget'))
+        self.assertEqual(self.session.close_reason, 'user')
+
+    def test_committed_steps_survive_closure_and_still_replay(self):
+        self.assertTrue(json.loads(self.api['expand']('(x+1)^2'))['ok'])
+        self.session.close('user')
+        refused = json.loads(self.api['expand']('(x+2)^2'))
+        self.assertFalse(refused['ok'])
+        self.assertTrue(refused['cancelled'])
+        self.assertEqual(len(self.ledger.steps), 1)
+        self.assertEqual(self.ledger.replay()['status'], 'verified')
+
+    def test_every_late_callback_is_rejected(self):
+        self.assertTrue(json.loads(self.api['expand']('(x+1)^2'))['ok'])
+        self.session.close('user')
+        for reply in (self.api['comment']('a late note'),
+                      self.api['claim']('x = x'),
+                      self.api['conclude']('c1', ['s1']),
+                      self.api['set_result']('x^{2}+2x+1'),
+                      self.api['set_open']('ran out of moves'),
+                      self.api['plot']('import matplotlib', 'late'),
+                      self.api['tikz']('\\begin{document}', 'late')):
+            record = json.loads(reply)
+            self.assertFalse(record['ok'], reply)
+        self.assertIsNone(self.session.result_override)
+        self.assertIsNone(self.session.open_selection)
+        self.assertEqual(len(self.ledger.steps), 1)
+        self.assertEqual(len(self.ledger.claims), 0)
+        self.assertEqual(len(self.ledger.selections), 0)
+
+    def test_a_figure_reached_after_closure_is_never_rendered(self):
+        shown = []
+        session = DoSession(on_plot=lambda *a: shown.append(a),
+                            plot_backend=FakePlotBackend())
+        session.close('user')
+        make_api(session)['plot']('import matplotlib', 'late')
+        self.assertEqual(shown, [])
+
+    def test_figure_delivery_is_serialised_with_session_closure(self):
+        # a figure is cell output, so it needs the ledger's own boundary.
+        # Reading `closed` and then calling back leaves a window for a
+        # cancellation to land in between and paint into a cell that has
+        # already reported itself stopped; holding the lock closes it.
+        shown = []
+        session = DoSession(on_plot=lambda *a: shown.append(a),
+                            plot_backend=FakePlotBackend())
+        delivered = []
+        entered = threading.Event()
+
+        def deliver():
+            entered.set()
+            delivered.append(session.deliver_figure(
+                'racy', [{'kind': 'png', 'data': 'x'}]))
+
+        with session._lock:                  # a cancellation, mid-flight
+            worker = threading.Thread(target=deliver)
+            worker.start()
+            self.assertTrue(entered.wait(5))
+            time.sleep(0.1)
+            self.assertEqual(delivered, [])  # waiting on the boundary
+            session.close('user')
+        worker.join(5)
+        self.assertEqual(delivered, [False])
+        self.assertEqual(shown, [])
+
+    def test_a_record_that_wins_the_lock_commits_completely(self):
+        # invariant: cancellation never rolls back a mechanically checked
+        # step, and never leaves half of one behind
+        holding = threading.Event()
+        release = threading.Event()
+        original = self.ledger.record
+
+        def slow_record(*args, **kwargs):
+            holding.set()
+            release.wait(5)
+            return original(*args, **kwargs)
+
+        self.ledger.record = slow_record
+        worker = threading.Thread(
+            target=lambda: self.api['expand']('(x+1)^2'))
+        worker.start()
+        self.assertTrue(holding.wait(5))
+        closer = threading.Thread(target=self.session.close, args=('user',))
+        closer.start()               # blocks on the session lock
+        release.set()
+        worker.join(5)
+        closer.join(5)
+        self.assertEqual(len(self.ledger.steps), 1)
+        self.assertTrue(self.session.closed)
+        self.assertEqual(self.ledger.replay()['status'], 'verified')
+
+
+class FakeRunHandle(agent_base.ThreadedRunHandle):
+    """A run whose completion, cancellation, and stubbornness are scripted."""
+
+    def __init__(self, request, outcome=None, acknowledge=True, delay=0.0):
+        super(FakeRunHandle, self).__init__(request)
+        self.outcome = outcome or agent_base.AgentOutcome(final_text='done')
+        self.acknowledge = acknowledge
+        self.delay = delay
+        self.finish = threading.Event()
+        self.cancels = []
+        self.contained = []
+
+    def run(self):
+        self.finish.wait(10)
+        return self.outcome
+
+    def request_cancel(self, reason):
+        self.cancels.append(reason)
+        if self.acknowledge:
+            self.outcome = agent_base.AgentOutcome(
+                status=agent_base.INTERRUPTED)
+            self.finish.set()
+
+    def abandon(self, reason):
+        self.contained.append(reason)
+
+
+class TestWaitInterruptibly(unittest.TestCase):
+    """The Jupyter interruption bridge, without the kernel."""
+
+    def _request(self, cancellation):
+        session = DoSession()
+        return agent_base.AgentRequest(
+            instruction='x', developer_instructions='y',
+            dispatcher=agent_base.ToolDispatcher(
+                agent_do.make_tool_bindings(session), cancellation),
+            cancellation=cancellation)
+
+    def _run(self, handle, cancellation, interrupts=(), **kwargs):
+        """Deliver a KeyboardInterrupt on the given poll iterations."""
+        polls = {'n': 0}
+        real_wait = handle.wait
+
+        def wait(timeout=None):
+            if timeout:   # only the polling waits; wait(0) is the race check
+                polls['n'] += 1
+                if polls['n'] in interrupts:
+                    raise KeyboardInterrupt
+            return real_wait(min(timeout or 0, 0.01))
+
+        handle.wait = wait
+        return agent_base.wait_interruptibly(handle, cancellation,
+                                             poll=0.01, **kwargs)
+
+    def test_interrupt_cancels_exactly_this_run_once(self):
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation)).start()
+        outcome = self._run(handle, cancellation, interrupts=(1, 2))
+        self.assertEqual(outcome.status, agent_base.INTERRUPTED)
+        self.assertEqual(handle.cancels, ['user'])   # idempotent
+        self.assertEqual(cancellation.reason, 'user')
+
+    def test_a_provider_that_won_the_race_stays_completed(self):
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation))
+        handle.finish.set()
+        handle.start()
+        handle._done.wait(5)
+        outcome = self._run(handle, cancellation, interrupts=(1,))
+        self.assertEqual(outcome.status, agent_base.COMPLETED)
+        self.assertEqual(handle.cancels, [])
+        self.assertFalse(cancellation.cancelled)
+
+    def test_a_late_completion_cannot_undo_cancellation(self):
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation),
+                               acknowledge=False)
+
+        def late_finish(reason):
+            handle.outcome = agent_base.AgentOutcome(
+                status=agent_base.COMPLETED, final_text='the answer is 4')
+            handle.finish.set()
+        handle.request_cancel = late_finish
+        handle.start()
+        outcome = self._run(handle, cancellation, interrupts=(1,))
+        self.assertEqual(outcome.status, agent_base.INTERRUPTED)
+        self.assertEqual(outcome.final_text, '')
+
+    def test_a_run_that_ignores_cancellation_is_contained(self):
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation),
+                               acknowledge=False).start()
+        outcome = self._run(handle, cancellation, interrupts=(1,),
+                            grace_period=0.05)
+        self.assertEqual(outcome.status, agent_base.INTERRUPTED)
+        self.assertTrue(outcome.metadata['grace_exceeded'])
+        self.assertEqual(handle.contained, ['user'])
+        handle.finish.set()
+
+    def test_wall_clock_budget_is_exhaustion_not_interruption(self):
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation)).start()
+        outcome = self._run(
+            handle, cancellation,
+            budget=agent_base.AgentBudget(max_seconds=0.01))
+        self.assertEqual(outcome.status, agent_base.BUDGET_EXHAUSTED)
+        self.assertEqual(handle.cancels, ['budget'])
+
+    def test_a_stubborn_run_past_its_wall_clock_is_still_contained(self):
+        # the grace deadline must be armed once. Renewing it on every poll
+        # after the run deadline passed would keep a provider that ignores
+        # cancellation here forever - the cell would never come back.
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation),
+                               acknowledge=False).start()
+        outcome = self._run(
+            handle, cancellation, grace_period=0.05,
+            budget=agent_base.AgentBudget(max_seconds=0.01))
+        self.assertEqual(outcome.status, agent_base.BUDGET_EXHAUSTED)
+        self.assertTrue(outcome.metadata['grace_exceeded'])
+        self.assertEqual(handle.contained, ['budget'])
+        handle.finish.set()
+
+    def test_pressing_stop_again_does_not_extend_the_grace_period(self):
+        # every poll delivers another Stop, as a user leaning on the button
+        # would. The deadline is armed once, so containment still arrives;
+        # re-arming it per interrupt would postpone it indefinitely.
+        cancellation = agent_base.CancellationToken()
+        handle = FakeRunHandle(self._request(cancellation),
+                               acknowledge=False).start()
+        ticks = {'n': 0}
+
+        def clock():
+            ticks['n'] += 1
+            if ticks['n'] > 200:
+                raise AssertionError('the grace deadline was never reached')
+            return ticks['n'] * 0.01
+
+        real_wait = handle.wait
+
+        def wait(timeout=None):
+            if timeout:
+                raise KeyboardInterrupt
+            return real_wait(0)
+
+        handle.wait = wait
+        outcome = agent_base.wait_interruptibly(
+            handle, cancellation, poll=0.01, grace_period=0.05, clock=clock)
+        self.assertEqual(outcome.status, agent_base.INTERRUPTED)
+        self.assertEqual(handle.contained, ['user'])
+        self.assertEqual(handle.cancels, ['user'])       # idempotent
+        handle.finish.set()
+
+
+class TestRunCancellation(unittest.TestCase):
+    """run_instruction end to end: what a stopped cell keeps and refuses."""
+
+    def _backend(self, run):
+        """A backend whose worker body is `run(request, handle)`."""
+        class Handle(agent_base.ThreadedRunHandle):
+            def __init__(self, request):
+                super(Handle, self).__init__(request)
+                self.stopped = threading.Event()
+
+            def run(self):
+                return run(self.request, self)
+
+            def request_cancel(self, reason):
+                self.stopped.set()
+
+        class Backend(object):
+            name = 'fake'
+
+            def start(self, request):
+                self.handle = Handle(request)
+                return self.handle.start()
+
+        return Backend()
+
+    def _tactic(self, request, expr):
+        return json.loads(request.dispatcher.dispatch(
+            'run_tactic', {'tactic': 'expand', 'arguments': [expr]}))
+
+    def test_interrupted_run_keeps_its_steps_and_chains_nothing(self):
+        ledger = Ledger()
+
+        def run(request, handle):
+            self._tactic(request, '(x+1)^2')
+            _thread.interrupt_main()     # exactly what Jupyter Stop does
+            handle.stopped.wait(5)
+            # a late tool call after the user pressed Stop
+            self._tactic(request, '(x+9)^2')
+            return agent_base.AgentOutcome(final_text='never shown')
+
+        backend = self._backend(run)
+        with mock.patch.object(agent_do, 'resolve_backend',
+                               lambda **kwargs: backend):
+            try:
+                res = run_instruction('expand it', ledger=ledger,
+                                      grace_period=0.5)
+            except KeyboardInterrupt:  # pragma: no cover - bridge failure
+                self.fail('the interrupt escaped run_instruction')
+        self.assertFalse(res['ok'])
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertTrue(res['cancelled'])
+        self.assertIsNone(res['final_result'])
+        self.assertIsNone(res['summary'])
+        # the step committed before the stop is kept, replays, and is
+        # offered only as labelled partial work
+        self.assertEqual([s['op'] for s in res['steps']], ['expand'])
+        self.assertEqual(res['partial_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['partial_provenance']['method'], 'last-step')
+        self.assertEqual(len(ledger.steps), 1)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_designated_result_before_the_stop_is_not_chainable(self):
+        def run(request, handle):
+            self._tactic(request, '(x+1)^2')
+            request.dispatcher.dispatch('set_result',
+                                        {'expr': 'x^{2}+2x+1'})
+            _thread.interrupt_main()
+            handle.stopped.wait(5)
+            return agent_base.AgentOutcome(final_text='ignored')
+
+        backend = self._backend(run)
+        with mock.patch.object(agent_do, 'resolve_backend',
+                               lambda **kwargs: backend):
+            res = run_instruction('expand it', grace_period=0.5)
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['partial_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['partial_provenance']['status'], 'verified')
+
+    def test_budget_exhaustion_is_its_own_status(self):
+        def run(request, handle):
+            self._tactic(request, '(x+1)^2')
+            self._tactic(request, '(x+2)^2')      # over the tool budget
+            handle.stopped.wait(5)
+            return agent_base.AgentOutcome(final_text='ignored')
+
+        backend = self._backend(run)
+        with mock.patch.object(agent_do, 'resolve_backend',
+                               lambda **kwargs: backend):
+            res = run_instruction(
+                'expand forever', grace_period=0.5,
+                budget=agent_base.AgentBudget(max_tool_calls=1))
+        self.assertEqual(res['status'], 'budget_exhausted')
+        self.assertTrue(res['cancelled'])
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(len(res['steps']), 1)
+
+    def test_an_ordinary_run_still_reports_completed(self):
+        res = run_instruction('expand it', model=ScriptedModel([
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [message('done')]]))
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['status'], 'completed')
+        self.assertNotIn('cancelled', res)
+        self.assertEqual(res['summary'], 'done')
+
+
+class TestOpenRouterBackendCancellation(unittest.TestCase):
+    def test_cancel_stops_the_running_agent_task(self):
+        started = threading.Event()
+
+        class BlockingModel(ScriptedModel):
+            def __init__(self):
+                ScriptedModel.__init__(self, [])
+
+            async def get_response(self, *args, **kwargs):
+                import asyncio
+                started.set()
+                await asyncio.sleep(30)   # pragma: no cover - cancelled
+                raise AssertionError('the provider call was not cancelled')
+
+        session = DoSession()
+        cancellation = agent_base.CancellationToken()
+        request = agent_base.AgentRequest(
+            instruction='hang', developer_instructions='rules',
+            dispatcher=agent_base.ToolDispatcher(
+                agent_do.make_tool_bindings(session), cancellation),
+            cancellation=cancellation)
+        handle = openrouter_backend.OpenRouterBackend(
+            model=BlockingModel()).start(request)
+        self.assertTrue(started.wait(5))
+        handle.cancel('user')
+        outcome = handle.wait(5)
+        self.assertIsNotNone(outcome, 'the run never acknowledged the stop')
+        self.assertEqual(outcome.status, agent_base.INTERRUPTED)
+
+
 class TestObservability(unittest.TestCase):
     """Langfuse tracing is opt-in, non-fatal, and never touches the ledger.
 
@@ -1576,24 +3576,38 @@ class TestObservability(unittest.TestCase):
         self.assertTrue(res['ok'])
         self.assertEqual(res['final_result'], '2x = 4')
 
-    def test_build_model_tracing_toggle_follows_observability(self):
+    def test_build_model_tracing_toggle_follows_the_instrumentor(self):
         # THE landmine: the OpenInference instrumentor rides the Agents-SDK
-        # tracing pipeline, so an active observability must leave that
-        # pipeline ENABLED; an inactive one disables it (no OpenAI upload).
-        for is_active, expected_disabled in [(True, False), (False, True)]:
+        # tracing pipeline, so while it is attached that pipeline must stay
+        # ENABLED. The predicate is `instrumented`, not `active`: a Langfuse
+        # client without the instrumentor (a Codex-only install) would
+        # otherwise leave the pipeline exporting to OpenAI's backend.
+        for attached, expected_disabled in [(True, False), (False, True)]:
             calls = []
             with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
                  mock.patch('agents.set_tracing_disabled',
                             side_effect=calls.append), \
-                 mock.patch.object(observability, 'active',
-                                   return_value=is_active):
-                agent_do.build_model()
-            self.assertEqual(calls, [expected_disabled], is_active)
+                 mock.patch.object(observability, 'instrumented',
+                                   return_value=attached):
+                openrouter_backend.build_model()
+            self.assertEqual(calls, [expected_disabled], attached)
+
+    def test_tracing_survives_a_missing_agents_instrumentor(self):
+        # a Codex-only installation has no Agents SDK to instrument; that
+        # must cost the nested spans, not the whole trace
+        observability._reset_for_tests()
+        self.addCleanup(observability._reset_for_tests)
+        client = mock.Mock()
+        with mock.patch.object(observability, '_instrument',
+                               side_effect=ImportError('no openai-agents')):
+            self.assertTrue(observability.setup(client=client))
+        self.assertTrue(observability.active())
+        self.assertFalse(observability.instrumented())
 
     def test_build_model_accepts_notebook_override(self):
         with mock.patch.dict(os.environ, {'OPEN_ROUTER': 'sk-test'}), \
              mock.patch.object(observability, 'active', return_value=False):
-            built = agent_do.build_model('z-ai/glm-5.2')
+            built = openrouter_backend.build_model('z-ai/glm-5.2')
         self.assertEqual(built.model, 'z-ai/glm-5.2')
 
     def test_provider_order_reaches_model_settings_extra_body(self):
@@ -1746,14 +3760,95 @@ class TestObservability(unittest.TestCase):
                       llm_spans[0].attributes['output.value'])
         self.assertIn('Subtracted 3 from both sides.',
                       llm_spans[-1].attributes['output.value'])
+        # (the Codex path has no instrumentor and traces through the
+        # neutral seam instead - see test_codex_run_emits_one_nested_trace)
         # tracing is observability only: the ledger is exactly what it would
         # be without it
         self.assertEqual([s['op'] for s in res['steps']],
                          ['apply_both_sides', 'expand'])
         self.assertEqual(ledger.replay()['status'], 'verified')
 
+    def test_codex_run_emits_one_nested_trace_without_the_instrumentor(self):
+        # The OpenInference instrumentor only sees Agents-SDK runs, so the
+        # Codex path traces through the provider-neutral seam. Its tool
+        # callbacks arrive on transport worker threads, which is exactly
+        # where a naive child span would start a second, orphaned trace.
+        from langfuse import Langfuse
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter)
 
-FAKE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        exporter = InMemorySpanExporter()
+        lf = Langfuse(public_key='pk-lf-test', secret_key='sk-lf-test',
+                      tracing_enabled=True, span_exporter=exporter)
+        # OTel allows one global TracerProvider per process, so whether this
+        # client's provider wins depends on test order; subscribe to the
+        # effective one as well and de-duplicate below
+        provider = otel_trace.get_tracer_provider()
+        if hasattr(provider, 'add_span_processor'):
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
+        observability._reset_for_tests()
+        self.addCleanup(observability._reset_for_tests)
+        self.addCleanup(lf.shutdown)
+        # no instrumentor: exactly the Codex-only installation shape
+        with mock.patch.object(observability, '_instrument',
+                               side_effect=ImportError('no openai-agents')):
+            self.assertTrue(observability.setup(client=lf))
+        self.assertFalse(observability.instrumented())
+
+        ledger = Ledger()
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x', ledger=ledger,
+            backend=codex_backend.CodexBackend(
+                transport=codex_transport.TranscriptTransport(
+                    SOLVE_TRANSCRIPT)))
+        self.assertTrue(res['ok'], res.get('error'))
+        lf.flush()
+
+        spans = list({span.context.span_id: span
+                      for span in exporter.get_finished_spans()}.values())
+        self.assertTrue(spans, 'no spans were exported')
+        # one trace for the whole run, despite the thread hop
+        self.assertEqual(len({s.context.trace_id for s in spans}), 1)
+        root = next(s for s in spans if s.parent is None)
+        self.assertEqual(root.name, 'do!')
+        attrs = dict(root.attributes)
+        self.assertEqual(attrs.get('langfuse.observation.metadata.backend'),
+                         'codex')
+        self.assertEqual(attrs.get('langfuse.observation.output'),
+                         'Subtracted 3 from both sides.')
+        tools = sorted(s.name for s in spans if s.name.startswith('tool:'))
+        self.assertEqual(tools, ['tool:run_tactic', 'tool:run_tactic',
+                                 'tool:set_result'])
+        for span in spans:
+            if span.name.startswith('tool:'):
+                self.assertIsNotNone(span.parent)   # nested, not orphaned
+        # observability only: the ledger is what it would be untraced
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['apply_both_sides', 'expand'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_tracing_failure_never_breaks_a_codex_tool_call(self):
+        observability._reset_for_tests()
+        self.addCleanup(observability._reset_for_tests)
+        with mock.patch.object(observability, '_instrument'):
+            observability.setup(client=mock.Mock(
+                start_as_current_observation=mock.Mock(
+                    side_effect=RuntimeError('langfuse is down'))))
+        ledger = Ledger()
+        res = run_instruction(
+            'solve 2x + 3 = 7 for x', ledger=ledger,
+            backend=codex_backend.CodexBackend(
+                transport=codex_transport.TranscriptTransport(
+                    SOLVE_TRANSCRIPT)))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_result'], '2x = 4')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
+FAKE_PNG_B64 ='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNiAAAABgADNjd8qAAAAABJRU5ErkJggg=='
 
 
 FAKE_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>'
@@ -1887,6 +3982,73 @@ class TestPlotTool(unittest.TestCase):
         self.assertEqual(env['PATH'], '/usr/bin')
 
 
+class TestTikzSourceNormalization(unittest.TestCase):
+    """node-tikzjax injects `\\documentclass` but no document environment.
+
+    Both obvious submissions therefore failed, with TeX errors naming
+    neither cause: a bare picture died on `Missing \\begin{document}` and a
+    complete document on `Two \\documentclass commands`. Offline coverage of
+    the reshaping; TestLiveTikzSandbox proves it against the real engine.
+    """
+
+    def _norm(self, code):
+        return plot_sandbox.normalize_tikz_source(code)
+
+    PICTURE = '\\begin{tikzpicture}\n\\draw (0,0) -- (1,1);\n' \
+              '\\end{tikzpicture}'
+
+    def test_a_bare_picture_gains_a_document(self):
+        out = self._norm(self.PICTURE)
+        self.assertIn('\\begin{document}', out)
+        self.assertIn('\\end{document}', out)
+        self.assertLess(out.index('\\begin{document}'),
+                        out.index('\\begin{tikzpicture}'))
+
+    def test_a_preamble_stays_outside_the_document(self):
+        out = self._norm('\\usepackage{tikz-cd}\n' + self.PICTURE)
+        self.assertLess(out.index('\\usepackage'),
+                        out.index('\\begin{document}'))
+
+    def test_a_documentclass_is_dropped(self):
+        for line in ('\\documentclass{standalone}',
+                     '\\documentclass[tikz,border=2pt]{standalone}',
+                     '\\documentstyle{article}'):
+            with self.subTest(line=line):
+                out = self._norm(f'{line}\n\\begin{{document}}\n'
+                                 f'{self.PICTURE}\n\\end{{document}}')
+                self.assertNotIn('\\documentclass', out)
+                self.assertNotIn('\\documentstyle', out)
+                self.assertIn('\\begin{tikzpicture}', out)
+
+    def test_an_existing_document_is_left_alone(self):
+        code = ('\\usepackage{tikz}\n\\begin{document}\n' + self.PICTURE
+                + '\n\\end{document}')
+        self.assertEqual(self._norm(code), code)
+
+    def test_a_tikzcd_body_is_wrapped_too(self):
+        out = self._norm('\\usepackage{tikz-cd}\n'
+                         '\\begin{tikzcd}\nA \\arrow[r] & B\n\\end{tikzcd}')
+        self.assertLess(out.index('\\begin{document}'),
+                        out.index('\\begin{tikzcd}'))
+        self.assertIn('\\end{document}', out)
+
+    def test_unrecognisable_source_is_passed_through(self):
+        # no picture to wrap: let the TeX log explain rather than guessing
+        self.assertEqual(self._norm('\\relax'), '\\relax')
+        self.assertEqual(self._norm(''), '')
+
+    def test_the_tool_description_states_the_real_contract(self):
+        # the model reads this; it used to ask for a whole TeX document,
+        # which is the one shape the engine rejects outright
+        binding = {b.name: b for b
+                   in agent_do.make_tool_bindings(
+                       DoSession(tikz_backend=FakeTikzBackend()))}['tikz']
+        text = json.dumps(binding.input_schema) + binding.description
+        self.assertIn('begin{document}', text)
+        self.assertIn('Omit', text)
+        self.assertIn('tikz-cd', text)
+
+
 class TestTikzTool(unittest.TestCase):
     def test_registered_only_with_backend(self):
         self.assertNotIn('tikz', make_api(DoSession()))
@@ -2011,6 +4173,39 @@ class TestLiveTikzSandbox(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('Undefined control sequence', r['error'])
 
+    def test_every_reasonable_document_shape_renders(self):
+        # the engine injects \documentclass but no document environment, so
+        # a bare picture and a complete document both used to fail with TeX
+        # errors that named neither cause. One traced run burned four calls
+        # guessing at the wrapper.
+        backend = plot_sandbox.get_tikz_backend()
+        picture = ('\\begin{tikzpicture}\n\\draw (0,0) -- (2,1);\n'
+                   '\\end{tikzpicture}')
+        shapes = {
+            'bare picture': picture,
+            'preamble + picture': '\\usepackage{tikz}\n' + picture,
+            'whole document': ('\\documentclass{standalone}\n'
+                               '\\usepackage{tikz}\n\\begin{document}\n'
+                               + picture + '\n\\end{document}'),
+            'documentclass with options': ('\\documentclass[tikz]{standalone}'
+                                           '\n\\begin{document}\n' + picture
+                                           + '\n\\end{document}'),
+        }
+        for name, code in shapes.items():
+            with self.subTest(shape=name):
+                r = backend.render(code)
+                self.assertTrue(r['ok'], f'{name}: {r.get("error")}')
+
+    def test_commutative_diagrams_render_with_tikz_cd(self):
+        # what the failing run was actually asked for
+        backend = plot_sandbox.get_tikz_backend()
+        r = backend.render(
+            '\\usepackage{tikz-cd}\n\\begin{document}\n\\begin{tikzcd}\n'
+            'A \\arrow[r, "f"] \\arrow[d, "g"\'] & B \\arrow[d, "h"] \\\\\n'
+            'C \\arrow[r, "k"\'] & D\n\\end{tikzcd}\n\\end{document}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertTrue(r['svg'].lstrip().startswith('<svg'))
+
 
 class TestFigureHtml(unittest.TestCase):
     def setUp(self):
@@ -2115,7 +4310,7 @@ class TestMathShellDo(unittest.TestCase):
                             for item in collection.args))
 
     def test_do_cell_streams_and_chains(self):
-        with mock.patch.object(agent_do, 'build_model',
+        with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    SOLVE_SCRIPT)):
             self.shell.exec('do! solve 2x + 3 = 7 for x', 2,
@@ -2141,7 +4336,7 @@ class TestMathShellDo(unittest.TestCase):
                           '$\\sum_{n=1}^{m} \\frac{1}{n}$'}, 'c2')],
             [message('Left open.')],
         ]
-        with mock.patch.object(agent_do, 'build_model',
+        with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    script)):
             self.shell.exec('do! decide something out of reach', 5,
@@ -2153,6 +4348,53 @@ class TestMathShellDo(unittest.TestCase):
         banner = next(getattr(d, 'data', '') for d in self.displays
                       if 'outcome: open' in getattr(d, 'data', ''))
         self.assertNotIn('tex2jax_ignore', banner)
+
+    def test_cancelled_cell_is_amber_and_never_chainable(self):
+        # a stopped cell keeps what was checked and produces no result:
+        # no [[n]] backreference, no red agent-error block
+        cancelled = {
+            'ok': False, 'status': 'interrupted', 'cancelled': True,
+            'steps': [self._chain_step('s1', 'expand', 'x^{2}+2x+1')],
+            'claims': [], 'assumptions': [], 'premises': [],
+            'final_result': None, 'final_provenance': None,
+            'partial_result': 'x^{2}+2x+1',
+            'partial_provenance': {'status': 'verified', 'step': 's1',
+                                   'method': 'last-step'},
+            'branch_topology': {'spine': [], 'abandoned_paths': [],
+                                'parents': {}},
+            'abandoned_paths': [], 'summary': None,
+            'error': 'stopped by the user',
+        }
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: cancelled):
+            self.shell.exec('do! solve something long', 9,
+                            add_to_history=True)
+        out = self._html()
+        self.assertIn('cancelled', out)
+        self.assertIn('1 mechanically checked step preserved', out)
+        self.assertIn('partial result from', out)
+        self.assertNotIn('do! error', out)
+        with self.assertRaises(ValueError):
+            self.shell.resolve_backrefs('[[9]]')
+
+    def test_budget_exhausted_cell_says_so(self):
+        exhausted = {
+            'ok': False, 'status': 'budget_exhausted', 'cancelled': True,
+            'steps': [], 'claims': [], 'assumptions': [], 'premises': [],
+            'final_result': None, 'final_provenance': None,
+            'partial_result': None, 'partial_provenance': None,
+            'branch_topology': {'spine': [], 'abandoned_paths': [],
+                                'parents': {}},
+            'abandoned_paths': [], 'summary': None,
+        }
+        with mock.patch.object(agent_do, 'run_instruction',
+                               lambda *a, **k: exhausted):
+            self.shell.exec('do! loop forever', 10, add_to_history=True)
+        out = self._html()
+        self.assertIn('budget exhausted', out)
+        self.assertIn('nothing was recorded', out)
+        with self.assertRaises(ValueError):
+            self.shell.resolve_backrefs('[[10]]')
 
     def test_int_composite_closes_across_substitution_chain(self):
         # the reported live cell (gemini, trace-replayed): u = x^{1/6}
@@ -2212,7 +4454,7 @@ class TestMathShellDo(unittest.TestCase):
         ]
         turns = [[c] for c in calls]
         turns.append([message('The indefinite integral is set.')])
-        with mock.patch.object(agent_do, 'build_model',
+        with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    turns)):
             self.shell.exec(
@@ -2237,10 +4479,10 @@ class TestMathShellDo(unittest.TestCase):
 
     def test_do_missing_key_reports_cleanly(self):
         env = {k: v for k, v in os.environ.items()
-               if k != agent_do.API_KEY_VAR}
+               if k != openrouter_backend.API_KEY_VAR}
         with mock.patch.dict(os.environ, env, clear=True):
             self.shell.exec('do! solve 2x = 4', 4, add_to_history=True)
-        self.assertIn(agent_do.API_KEY_VAR, self._html())
+        self.assertIn(openrouter_backend.API_KEY_VAR, self._html())
 
     def _chain_step(self, sid, op, result, check='agree', continues=True,
                     assumptions=()):
@@ -2447,6 +4689,17 @@ class TestPromptCommandModel(unittest.TestCase):
         self.assertIn('z-ai/glm-5.2', reply['matches'])
         self.assertEqual(reply['status'], 'ok')
 
+    def test_kernel_do_complete_routes_backend_and_login(self):
+        import asyncio
+        from toymathkernel import MathKernel
+        for code, expected in (('backend! co', ['codex']),
+                               ('login! log', ['logout'])):
+            with self.subTest(code=code):
+                reply = asyncio.run(
+                    MathKernel.do_complete(None, code, len(code)))
+                self.assertEqual(reply['matches'], expected)
+                self.assertEqual(reply['status'], 'ok')
+
     def test_static_lexer_command_table_matches_committed_registries(self):
         import prompt_commands as pc
         from lexer import MathLexer
@@ -2626,9 +4879,9 @@ class TestPromptCommandDispatch(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('model! z-ai/glm-5.2', 1)
             self.shell.exec('do! Hello', 2)
-        self.assertEqual(box['kwargs']['model_name'], 'z-ai/glm-5.2')
-        self.assertEqual(box['kwargs']['providers'],
-                         ('Cerebras', 'Fireworks'))
+        route = box['kwargs']['route']
+        self.assertEqual(route.model, 'z-ai/glm-5.2')
+        self.assertEqual(route.providers, ('Cerebras', 'Fireworks'))
         self.assertIn('fallbacks disabled', self._html())
 
     def test_model_command_provider_arguments_override_config(self):
@@ -2666,7 +4919,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
         self.assertIn('model! error', self._html())
 
     def test_command_steps_land_in_shared_ledger(self):
-        with mock.patch.object(agent_do, 'build_model',
+        with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    SOLVE_SCRIPT)):
             self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
@@ -2852,8 +5105,8 @@ class TestExprComposite(unittest.TestCase):
         self.shell.exec('model! z-ai/glm-5.2', 1)
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('int! x^2', 2, add_to_history=True)
-        self.assertEqual(calls[0]['model_name'], 'z-ai/glm-5.2')
-        self.assertEqual(calls[0]['providers'],
+        self.assertEqual(calls[0]['route'].model, 'z-ai/glm-5.2')
+        self.assertEqual(calls[0]['route'].providers,
                          ('Cerebras', 'Fireworks'))
 
     def test_non_expr_command_in_composite_refused(self):
@@ -2944,7 +5197,7 @@ class TestExprComposite(unittest.TestCase):
     def test_whole_cell_lim_ellipsis_closes_via_sum_tactics(self):
         # the original failing notebook cell, end to end through the shell
         # composite path with a scripted agent (offline)
-        with mock.patch.object(agent_do, 'build_model',
+        with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    list(LIM_SUM_SCRIPT))):
             self.shell.exec('lim! ' + LIM_SUM_EXPR, 1, add_to_history=True)
@@ -3292,6 +5545,150 @@ class TestUnknownToolSteering(unittest.TestCase):
         self.assertIn('load_skill, run_tactic, comment', third)
 
 
+@unittest.skipUnless(codex_backend.available(),
+                     'the pinned Codex runtime is not installed '
+                     '(uv pip install ".[codex]")')
+class TestCodexToolSetContract(unittest.TestCase):
+    """The exact model-visible tool set, captured from the real runtime.
+
+    Offline: the runtime talks to a loopback server that records the
+    request and refuses it. No account, no network, no model. This is the
+    check the accepted residual-tool exception rests on - a new native
+    tool, an inherited MCP helper, or a lifted restriction must fail here
+    before any live model runs.
+    """
+
+    def setUp(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.captured = {}
+        self.seen = threading.Event()
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):                       # noqa: N802
+                length = int(self.headers.get('Content-Length', '0'))
+                try:
+                    outer.captured['body'] = json.loads(
+                        self.rfile.read(length))
+                except ValueError:
+                    outer.captured['body'] = {}
+                outer.seen.set()
+                payload = json.dumps({'error': {
+                    'message': 'capture complete',
+                    'type': 'invalid_request_error'}}).encode()
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        self.session = DoSession()
+        self.dispatcher = agent_base.ToolDispatcher(
+            agent_do.make_tool_bindings(self.session),
+            agent_base.CancellationToken())
+        self.base = f'http://127.0.0.1:{server.server_address[1]}/v1'
+        self.transport = self._start()
+        self.thread = codex_transport.CodexThreadRequest(
+            instruction='Call run_tactic once, then stop.',
+            developer_instructions=codex_backend.role_policy(
+                self.dispatcher.names),
+            dynamic_tools=tuple(codex_backend.dynamic_tools(
+                self.dispatcher)))
+
+    def _start(self, config=None):
+        """A runtime against a fresh home, optionally carrying `config`."""
+        home = tempfile.mkdtemp(prefix='toymath-codex-home-')
+        self.addCleanup(shutil.rmtree, home, True)
+        _, workdir = codex_backend.ensure_home(home=home)
+        if config is not None:
+            # written after the home is ToyMath's own: the realistic way a
+            # dedicated home acquires an MCP server is being edited later
+            with open(os.path.join(home, codex_backend.CONFIG_FILE), 'w',
+                      encoding='utf-8') as handle:
+                handle.write(config)
+        transport = codex_transport.AppServerTransport(
+            binary=codex_backend.runtime_binary(), home=home, cwd=workdir,
+            config_overrides=(codex_backend.CONTAINMENT_OVERRIDES
+                              + codex_backend.mcp_overrides(home)
+                              + codex_backend.capture_config_overrides(
+                                  self.base)),
+            env={'TOYMATH_CAPTURE_KEY': 'local-dummy'})
+        transport.start()
+        self.addCleanup(transport.close)
+        return transport
+
+    def _outgoing_tools(self, transport):
+        self.seen.clear()
+        started = transport.request('thread/start',
+                                    transport.thread_params(self.thread))
+        thread_id = started['thread']['id']
+        turn = transport.request('turn/start', {
+            'threadId': thread_id,
+            'input': [{'type': 'text', 'text': self.thread.instruction}]})
+        self.assertTrue(self.seen.wait(30),
+                        'the runtime sent no model request')
+        transport.interrupt_turn(thread_id, turn['turn']['id'])
+        return [tool.get('name') or tool.get('type')
+                for tool in (self.captured['body'].get('tools') or [])]
+
+    def test_the_outgoing_tools_are_toymath_plus_the_reviewed_residuals(self):
+        tools = self._outgoing_tools(self.transport)
+        self.assertEqual(
+            sorted(tools),
+            sorted(codex_backend.expected_model_tools(self.dispatcher)),
+            'the effective Codex tool set changed; review the accepted '
+            'residual-tool exception before shipping this runtime')
+        body = self.captured['body']
+        # the repository's own instructions never join the math agent
+        self.assertNotIn('ToyMath is a LaTeX-native symbolic mathematics',
+                         json.dumps(body))
+        self.assertIn('Use only the client-provided ToyMath dynamic tools',
+                      json.dumps(body))
+
+    def test_a_home_carrying_an_mcp_server_still_offers_only_our_tools(self):
+        # a clean temporary home cannot catch inherited MCP configuration.
+        # Measured here: without the per-server override this home adds
+        # mcp__probe, list_mcp_resources, list_mcp_resource_templates, and
+        # read_mcp_resource to what the model can call.
+        transport = self._start(
+            '[mcp_servers.probe]\ncommand = "/bin/echo"\nargs = ["hi"]\n')
+        tools = self._outgoing_tools(transport)
+        self.assertEqual(
+            sorted(tools),
+            sorted(codex_backend.expected_model_tools(self.dispatcher)),
+            'an MCP server configured in the Codex home reached the model')
+
+    def test_a_refused_turn_ends_promptly_instead_of_hanging(self):
+        # the notification loop against the real app-server: a provider
+        # error must terminate the turn, not leave the cell waiting
+        started = time.monotonic()
+        outcome = self.transport.run_thread(
+            self.thread,
+            on_tool_call=lambda params: codex_backend.tool_call_result(
+                self.dispatcher, params))
+        self.assertEqual(outcome.status, 'failed')
+        self.assertTrue(outcome.error)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_the_runtime_reports_its_own_models(self):
+        models = self.transport.list_models()
+        self.assertTrue(models)
+        self.assertTrue(all(model.id for model in models))
+
+
+def _interrupt_after(seconds):
+    """Press Jupyter Stop from a background thread."""
+    threading.Timer(seconds, _thread.interrupt_main).start()
+
+
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',
                      'set TOYMATH_LIVE_TESTS=1 for a live OpenRouter test')
 class TestLiveOpenRouter(unittest.TestCase):
@@ -3302,6 +5699,68 @@ class TestLiveOpenRouter(unittest.TestCase):
         self.assertTrue(res['ok'], res.get('error'))
         self.assertGreaterEqual(len(res['steps']), 2)
         self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_stop_interrupts_a_live_run(self):
+        # cancellation must not be Codex-only: the same Stop has to reach a
+        # real OpenRouter run and return promptly
+        ledger = Ledger()
+        _interrupt_after(3.0)
+        started = time.monotonic()
+        res = run_instruction(
+            'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
+            'every intermediate result.', ledger=ledger)
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertIsNone(res['final_result'])
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
+@unittest.skipUnless(os.environ.get('TOYMATH_CODEX_LIVE_TESTS') == '1',
+                     'set TOYMATH_CODEX_LIVE_TESTS=1 for a live personal '
+                     'Codex test (requires an already authenticated account)')
+class TestLiveCodex(unittest.TestCase):
+    """Requires a signed-in local Codex account; never starts a login."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not codex_backend.available():
+            raise unittest.SkipTest('the Codex extra is not installed')
+        names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
+        if not codex_backend.account_status().logged_in:
+            raise unittest.SkipTest(
+                'no Codex account is signed in; run login! first')
+
+    @classmethod
+    def tearDownClass(cls):
+        codex_backend.close_runtime()
+
+    def test_a_short_derivation_is_verified_and_replays(self):
+        ledger = Ledger()
+        res = run_instruction(
+            'Expand (x+1)^2 with one tactic call, then set_result.',
+            ledger=ledger, backend='codex')
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertGreaterEqual(len(res['steps']), 1)
+        self.assertTrue(res['final_result'])
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        # only ToyMath tools ran
+        provenance = res.get('outcome_metadata') or {}
+        self.assertEqual(provenance.get('native_tool_calls', []), [])
+
+    def test_stop_interrupts_a_live_turn_and_chains_nothing(self):
+        ledger = Ledger()
+        _interrupt_after(4.0)
+        res = run_instruction(
+            'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
+            'every intermediate result.', ledger=ledger, backend='codex')
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertIsNone(res['final_result'])
+        committed = len(ledger.steps)
+        time.sleep(2)                     # nothing may land afterwards
+        self.assertEqual(len(ledger.steps), committed)
+        if committed:
+            self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 if __name__ == '__main__':

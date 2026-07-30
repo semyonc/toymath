@@ -17,11 +17,21 @@ Design notes (hard-won, see the module tests):
   OpenTelemetry trace processor with the Agents SDK via
   ``set_trace_processors`` (exclusive by default). Two consequences the
   caller must respect:
-    * The Agents SDK's own tracing MUST be left enabled while active - a
-      stray ``set_tracing_disabled(True)`` silently starves the processor,
-      so agent_do only disables tracing when observability is inactive.
+    * The Agents SDK's own tracing MUST be left enabled while the
+      instrumentor is attached - a stray ``set_tracing_disabled(True)``
+      silently starves the processor.
     * The exclusive processor replaces the default OpenAI backend exporter,
       so traces are not shipped to OpenAI's platform; only Langfuse.
+  Hence two separate states. ``active()`` means the Langfuse client is up,
+  which is all a provider-neutral span needs. ``instrumented()`` means that
+  processor actually attached, and ONLY that may leave Agents-SDK tracing
+  on: active-but-not-instrumented would ship traces to OpenAI's backend
+  instead of Langfuse. The instrumentor needs the Agents SDK installed, so
+  a Codex-only installation traces through the client alone.
+- Backends other than the Agents SDK get no automatic nesting: OTel context
+  is thread-local, and a tool callback runs on a different thread from the
+  one that opened the run span. ``capture_context`` + ``child_span`` carry
+  it across explicitly.
 - ``get_client()`` must run before ``instrument()``: constructing the
   Langfuse client registers its TracerProvider as the global OTEL provider,
   which the instrumentor then binds its tracer to.
@@ -38,7 +48,8 @@ _CRED_VARS = ('LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY')
 _TRUTHY = {'1', 'true', 'on', 'yes', 'enable', 'enabled'}
 
 _lock = threading.Lock()
-_state = {'setup': False, 'active': False, 'client': None}
+_state = {'setup': False, 'active': False, 'client': None,
+          'instrumented': False}
 
 
 def _truthy(value):
@@ -55,6 +66,16 @@ def active():
     """Whether tracing is set up and exporting. Only meaningful after
     setup() has run at least once."""
     return _state['active']
+
+
+def instrumented():
+    """Whether the OpenInference Agents-SDK processor actually attached.
+
+    The ONLY predicate that may leave Agents-SDK tracing enabled: with the
+    processor absent, that pipeline would export to OpenAI's backend rather
+    than to Langfuse.
+    """
+    return _state['instrumented']
 
 
 def setup(client=None):
@@ -74,7 +95,16 @@ def setup(client=None):
                 return False
             if client is None:
                 client = _build_client()
-            _instrument()
+            try:
+                _instrument()
+                _state['instrumented'] = True
+            except Exception as exc:
+                # A Codex-only installation has no Agents SDK to instrument.
+                # That costs the nested LLM/tool spans, not the trace: the
+                # provider-neutral run span still exports through the client.
+                log.info('do! observability: the OpenAI-Agents instrumentor '
+                         'is unavailable (%s); tracing per-run spans only',
+                         exc)
             _state['client'] = client
             _state['active'] = True
             host = (os.environ.get('LANGFUSE_BASE_URL')
@@ -148,6 +178,69 @@ def trace_run(instruction, metadata=None, session_id=None, tags=None,
                       exc_info=True)
 
 
+def capture_context():
+    """Snapshot the current OTel context so another thread can nest under it.
+
+    Needed because tool callbacks run on transport worker threads while the
+    run span was opened on the backend's own thread; without this, a child
+    observation would start a second, orphaned trace.
+    """
+    if not _state['active']:
+        return None
+    try:
+        from opentelemetry import context as otel_context
+        return otel_context.get_current()
+    except Exception:
+        log.debug('could not capture the tracing context', exc_info=True)
+        return None
+
+
+@contextlib.contextmanager
+def child_span(name, context=None, input=None, metadata=None,
+               as_type='tool'):
+    """One nested observation, for backends the instrumentor cannot see.
+
+    A no-op yielding None when tracing is inactive. Not used on the
+    Agents-SDK path, where the instrumentor already emits tool spans.
+    """
+    client = _state['client']
+    if not _state['active'] or client is None:
+        yield None
+        return
+    stack = contextlib.ExitStack()
+    token = None
+    try:
+        if context is not None:
+            from opentelemetry import context as otel_context
+            token = otel_context.attach(context)
+        span = stack.enter_context(client.start_as_current_observation(
+            name=name, as_type=as_type, input=input,
+            metadata=metadata or {}))
+    except Exception:
+        log.debug('child_span could not open an observation', exc_info=True)
+        stack.close()
+        _detach(token)
+        yield None
+        return
+    try:
+        yield span
+    finally:
+        try:
+            stack.close()
+        finally:
+            _detach(token)
+
+
+def _detach(token):
+    if token is None:
+        return
+    try:
+        from opentelemetry import context as otel_context
+        otel_context.detach(token)
+    except Exception:
+        log.debug('could not detach the tracing context', exc_info=True)
+
+
 def _propagate(session_id=None, tags=None):
     kwargs = {}
     if session_id:
@@ -174,6 +267,20 @@ def set_output(span, output):
         log.debug('could not set trace output', exc_info=True)
 
 
+def set_metadata(span, metadata):
+    """Add provider-side facts (status, counts) to an observation.
+
+    Never account identifiers, login challenges, or credentials: those must
+    not exist in a trace at all.
+    """
+    if span is None or not metadata:
+        return
+    try:
+        span.update(metadata=dict(metadata))
+    except Exception:
+        log.debug('could not set trace metadata', exc_info=True)
+
+
 def flush():
     """Force a final export at the end of a run. Never raises."""
     client = _state['client']
@@ -187,4 +294,5 @@ def flush():
 def _reset_for_tests():
     """Drop cached setup state (not the global OTEL instrumentation)."""
     with _lock:
-        _state.update(setup=False, active=False, client=None)
+        _state.update(setup=False, active=False, client=None,
+                      instrumented=False)

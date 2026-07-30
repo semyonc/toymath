@@ -48,6 +48,13 @@ llm = [
     "openai-agents>=0.18.0",
     "pydantic>=2.8.2",
 ]
+# Experimental personal-Codex backend for do!. Pinned exactly: published
+# builds pin their own Codex runtime, and the dynamic-tool wire shape is
+# explicitly experimental, so the capability-containment contract is only
+# meaningful against the version it was validated with.
+codex = [
+    "openai-codex==0.144.4",
+]
 
 [project.urls]
 Homepage = "https://github.com/semyonc/toymath"
@@ -55,7 +62,7 @@ Repository = "https://github.com/semyonc/toymath"
 Documentation = "https://github.com/semyonc/toymath/blob/main/CLAUDE.md"
 
 [tool.setuptools]
-packages = ["engine", "engine.tactics"]
+packages = ["engine", "engine.tactics", "engine.agent_backends"]
 
 [tool.setuptools.package-data]
 engine = ["*.py", "models.yaml"]

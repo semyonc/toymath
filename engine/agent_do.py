@@ -4,25 +4,36 @@
 agent_do.py - the `do!` agent endpoint for the Jupyter kernel.
 
 A natural-language instruction goes in; a verified derivation comes out.
-The LLM (reached through OpenRouter via the OpenAI Agents SDK) is an
-untrusted planner: it can only *call* the trusted primitives, and only
-those tool executions append ledger steps. A hallucinated step cannot
-enter the artifact - the rendered cell is the ledger, not the model's
-prose.
+The LLM is an untrusted planner: it can only *call* the trusted primitives,
+and only those tool executions append ledger steps. A hallucinated step
+cannot enter the artifact - the rendered cell is the ledger, not the
+model's prose.
+
+This module owns the parts that are true of every provider: the session,
+the prompt, the canonical tool bindings, cancellation, and the finalizer
+that assembles a run's result. Which provider actually runs the loop lives
+behind `agent_backends` (OpenRouter through the OpenAI Agents SDK today).
 
 The always-on instructions are small; subject workflows are committed
 SKILL.md files loaded progressively through a stable tactic dispatcher.
 """
+import contextlib
+import inspect
 import json
 import os
 import re
 import threading
 
+import agent_config
 import observability
 import primitives
 import tactic_registry
 import tactic_skills
-from model_config import DEFAULT_MODEL, MODEL_VAR
+from agent_backends import base as agent_base
+from agent_backends.base import (AgentBudget, AgentRequest, CancellationToken,
+                                 DoAgentError, ToolBinding, ToolDispatcher,
+                                 USER, wait_interruptibly)
+from agent_backends.openrouter import DEFAULT_MAX_TURNS
 from tactics import core as core_tactics
 from ledger import Ledger, TRANSFORMING_OPS
 
@@ -32,20 +43,25 @@ try:
 except ImportError:  # pragma: no cover - dotenv ships with the kernel env
     pass
 
-OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
-API_KEY_VAR = 'OPEN_ROUTER'
-DEFAULT_MAX_TURNS = 64
-# providers intermittently return a zero-token, empty assistant message;
-# ask again rather than let it end the derivation
-EMPTY_RESPONSE_RETRIES = 3
-
 _SKILL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     '.claude', 'skills', 'toymath', 'SKILL.md')
 
+# DoAgentError is defined with the backend seam (both layers raise it) and
+# re-exported here: `except agent_do.DoAgentError` remains the caller's
+# contract.
+__all__ = ['DoAgentError', 'DoSession', 'build_prompt', 'make_api',
+           'make_tool_bindings', 'make_tools', 'run_instruction',
+           'finalize_session']
 
-class DoAgentError(Exception):
-    """Configuration/runtime error of the do! endpoint (not a math error)."""
+
+class SessionClosed(ValueError):
+    """The run was cancelled: this session accepts no further mutations.
+
+    A ValueError subclass so every existing tool-level `except ValueError`
+    degrades into an ordinary refusal rather than an exception escaping
+    into the agent loop.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +147,15 @@ diagrammatic - commutative diagrams, geometry, number lines, labelled
 constructions - and whenever the labels should be set in real math type:
 you pass LaTeX straight through instead of translating it to Python.
 
-Pass a whole document: any `\\usepackage{...}` lines, then
-`\\begin{document}`, one `tikzpicture`, then `\\end{document}`. Available
-packages: pgfplots, tikz-cd, circuitikz, chemfig, tikz-3dplot, amsmath,
-amssymb, array. Reach for `plot` instead when the picture is driven by
-computed data. TikZ figures are never ledger steps; a failed render hands
-you the TeX log, so fix the source or continue without the figure.
+Pass preamble then body: any `\\usepackage{...}` lines, then
+`\\begin{document}`, one `tikzpicture` or `tikzcd`, then `\\end{document}`.
+Omit `\\documentclass` - the engine supplies its own, and a second one is a
+hard TeX error. Available packages: pgfplots, tikz-cd, circuitikz, chemfig,
+tikz-3dplot, amsmath, amssymb, array; use `tikz-cd` and a `tikzcd`
+environment for commutative diagrams. Reach for `plot` instead when the
+picture is driven by computed data. TikZ figures are never ledger steps; a
+failed render hands you the TeX log, so fix the source or continue without
+the figure.
 """
 
 _PROVE_RULES = """
@@ -208,7 +227,15 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
 
 class DoSession(object):
     """Shared state of one do! run: the ledger the steps land in, the
-    streaming callbacks, the figure backends, and step-range bookkeeping."""
+    streaming callbacks, the figure backends, and step-range bookkeeping.
+
+    The lock is also the cancellation boundary. `close(reason)` takes it and
+    marks the session shut; a mutation that acquired it first commits
+    atomically, and every later record, comment, claim, conclusion, result
+    selection, and figure is refused. So an interrupted cell can never be
+    half-written, and nothing the abandoned worker does afterwards lands in
+    the notebook.
+    """
 
     def __init__(self, ledger=None, on_step=None, on_plot=None,
                  plot_backend=None, tikz_backend=None):
@@ -228,15 +255,65 @@ class DoSession(object):
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
         self.loaded_skills = {'core'}
+        self.closed = False
+        self.close_reason = None
         # the SDK executes sync tools on a thread pool, so parallel tool
         # calls hit the ledger concurrently - serialize the appends
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    # -- cancellation boundary --------------------------------------------
+    def close(self, reason=USER):
+        """Shut the session to further mutation. Idempotent; returns True
+        only for the call that closed it."""
+        with self._lock:
+            if self.closed:
+                return False
+            self.closed = True
+            self.close_reason = reason or USER
+            return True
+
+    def _refuse(self):
+        raise SessionClosed(
+            f'this run was stopped ({self.close_reason}); the session is '
+            'closed and the steps already recorded are final')
+
+    def deliver_figure(self, caption, figures):
+        """Show one figure, or refuse it because the run is over.
+
+        A figure is cell output, so it needs the same boundary the ledger
+        has: checking `closed` and then calling the callback would let a
+        cancellation land in between and paint a picture into a cell that
+        has already reported itself stopped. Returns whether it was shown.
+        """
+        if not figures or self.on_plot is None:
+            return False
+        with self._lock:
+            if self.closed:
+                return False
+            self.on_plot(caption, figures)
+            return True
+
+    @contextlib.contextmanager
+    def _mutate(self):
+        """Hold the ledger boundary for one mutation, or refuse it."""
+        with self._lock:
+            if self.closed:
+                self._refuse()
+            yield
 
     def record(self, result):
         """Ledger a successful transforming result; always return the
         (possibly step-annotated) record."""
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
             with self._lock:
+                if self.closed:
+                    refused = dict(result)
+                    refused['ok'] = False
+                    refused['cancelled'] = True
+                    refused['error'] = (
+                        f'this run was stopped ({self.close_reason}); no '
+                        'further step was recorded')
+                    return refused
                 try:
                     step = self.ledger.record(
                         result, goal=self.current_goal)
@@ -262,7 +339,7 @@ class DoSession(object):
 
     def claim(self, statement, parent=None, root=False):
         """Record and focus a claim. Root claims govern prove-mode output."""
-        with self._lock:
+        with self._mutate():
             claim = self.ledger.record_claim(statement, parent=parent)
             self.current_goal = claim['id']
             # Only the harness-created prove! claim governs final output.
@@ -274,14 +351,14 @@ class DoSession(object):
 
     def conclude(self, claim_id, step_ids):
         """Close a claim and return focus to its parent, if any."""
-        with self._lock:
+        with self._mutate():
             claim = self.ledger.conclude(claim_id, step_ids)
             self.current_goal = claim.get('parent') or claim['id']
         return claim
 
     def comment(self, text, from_step=None):
         """Append a narrative note or structured branch marker and stream it."""
-        with self._lock:
+        with self._mutate():
             if from_step:
                 pending = self.ledger._pending_branch(self.current_goal)
                 if pending is not None and from_step == pending['id']:
@@ -327,7 +404,7 @@ class DoSession(object):
                 raise ValueError(
                     f'root claim {self.proof_claim_id} is concluded; call '
                     'set_result with its endpoint')
-        with self._lock:
+        with self._mutate():
             selection = self.ledger.record_open(
                 _cap_prove_summary(reason), goal=self.current_goal)
             self.open_selection = selection
@@ -427,6 +504,14 @@ class DoSession(object):
                 'reason': 'no transforming step was recorded in this run',
             }
         return None
+
+
+def _closed_reply(op, session):
+    """A refusal for a non-ledger tool reached after the run was stopped."""
+    return json.dumps({
+        'ok': False, 'op': op, 'cancelled': True,
+        'error': f'this run was stopped ({session.close_reason})',
+    }, ensure_ascii=False)
 
 
 def _equivalent(left, right):
@@ -590,7 +675,7 @@ def make_api(session):
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': error}, ensure_ascii=False)
         try:
-            with session._lock:
+            with session._mutate():
                 session.result_selection = session.ledger.record_selection(
                     expr, provenance, goal=session.current_goal)
         except ValueError as exc:
@@ -630,13 +715,14 @@ def make_api(session):
             code: self-contained Python that builds a figure.
             caption: one-line description displayed under the figure.
         """
+        if session.closed:
+            return _closed_reply('plot', session)
         result = session.plot_backend.run_plot(code)
         figures = result.get('figures')
         if figures is None:  # a PNG-only backend still satisfies the seam
             figures = [{'kind': 'png', 'data': d}
                        for d in (result.get('images') or [])]
-        if figures and session.on_plot is not None:
-            session.on_plot(caption, figures)
+        session.deliver_figure(caption, figures)
         reply = {'ok': bool(result.get('ok')) and bool(figures),
                  'plots': len(figures),
                  'stdout': (result.get('stdout') or '')[-800:]}
@@ -649,13 +735,19 @@ def make_api(session):
         """Render an unverified TikZ illustration.
 
         Args:
-            code: a whole TeX document containing one tikzpicture.
+            code: preamble then body — any \\usepackage /
+                \\usetikzlibrary lines, then \\begin{document}, one
+                tikzpicture or tikzcd, then \\end{document}. Omit
+                \\documentclass; the engine supplies it. tikz-cd is
+                available, so use tikzcd for commutative diagrams.
             caption: one-line description displayed under the figure.
         """
+        if session.closed:
+            return _closed_reply('tikz', session)
         result = session.tikz_backend.render(code)
         svg = result.get('svg') if result.get('ok') else None
-        if svg and session.on_plot is not None:
-            session.on_plot(caption, [{'kind': 'svg', 'data': svg}])
+        if svg:
+            session.deliver_figure(caption, [{'kind': 'svg', 'data': svg}])
         reply = {'ok': bool(svg), 'plots': 1 if svg else 0}
         if not reply['ok']:
             # keep the tail: that is where the TeX log's `!` lines are
@@ -690,107 +782,118 @@ def make_api(session):
     return api
 
 
-def make_tools(session):
-    from agents import function_tool
+# ---------------------------------------------------------------------------
+# one canonical tool surface
+# ---------------------------------------------------------------------------
+
+# the stable model-visible surface, in the order the model sees it. Tactic
+# growth must never grow this list: subjects arrive through load_skill and
+# run_tactic.
+TOOL_NAMES = ('load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
+              'set_result', 'set_open')
+FIGURE_TOOL_NAMES = ('plot', 'tikz')
+
+_JSON_TYPES = {
+    str: {'type': 'string'},
+    list[str]: {'type': 'array', 'items': {'type': 'string'}},
+}
+
+
+def make_tool_bindings(session):
+    """The canonical, backend-neutral tool surface for one run.
+
+    Every provider adapter converts *these* records - name, description,
+    schema, handler - and nothing else, so the two backends cannot drift
+    into showing the model different tools. The bindings close over
+    `make_api(session)`; the generated tactic-name adapters in that API stay
+    internal compatibility helpers and never become model-visible.
+    """
     api = make_api(session)
-    names = ['load_skill', 'run_tactic', 'comment', 'claim', 'conclude',
-             'set_result', 'set_open']
+    names = list(TOOL_NAMES)
     if session.plot_backend is not None:
         names.append('plot')
     if session.tikz_backend is not None:
         names.append('tikz')
-    return [function_tool(api[name]) for name in names]
+    return tuple(_binding(api[name]) for name in names)
+
+
+def make_tools(session):
+    """Agents SDK tools for `session` (compatibility for direct callers)."""
+    from agent_backends.openrouter import function_tools
+    return function_tools(ToolDispatcher(make_tool_bindings(session)))
+
+
+def _binding(function):
+    """Derive one binding from a handler's signature and docstring.
+
+    The schema is generated once, here, rather than by each provider SDK:
+    that is what lets a parity test assert both backends advertise the same
+    tool. `unittests_do` pins it against the Agents SDK's own reading of
+    these functions.
+    """
+    summary, argument_docs = _parse_docstring(
+        function.__doc__ or '', tuple(inspect.signature(function).parameters))
+    properties = {}
+    for name, parameter in inspect.signature(function).parameters.items():
+        spec = dict(_JSON_TYPES.get(parameter.annotation, {'type': 'string'}))
+        if argument_docs.get(name):
+            spec['description'] = argument_docs[name]
+        spec['title'] = name.replace('_', ' ').title()
+        if parameter.default is not inspect.Parameter.empty:
+            spec['default'] = parameter.default
+        properties[name] = spec
+    schema = {
+        'properties': properties,
+        # strict schemas list every property as required; an argument with a
+        # default is still supplied by the model, or restored by the shared
+        # validator when it is omitted
+        'required': list(properties),
+        'title': f'{function.__name__}_args',
+        'type': 'object',
+        'additionalProperties': False,
+    }
+    return ToolBinding(name=function.__name__, description=summary,
+                       input_schema=schema,
+                       invoke=lambda payload: function(**payload))
+
+
+_ARG_RE = re.compile(r'^(\w+):\s*(.*)$')
+
+
+def _parse_docstring(text, parameters):
+    """Split a Google-style docstring into (summary, {argument: text})."""
+    lines = inspect.cleandoc(text).splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.strip() == 'Args:'), None)
+    if start is None:
+        return '\n'.join(lines).rstrip(), {}
+    summary = '\n'.join(lines[:start]).rstrip()
+    documented = {}
+    pending = set(parameters)
+    current = None
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _ARG_RE.match(stripped)
+        if match is not None and match.group(1) in pending:
+            current = match.group(1)
+            pending.discard(current)
+            documented[current] = [match.group(2)]
+        elif current is not None:
+            documented[current].append(stripped)
+    return summary, {name: '\n'.join(parts).strip()
+                     for name, parts in documented.items()}
 
 
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
-def _is_empty_model_response(response):
-    """True when the model returned nothing actionable: no tool call and no
-    text. Providers do this intermittently (a zero-token completion), and
-    the Agents SDK reads it as the final answer."""
-    for item in (getattr(response, 'output', None) or []):
-        kind = getattr(item, 'type', None)
-        if kind is not None and kind != 'message':
-            return False  # a tool call, or anything else to act on
-        for part in (getattr(item, 'content', None) or []):
-            if getattr(part, 'refusal', None):
-                return False
-            text = getattr(part, 'text', None)
-            if text and text.strip():
-                return False
-    return True
-
-
-def _retrying_model(base_cls):
-    """`base_cls` with empty completions retried.
-
-    A provider that returns an empty assistant message ends the run where it
-    stands, and the harness then presents whatever step came last as the
-    answer - a half-finished derivation looking like a result. That is a
-    transport hiccup, not a decision by the agent, so ask again instead of
-    accepting it. Bounded, and the last response is returned either way so a
-    genuinely mute model still terminates.
-    """
-
-    class RetryEmptyResponses(base_cls):
-        async def get_response(self, *args, **kwargs):
-            import asyncio
-            response = None
-            for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
-                response = await super().get_response(*args, **kwargs)
-                if not _is_empty_model_response(response):
-                    return response
-                if attempt < EMPTY_RESPONSE_RETRIES:
-                    await asyncio.sleep(0.5 * (2 ** attempt))
-            return response
-
-    return RetryEmptyResponses
-
-
-def build_model(model_name=None):
-    """OpenRouter-backed chat-completions model for the Agents SDK."""
-    key = os.environ.get(API_KEY_VAR)
-    if not key:
-        raise DoAgentError(
-            f'{API_KEY_VAR} is not set - put the OpenRouter key in .env')
-    from openai import AsyncOpenAI
-    from agents import OpenAIChatCompletionsModel, set_tracing_disabled
-    # Leave the Agents SDK tracing ENABLED only when observability is active:
-    # the OpenInference instrumentor rides that pipeline, so disabling it
-    # would silently starve Langfuse. When inactive, disable it as before so
-    # no traces are shipped to OpenAI's backend.
-    set_tracing_disabled(not observability.active())
-    client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
-    return _retrying_model(OpenAIChatCompletionsModel)(
-        model=model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL),
-        openai_client=client)
-
-
-def run_instruction(instruction, ledger=None, on_step=None, model=None,
-                    max_turns=DEFAULT_MAX_TURNS, on_plot=None,
-                    plot_backend=None, proof_goal=None, tikz_backend=None,
-                    model_name=None, providers=(), chain_goal=None):
-    """Run one do! instruction through the agent.
-
-    Returns {ok, steps, assumptions, premises, final_result,
-    final_provenance, branch_topology, abandoned_paths, summary[, error]}.
-    `premises` are the inputs this run stated rather than derived — the
-    boundary of what it checked.
-    `steps` are the ledger steps this run added; `final_result` is the
-    cell's chainable value. Figures reach
-    `on_plot(caption, [{kind, data, height?}, ...])` where kind is
-    png/html/svg; when a backend argument is None the configured one is
-    auto-detected (TOYMATH_SANDBOX). The agent loop runs in a private
-    thread with its own asyncio loop, so this is safe to call from the
-    Jupyter kernel's event-loop thread.
-    """
-    from agents import Agent, ModelSettings, Runner, RunConfig
-    from agents.exceptions import MaxTurnsExceeded
-    # Set up tracing before the model is built: build_model consults
-    # observability.active() to decide whether to leave Agents-SDK tracing on.
-    observability.setup()
+def prepare_session(ledger=None, on_step=None, on_plot=None,
+                    plot_backend=None, tikz_backend=None, proof_goal=None,
+                    chain_goal=None):
+    """Build one run's session and, in prove! mode, its root claim."""
     if plot_backend is None:
         import plot_sandbox
         plot_backend = plot_sandbox.get_backend()
@@ -801,123 +904,173 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                         plot_backend=plot_backend,
                         tikz_backend=tikz_backend)
     session.chain_goal = chain_goal
-    root_claim = None
     if proof_goal is not None:
         try:
-            root_claim = session.claim(proof_goal, root=True)
+            session.claim(proof_goal, root=True)
         except ValueError as e:
             raise DoAgentError(f'invalid proof claim: {e}')
-    agent = Agent(name='toymath',
-                  instructions=build_prompt(
-                      plotting=session.plot_backend is not None,
-                      tikz=session.tikz_backend is not None,
-                      prove_mode=proof_goal is not None,
-                      proof_claim_id=(root_claim['id']
-                                      if root_claim is not None else 'c1')),
-                  tools=make_tools(session),
-                  model=(model if model is not None
-                         else build_model(model_name=model_name)))
-    def _tool_error_message(fargs):
-        # A model naming a TACTIC as a tool must be steered back to
-        # run_tactic in one turn, never abort the whole derivation
-        # (live: a hallucinated `integrate_table` call killed a run
-        # with three green steps).
-        if getattr(fargs, 'kind', None) != 'tool_not_found':
-            return fargs.default_message
-        spec = tactic_registry.BY_NAME.get(fargs.tool_name)
-        if spec is not None:
-            return (f"'{fargs.tool_name}' is a tactic, not a tool. Call "
-                    f"run_tactic with tactic='{fargs.tool_name}' and its "
-                    f"ordered string arguments (load_skill "
-                    f"'{spec.skill}' first if that skill is not loaded).")
-        return (f"Tool '{fargs.tool_name}' does not exist. Use only the "
-                "fixed tools: load_skill, run_tactic, comment, claim, "
-                "conclude, set_result, set_open.")
+    return session
 
-    provider_order = tuple(providers or ())
-    model_settings = None
-    if provider_order:
-        model_settings = ModelSettings(extra_body={
-            'provider': {
-                'order': list(provider_order),
-                'allow_fallbacks': False,
-            },
-        })
-    run_config = RunConfig(tool_not_found_behavior='return_error_to_model',
-                           tool_error_formatter=_tool_error_message,
-                           model_settings=model_settings)
-    holder = {}
-    trace_meta = {
-        'mode': 'prove' if proof_goal is not None else 'do',
-        'model': (model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL)
-                  if model is None else type(model).__name__),
-        'providers': list(provider_order),
-        'max_turns': max_turns,
-    }
 
-    def worker():
-        import asyncio
-        try:
-            # trace_run must be entered on this thread: the instrumentor's
-            # root span inherits the active OTEL context here so the whole
-            # agent trace nests under one Langfuse observation.
-            with observability.trace_run(instruction,
-                                         metadata=trace_meta) as span:
-                res = asyncio.run(
-                    Runner.run(agent, instruction, max_turns=max_turns,
-                               run_config=run_config))
-                observability.set_output(
-                    span, str(res.final_output or '').strip() or None)
-                holder['res'] = res
-        except Exception as e:  # surfaced below, never swallowed
-            holder['err'] = e
+def resolve_backend(backend=None, model=None, model_name=None, providers=(),
+                    max_turns=DEFAULT_MAX_TURNS):
+    """Pick the backend for one run.
 
-    t = threading.Thread(target=worker, name='toymath-do', daemon=True)
-    t.start()
-    t.join()
+    `backend` is a ready backend object or a name. A run never fails over to
+    the other provider once it has begun - a Codex limit must not silently
+    create OpenRouter charges, and an OpenRouter outage must not silently
+    consume a user's Codex allowance.
+    """
+    if backend is not None and not isinstance(backend, str):
+        return backend
+    if backend == agent_config.AUTO:
+        # resolved once, here, before anything is spent
+        backend = agent_config.resolve(backend).backend
+    if backend == agent_config.CODEX:
+        from agent_backends.codex import CodexBackend
+        return CodexBackend(model=model_name)
+    from agent_backends.openrouter import OpenRouterBackend
+    return OpenRouterBackend(model=model, model_name=model_name,
+                             providers=providers, max_turns=max_turns)
+
+
+def run_instruction(instruction, ledger=None, on_step=None, model=None,
+                    max_turns=DEFAULT_MAX_TURNS, on_plot=None,
+                    plot_backend=None, proof_goal=None, tikz_backend=None,
+                    model_name=None, providers=(), chain_goal=None,
+                    budget=None, grace_period=None, backend=None, route=None):
+    """Run one do! instruction through the agent.
+
+    Returns {ok, status, steps, assumptions, premises, final_result,
+    final_provenance, branch_topology, abandoned_paths, summary[, error]}.
+    `premises` are the inputs this run stated rather than derived — the
+    boundary of what it checked.
+    `steps` are the ledger steps this run added; `final_result` is the
+    cell's chainable value. Figures reach
+    `on_plot(caption, [{kind, data, height?}, ...])` where kind is
+    png/html/svg; when a backend argument is None the configured one is
+    auto-detected (TOYMATH_SANDBOX). The agent loop runs in a private
+    thread with its own asyncio loop, so this is safe to call from the
+    Jupyter kernel's event-loop thread.
+
+    Jupyter Stop (KeyboardInterrupt) cancels the provider run and closes
+    the session within a bounded grace period. A cancelled run keeps every
+    step it committed - those replay - but designates no chainable result:
+    `status` is "interrupted" (or "budget_exhausted"), `final_result` is
+    None, and a verified candidate appears only as a labelled
+    `partial_result`.
+    """
+    if route is not None:
+        # notebook-local routing: backend, model, and provider order travel
+        # together so a run cannot mix one backend with another's model
+        backend = backend if backend is not None else route.backend
+        model_name = model_name if model_name is not None else route.model
+        providers = providers or route.providers
+    # Set up tracing before the backend builds its model: build_model
+    # consults observability.active() to decide whether to leave Agents-SDK
+    # tracing on.
+    observability.setup()
+    session = prepare_session(ledger=ledger, on_step=on_step,
+                              on_plot=on_plot, plot_backend=plot_backend,
+                              tikz_backend=tikz_backend,
+                              proof_goal=proof_goal, chain_goal=chain_goal)
+    budget = budget if budget is not None else AgentBudget()
+    cancellation = CancellationToken()
+    backend = resolve_backend(backend=backend, model=model,
+                              model_name=model_name, providers=providers,
+                              max_turns=max_turns)
+    dispatcher = ToolDispatcher(
+        make_tool_bindings(session), cancellation, budget=budget,
+        serialize=getattr(backend, 'serialize_tools', False))
+    request = AgentRequest(
+        instruction=instruction,
+        developer_instructions=build_prompt(
+            plotting=session.plot_backend is not None,
+            tikz=session.tikz_backend is not None,
+            prove_mode=proof_goal is not None,
+            proof_claim_id=(session.proof_claim_id or 'c1')),
+        dispatcher=dispatcher,
+        cancellation=cancellation,
+        model=model_name,
+        budget=budget,
+        trace_metadata={'mode': 'prove' if proof_goal is not None else 'do'})
+    handle = backend.start(request)
+    # One place decides what cancellation means, whoever noticed first: the
+    # kernel thread on Stop, or a tool worker that ran out of budget. The
+    # session closes BEFORE the provider is asked to stop, so no tool call
+    # racing the interrupt can still append a step.
+    cancellation.add_listener(
+        lambda reason: (session.close(reason), handle.cancel(reason)))
+    try:
+        outcome = wait_interruptibly(handle, cancellation,
+                                     grace_period=grace_period,
+                                     budget=budget)
+    except KeyboardInterrupt:
+        # Stop landed in the narrow window between starting the run and
+        # entering the wait; the run is still ours to contain, and the
+        # notebook must not be handed a live worker with an open session
+        session.close(USER)
+        handle.cancel(USER)
+        outcome = wait_interruptibly(handle, cancellation,
+                                     grace_period=grace_period,
+                                     budget=budget)
+    if outcome.cancelled:
+        session.close(cancellation.reason or USER)
     observability.flush()
+    return finalize_session(session, outcome, max_turns=max_turns)
 
-    steps = session.new_steps()
-    last_transform = next((s for s in reversed(steps)
-                           if s.get('result') is not None), None)
+
+# ---------------------------------------------------------------------------
+# finalizer: one run's result, assembled from the ledger
+# ---------------------------------------------------------------------------
+
+def _designated_result(session, steps):
+    """The run's value and its provenance, in precedence order."""
     root_claim = (session.ledger.get_claim(session.proof_claim_id)
                   if session.proof_claim_id is not None else None)
     if session.result_override is not None:
-        final = session.result_override
-        provenance = session.result_provenance
-    elif root_claim is not None and root_claim.get('verdict') != 'open':
-        final = root_claim['conclusion']['endpoint']
-        provenance = {
+        return session.result_override, session.result_provenance
+    if root_claim is not None and root_claim.get('verdict') != 'open':
+        return root_claim['conclusion']['endpoint'], {
             'status': root_claim['verdict'], 'source': 'claim',
             'claim': root_claim['id'],
             'steps': root_claim['conclusion']['steps'],
             'method': root_claim['conclusion']['closure'],
         }
-    elif session.open_selection is not None:
-        # the agent recorded a run-level open outcome: no certified
-        # result exists, so no fallback value may masquerade as one
-        final = None
+    if session.open_selection is not None:
+        # the agent recorded a run-level open outcome: no certified result
+        # exists, so no fallback value may masquerade as one
         provenance = dict(session.open_selection.get('provenance') or {})
         provenance['selection'] = session.open_selection['id']
-    elif root_claim is not None:
-        final = None
-        provenance = {
+        return None, provenance
+    if root_claim is not None:
+        return None, {
             'status': 'open', 'source': 'claim',
             'claim': root_claim['id'],
             'reason': 'no mechanically checked closing chain was recorded',
         }
-    elif last_transform is not None:
+    last_transform = next((s for s in reversed(steps)
+                           if s.get('result') is not None), None)
+    if last_transform is not None:
         # fallback, not a designation: the step is verified, but nothing
         # says its result answers the instruction — consumers that need a
         # goal-covering value (inline expr commands) must check the chain
-        final = last_transform['result']
-        provenance = {
+        return last_transform['result'], {
             'status': 'verified', 'source': 'ledger',
             'step': last_transform['id'], 'method': 'last-step',
         }
-    else:
-        final = None
-        provenance = None
+    return None, None
+
+
+def finalize_session(session, outcome, max_turns=None):
+    """Assemble one run's result from the ledger and the provider outcome.
+
+    Provider-neutral by construction: everything mathematical here is read
+    back out of the session's own records, and `outcome.final_text` is
+    unverified narrative that can never become a result.
+    """
+    steps = session.new_steps()
+    final, provenance = _designated_result(session, steps)
     marker_ids = [s['id'] for s in steps if s.get('op') == 'branch']
     topology = session.ledger.presentation_topology(
         final_provenance=(None if session.result_selection is not None
@@ -935,7 +1088,12 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
     final_premises = session.ledger.premises(spine or run_ids or None)
-    out = {'ok': 'err' not in holder, 'steps': steps,
+    out = {'ok': outcome.status == agent_base.COMPLETED,
+           'status': outcome.status,
+           # provider-side facts about the run (backend, model, turn ids,
+           # any native tool the model reached for) - never mathematics
+           'outcome_metadata': dict(outcome.metadata or {}),
+           'steps': steps,
            'claims': session.new_claims(),
            'assumptions': final_assumptions,
            'premises': final_premises,
@@ -943,33 +1101,15 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
            'branch_topology': topology,
            'abandoned_paths': topology['abandoned_paths'],
            'summary': None}
-    if 'err' in holder:
-        e = holder['err']
-        if isinstance(e, MaxTurnsExceeded):
-            out['turn_limit_reached'] = True
-            # a run whose LAST turn committed a verified designated result
-            # is finished, not failed: only the closing prose was lost. The
-            # last-step fallback does not count - nothing there says the
-            # value answers the instruction - and an open claim or open
-            # outcome means the derivation really is unfinished.
-            open_claims = any((c.get('verdict') or 'open') == 'open'
-                              for c in out['claims'])
-            if (session.result_override is not None
-                    and (provenance or {}).get('status') == 'verified'
-                    and not open_claims
-                    and session.open_selection is None):
-                out['ok'] = True
-                out['summary'] = None
-            else:
-                out['error'] = (f'stopped after {max_turns} turns - partial '
-                                f'derivation shown')
-        else:
-            out['error'] = f'{type(e).__name__}: {e}'
+    if outcome.cancelled:
+        return _finalize_cancelled(out, outcome, final, provenance)
+    if outcome.status == agent_base.FAILED:
+        _finalize_failure(out, outcome, session, provenance, max_turns)
     else:
-        summary = str(holder['res'].final_output or '').strip()
+        summary = outcome.final_text or ''
         open_claims = any((c.get('verdict') or 'open') == 'open'
                           for c in out['claims'])
-        if (proof_goal is not None or open_claims
+        if (session.proof_claim_id is not None or open_claims
                 or session.open_selection is not None):
             # an open claim must stay visibly unfinished: prose can never
             # substitute for the missing chain, in prove! or plain do!
@@ -977,6 +1117,62 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             out['summary_unverified'] = True
         out['summary'] = summary
     return out
+
+
+_CANCEL_MESSAGES = {
+    agent_base.INTERRUPTED: 'stopped by the user',
+    agent_base.BUDGET_EXHAUSTED: 'the run budget was exhausted',
+    agent_base.CAPABILITY_VIOLATION: (
+        'the run used a capability outside the ToyMath tool surface and was '
+        'invalidated'),
+}
+
+
+def _finalize_cancelled(out, outcome, final, provenance):
+    """A cancelled cell keeps its checked steps and chains nothing.
+
+    Everything committed before the session closed stays in the notebook
+    ledger and still replays. What the cell must not do is act finished:
+    no chainable value, no execution-history backreference, and no closing
+    narrative — the model never got to write one, and a candidate recorded
+    moments before Stop was never confirmed as the answer.
+    """
+    verified = bool(final) and (provenance or {}).get('status') not in (
+        None, 'unverified', 'open')
+    message = _CANCEL_MESSAGES.get(outcome.status, 'stopped')
+    if outcome.metadata.get('grace_exceeded'):
+        message += '; the provider did not acknowledge cancellation in time'
+    out.update(ok=False, cancelled=True, final_result=None,
+               final_provenance=None, summary=None,
+               partial_result=final if verified else None,
+               partial_provenance=provenance if verified else None,
+               error=outcome.error or message)
+    return out
+
+
+def _finalize_failure(out, outcome, session, provenance, max_turns):
+    if not outcome.metadata.get('turn_limit'):
+        out['error'] = outcome.error or 'the agent run failed'
+        return
+    out['turn_limit_reached'] = True
+    # a run whose LAST turn committed a verified designated result is
+    # finished, not failed: only the closing prose was lost. The last-step
+    # fallback does not count - nothing there says the value answers the
+    # instruction - and an open claim or open outcome means the derivation
+    # really is unfinished.
+    open_claims = any((c.get('verdict') or 'open') == 'open'
+                      for c in out['claims'])
+    if (session.result_override is not None
+            and (provenance or {}).get('status') == 'verified'
+            and not open_claims
+            and session.open_selection is None):
+        out['ok'] = True
+        out['status'] = agent_base.COMPLETED
+        out['summary'] = None
+    else:
+        limit = max_turns if max_turns is not None else '?'
+        out['error'] = (f'stopped after {limit} turns - partial '
+                        f'derivation shown')
 
 
 def _strip_dangling_math(text):
