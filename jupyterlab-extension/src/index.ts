@@ -8,6 +8,7 @@ import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { IDisposable } from '@lumino/disposable';
 
 import { closeCommSafely } from './comm_lifecycle';
+import { shouldInvokeCompletion } from './completion';
 import {
   applyModelTitle,
   findAddedKernelNameItem,
@@ -20,6 +21,7 @@ const TOYMATH_KERNEL = 'toymath';
 
 interface IModelState {
   model: string;
+  backend: string | null;
   providers: string[];
 }
 
@@ -45,12 +47,13 @@ function paintKernelTitle(panel: NotebookPanel, state: IPanelState): void {
   if (panel.isDisposed || !state.kernelNameItem) {
     return;
   }
-  const model = state.model && isToyMath(panel) ? state.model.model : null;
+  const routing = state.model && isToyMath(panel) ? state.model : null;
   applyModelTitle(
     // The DOM node satisfies the structural subset the painter needs.
     state.kernelNameItem as unknown as IItemNode,
-    model,
-    panel.sessionContext.kernelDisplayName
+    routing ? routing.model : null,
+    panel.sessionContext.kernelDisplayName,
+    routing ? routing.backend : null
   );
 }
 
@@ -91,6 +94,7 @@ function readModelMessage(msg: KernelMessage.ICommMsgMsg): IModelState | null {
   }
   return {
     model: data.model,
+    backend: typeof data.backend === 'string' ? data.backend : null,
     providers: Array.isArray(data.providers)
       ? data.providers.filter((value): value is string =>
           typeof value === 'string'
@@ -130,15 +134,6 @@ function connectPanel(panel: NotebookPanel, state: IPanelState): void {
   comm.open({});
 }
 
-function shouldInvokeModelCompletion(code: string, cursor: number): boolean {
-  const lineStart = code.lastIndexOf('\n', cursor - 1) + 1;
-  const line = code.slice(lineStart, cursor);
-  return (
-    /^[ \t]*model![ \t]+$/.test(line) ||
-    /^[ \t]*model![ \t]+[^,\n]+(?:,[^,\n]+)*,[ \t]*$/.test(line)
-  );
-}
-
 function attachPanel(
   app: JupyterFrontEnd,
   notebooks: INotebookTracker,
@@ -173,7 +168,7 @@ function attachPanel(
       }
       const code = cell.model.sharedModel.getSource();
       const cursor = cell.editor.getOffsetAt(cell.editor.getCursorPosition());
-      if (shouldInvokeModelCompletion(code, cursor)) {
+      if (shouldInvokeCompletion(code, cursor)) {
         void app.commands.execute('completer:invoke-notebook');
       }
     }, 0);

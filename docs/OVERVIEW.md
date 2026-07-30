@@ -50,8 +50,9 @@ skill text, comments, and plots cannot establish a mathematical result.
 
 ## `do!` and progressive skills
 
-A notebook cell beginning with `do!` sends the rest of the cell to an
-OpenRouter-backed agent through the OpenAI Agents SDK:
+A notebook cell beginning with `do!` sends the rest of the cell to an agent
+backend — OpenRouter through the OpenAI Agents SDK, or the user's own Codex
+account (experimental; see *Choosing an agent backend*):
 
 ```text
 do! solve 2x + 3 = 7 for x and verify the candidate
@@ -93,9 +94,134 @@ not condition the selected final spine.
 open until `conclude` receives a connected, goal-owned checked chain. Prose
 cannot substitute for a missing step.
 
+### Stopping a run
+
+Jupyter's Stop button interrupts a `do!` cell. Cancellation is part of
+correctness, not polish: the provider run is cancelled, the session is closed
+to further writes within a bounded grace period, and no tool call started
+after the interrupt can append anything.
+
+What was already mechanically checked is kept. Steps committed before the
+stop stay in the notebook ledger and still replay, and a verified value the
+run had reached is shown as a labelled `partial_result`. What a cancelled
+cell never does is act finished: it designates no result and creates no
+`[[n]]` backreference, because nothing confirmed that value answers the
+instruction. A harness limit (tool-call or wall-clock budget) uses the same
+machinery but reports `budget_exhausted`, so a user's Stop and a safety limit
+stay distinguishable.
+
+### Choosing an agent backend
+
+`backend!` selects which provider runs the agent, for this notebook kernel
+only:
+
+```text
+backend!             # show the effective backend and why it was selected
+backend! auto
+backend! openrouter
+backend! codex       # experimental; needs login!
+```
+
+`auto` resolves once before each run, in this order: an explicit selection in
+this notebook, `TOYMATH_AGENT_BACKEND`, OpenRouter when `OPEN_ROUTER` is
+configured, then Codex when a managed ChatGPT account is already signed in.
+An existing OpenRouter installation therefore behaves exactly as before. If
+nothing is configured, the cell says so instead of guessing.
+
+A run never fails over. A Codex rate limit will not silently create
+OpenRouter charges, and an OpenRouter outage will not silently consume a
+Codex allowance; switching providers is always an explicit act.
+
+#### The experimental personal-Codex backend
+
+The Codex backend is opt-in and local: each user authenticates their own
+account and consumes their own entitlement. Install the extra and sign in:
+
+```bash
+uv pip install ".[codex]"
+```
+
+```text
+login!               # managed ChatGPT sign-in in the browser
+login! device        # device-code flow
+login! status        # auth mode and plan type
+login! logout
+```
+
+Authentication is managed by the Codex app-server: ToyMath receives a
+sign-in URL, a completion notification, and an account status, and never
+handles, stores, or displays a ChatGPT token. It keeps no account identifier
+or email either. Signing in never changes the *selected* backend — those are
+separate operations — though on `auto` it can change the *effective* one,
+which the status line and toolbar then republish. Interrupting a pending
+`login!` cancels it on the app-server, on a deadline of its own; a runtime
+that will not acknowledge is replaced rather than reused, because an
+unacknowledged cancellation means the challenge is still open.
+
+Only a managed ChatGPT account runs a derivation. The runtime also reports
+`apiKey` and `amazonBedrock` accounts as signed in, and those bill a
+different — possibly organizational — credential, so they are refused with an
+explanation rather than spent on a math run.
+
+A sign-in challenge is short-lived, but Jupyter persists cell output into the
+saved `.ipynb`, so it is kept out of the file: the browser flow hands its
+one-time URL to the OS browser and prints no link, and the device code —
+which has to be readable while you type it — is cleared from the cell as soon
+as the flow ends, whether it succeeded, failed, or was interrupted. On a
+headless machine where no browser can be opened, the link is shown instead,
+labelled as one-time, and cleared the same way.
+
+ToyMath uses its own Codex home (`~/.toymath/codex-home`, or
+`TOYMATH_CODEX_HOME`), never `~/.codex`, because the general CLI home carries
+MCP servers, plugins, apps, and project instructions that would leak
+capabilities into a math agent. It marks that home as its own and refuses to
+adopt a directory it did not create — it rewrites `AGENTS.md` there, and a
+mistyped `TOYMATH_CODEX_HOME` must not silently overwrite somebody else's
+instructions or inherit their configuration. Each run gets a fresh ephemeral
+thread with an empty working directory outside the repository, a read-only
+sandbox, no approvals, and every capability switch off.
+
+Both the home's `AGENTS.md` and the thread's developer instructions reach the
+model, so only one of them may enumerate tools — the thread. Which tools
+exist is a property of the session (`plot` and `tikz` appear only when the
+figure sandboxes resolved), while the home file is written once, by whichever
+command first starts the kernel's runtime. Baking names into it produced a
+global instruction listing seven tools while the thread offered nine, and a
+model reading both obeyed the stricter one: it declined to draw a diagram it
+had a working `tikz` tool for. The durable file now carries the role and the
+prohibitions — which never vary — and defers the list to the thread.
+
+MCP is contained separately, because the runtime has no global switch for it:
+measured against the pinned binary, one configured server adds four
+model-visible tools, and a whole-table config override merges rather than
+replaces. So ToyMath enumerates the home's `mcp_servers` at startup and
+disables each by name; a server whose name cannot be addressed that way is a
+hard error rather than one left enabled. The contract test runs against a
+home that carries a server, so the enforcement is measured and not asserted.
+
+The honest limitation: the pinned Codex runtime still leaves three native
+tools visible to the model — `update_plan`, `request_user_input`, and
+`view_image` — and offers no endpoint reporting the effective tool list.
+ToyMath accepts that residual exposure for this experimental backend and does
+not claim those tools are disabled. A contract test captures the outgoing
+request from the real runtime and fails if the tool set is anything other
+than the ToyMath tools plus those three; at run time, any tool call outside
+the ToyMath surface is refused, and a run that reaches for a native
+capability is interrupted and reports `capability_violation` with no
+chainable result. The same applies to server-initiated requests: a ToyMath
+tool call is the only one answered normally, and every other method in the
+runtime's protocol — approvals, elicitations, a token refresh, or something
+this version has never seen — gets that method's own refusal shape and
+invalidates the run.
+
+Whatever the backend, the trust boundary is the same: the model chooses
+strategy and calls tools, while the tactic registry, the independent numeric
+oracle, and the ledger remain the only authority for a mechanically checked
+result. Model prose can never become a designated value.
+
 ### Selecting the notebook model
 
-`model!` changes the OpenRouter model for subsequent agent-backed cells in the
+`model!` changes the agent model for subsequent agent-backed cells in the
 current notebook kernel. It does not mutate `.env` or affect another running
 notebook:
 
@@ -116,9 +242,10 @@ shows the current selection and this shortcut.
 
 The selected routing is used by `do!` and model-backed named/inline commands;
 direct primitive commands still make no model call. The notebook toolbar's
-kernel button shows `Toy Math · MODEL` and updates immediately when the
-selection changes. Model selection and its title are local to that notebook's
-kernel.
+kernel button shows `Toy Math · MODEL` (with the backend, as
+`Toy Math · codex · MODEL`, when it is not the default one) and updates
+immediately when the selection changes. Model selection and its title are
+local to that notebook's kernel.
 
 The editable configuration shape is:
 
@@ -128,6 +255,11 @@ models:
   - model: z-ai/glm-5.2
     providers: [Cerebras, Fireworks]
 ```
+
+The catalog is backend-aware. `models.yaml` and provider ordering describe
+OpenRouter; with Codex selected, `model!` lists the models that account
+offers and takes no provider argument. With no explicit choice, Codex uses
+the account's own default rather than a model id hard-coded into ToyMath.
 
 ## Notebook command tiers
 
@@ -235,11 +367,26 @@ cd ..
 uv pip install --reinstall --no-deps .
 ```
 
+The experimental personal-Codex backend is an optional extra:
+
+```bash
+uv pip install ".[codex]"
+```
+
+It pins the exact Codex SDK/runtime pair the capability-containment contract
+was validated against. Without it, `backend! codex` reports the install
+command and OpenRouter behaviour is untouched.
+
 Agent configuration is read from `.env`:
 
 ```dotenv
 OPEN_ROUTER=sk-or-...
 OPENROUTER_MODEL=anthropic/claude-sonnet-5
+TOYMATH_AGENT_BACKEND=auto
+# optional, for the experimental Codex backend. Unset, the runtime's own
+# default is used (gpt-5.6-sol with the pinned one); this overrides it.
+TOYMATH_CODEX_MODEL=gpt-5.6-luna
+TOYMATH_CODEX_HOME=~/.toymath/codex-home
 TOYMATH_SANDBOX=auto
 # optional Langfuse tracing of do! runs (off unless set to on/1/true)
 TOYMATH_OBSERVABILITY=off
@@ -249,18 +396,40 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```
 
 With `TOYMATH_OBSERVABILITY=on`, each do! run is exported to Langfuse as one
-trace (agent turns, LLM generations with token usage and latency, and every
-trusted-primitive tool call) via the OpenInference instrumentor. Tracing is
-observability only — it never touches the ledger or the numeric oracle, and a
-Langfuse outage is downgraded to a logged warning so the derivation still runs.
+trace. How much detail it carries depends on the backend:
 
-The normal test suite is offline; live OpenRouter and plot probes are opt-in:
+- **OpenRouter** — agent turns, LLM generations with token usage and latency,
+  and every trusted-primitive tool call, via the OpenInference instrumentor.
+- **Codex** — the run span (instruction, final text, backend, model, status,
+  tool counts) plus one child observation per ToyMath tool call. The
+  instrumentor only sees Agents-SDK runs, so these come from ToyMath's own
+  backend-neutral seam; the tracing context is carried explicitly across the
+  transport's worker threads so they nest under the run rather than starting
+  orphan traces. Per-turn LLM generations are not available on this path.
+
+Tracing is observability only — it never touches the ledger or the numeric
+oracle, and a Langfuse outage is downgraded to a logged warning so the
+derivation still runs.
+
+The Codex runtime has its own OpenTelemetry pipeline
+(`otel.exporter = none | statsig | otlp-http | otlp-grpc`). ToyMath pins it
+to `none` for its threads, so a derivation ships no runtime telemetry
+anywhere unless that is an explicit, separate decision.
+
+The normal test suite is offline; live provider and plot probes are opt-in
+and separately gated:
 
 ```bash
 .venv/bin/python -m pytest -q
 TOYMATH_LIVE_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
+TOYMATH_CODEX_LIVE_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 TOYMATH_PLOT_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 ```
+
+The Codex live tests require an already authenticated account and skip rather
+than starting an interactive login. The tool-set contract test needs only the
+installed runtime: it captures the real outgoing request against a loopback
+server, with no account and no network.
 
 ## Repository map
 
@@ -270,7 +439,9 @@ engine/tactics/*.py        static tactic implementations by subject skill
 engine/tactic_registry.py  authoritative tactic schemas and dispatch
 engine/tactic_skills.py    progressive SKILL.md discovery/rendering
 engine/ledger.py           record, render, claim closure, and replay
-engine/agent_do.py         do! runtime and stable model tool surface
+engine/agent_do.py         do! session, canonical tool bindings, finalizer
+engine/agent_config.py     notebook-local AgentRoute and backend resolution
+engine/agent_backends/     provider seam: cancellation, OpenRouter, Codex
 engine/model_config.py     model! configuration loading and validation
 engine/models.yaml         selectable OpenRouter models/provider orders
 jupyterlab-extension/      TypeScript source for completion/title integration

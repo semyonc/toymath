@@ -75,6 +75,15 @@ This is an SDK-independent simulation of progressive skills, which keeps the
 OpenRouter chat-completions model path. The committed files can later be mapped
 to a native sandbox skill loader without changing tactic authority.
 
+The tool surface is also provider-independent. `make_tool_bindings(session)`
+defines each model-visible tool once — name, description, JSON schema, and
+handler — and a backend adapter converts that record into its own dialect
+(Agents SDK function tools, or Codex app-server `dynamicTools`). Whichever
+provider runs the agent, it sees the same tools, and only allowlisted registry
+calls can append a step. A cancelled run closes the session under its lock:
+steps committed before closure remain and still replay, while everything after
+it is refused, so an interrupted cell can never be half-written.
+
 ## Two independent trust legs
 
 Every transformation has two intentionally separate paths:

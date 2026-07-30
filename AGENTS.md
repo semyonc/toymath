@@ -33,7 +33,9 @@ Two layers coexist:
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
-| `engine/agent_do.py` | `do!` Jupyter endpoint: small stable tool surface (`load_skill`, `run_tactic`, ledger controls) over the tactic registry |
+| `engine/agent_do.py` | `do!` Jupyter endpoint: session, canonical `ToolBinding` surface (`load_skill`, `run_tactic`, ledger controls), cancellation wiring, result finalizer |
+| `engine/agent_backends/` | Provider seam: `base.py` (request/outcome/cancellation/dispatcher), `openrouter.py` (Agents SDK), `codex.py` + `codex_transport.py` (experimental personal Codex) |
+| `engine/agent_config.py` | Notebook-local `AgentRoute`, `backend!` resolution, backend-neutral status |
 | `engine/model_config.py`, `engine/models.yaml` | Notebook-local `model!` selection and configured OpenRouter model/provider endpoints |
 | `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup and notebook-local live model title; TypeScript source and committed prebuilt bundle |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
@@ -85,6 +87,10 @@ Two layers coexist:
    handled in `mathShell.exec()` before the LaTeX path, loaded from
    `commands/*.md` by `prompt_commands.load_commands()`; inline
    `{name! …}` composition is resolved by `expr_commands.ExprResolver`.
+   `do!`, `model!`, `backend!`, `login!`, and `commands!`/`help!` are
+   dispatcher built-ins: they live in `prompt_commands.RESERVED` (a
+   `commands/*.md` file may not shadow them) and in the static lexer table,
+   whose parity test must stay green.
 
 Never give a `commands/*.md` file the same name as a registered `cmd_*`
 action (e.g. `mul`) — it would silently reroute every cell containing that
@@ -271,8 +277,63 @@ if isinstance(n, IntegerValue): ...
   commit it whenever the grammar changes.
 - Rewrite commands are auto-discovered via `register_actions()`; notebook
   commands via `prompt_commands.load_commands()`.
-- The `do!` agent endpoint requires `OPEN_ROUTER` in `.env` (model via
-  `OPENROUTER_MODEL`, default `anthropic/claude-sonnet-5`).
+- The `do!` agent endpoint runs on a backend chosen by `backend!` /
+  `TOYMATH_AGENT_BACKEND` / auto-resolution: OpenRouter needs `OPEN_ROUTER`
+  in `.env` (model via `OPENROUTER_MODEL`); the experimental personal-Codex
+  backend needs the `.[codex]` extra (clone-local; ToyMath is not on PyPI)
+  and `login!`. Backends convert
+  representation only — names, descriptions, schemas, and handlers come from
+  `make_tool_bindings`, and a parity test fails if the two adapters differ.
+- Cancellation is load-bearing, not polish. `DoSession.close(reason)` under
+  the session lock is the ledger mutation boundary: a record that wins the
+  lock commits atomically, everything later is refused. An interrupted cell
+  keeps its committed steps (they still replay) and designates nothing — no
+  `final_result`, no `[[n]]` backreference, only a labelled `partial_result`.
+  Keep `interrupted`, `budget_exhausted`, `capability_violation`, and
+  `failed` distinct in results, rendering, and traces.
+- The Codex backend speaks the documented app-server JSON-RPC protocol with
+  its own reader thread rather than reusing the SDK's client: that client
+  answers `item/tool/call` inline on its sole reader thread, so a slow
+  ToyMath callback would delay `turn/interrupt` by exactly as long as the
+  callback runs. LANDMINE: never move tool dispatch onto the reader thread.
+- Codex capability containment is an accepted, bounded exception, not a
+  claim: the pinned runtime still exposes `update_plan`,
+  `request_user_input`, and `view_image`. The contract test captures the real
+  outgoing tool array; if it changes, the exception is re-reviewed rather
+  than the expectation widened. Never say those tools are disabled.
+- LANDMINE: MCP has no global off switch in the pinned runtime, and
+  `--config` overrides *merge* into the home's config rather than replacing
+  it — `mcp_servers={}` looks like a kill switch and does nothing. Measured:
+  one configured server adds `mcp__<name>`, `list_mcp_resources`,
+  `list_mcp_resource_templates`, and `read_mcp_resource` to the model's tool
+  array. `codex.mcp_overrides()` enumerates the home's servers and disables
+  each by name; an unaddressable name is a hard error. Keep the contract
+  test's populated-home case — a clean temp home cannot catch this.
+- The Codex backend runs only on a managed ChatGPT account. `logged_in` is
+  also true for the runtime's `apiKey` and `amazonBedrock` account types,
+  which bill a different credential; check `status.usable`, never
+  `status.logged_in`, at any gate that leads to spending.
+- ToyMath owns its Codex home and marks it (`.toymath-codex-home`).
+  `ensure_home` rewrites `AGENTS.md` there, so it refuses a directory it did
+  not create, and `home_path()` refuses the general Codex home outright.
+- LANDMINE: the home's `AGENTS.md` and the thread's `developerInstructions`
+  BOTH reach the model, so only the thread may enumerate tools.
+  `role_policy(names)` is the per-thread form; `role_policy()` is the durable
+  one and names nothing. The tool set is per-session — `plot`/`tikz` exist
+  only when the figure sandboxes resolved — while the home file is written
+  once by whoever starts the kernel runtime. When it enumerated, `login!`
+  (a bare `DoSession`, no figure backends) baked a seven-tool allowlist into
+  a home whose threads offered nine, and the model obeyed the stricter
+  instruction and refused to render a diagram. Never pass a tool list to
+  `ensure_home`/`open_transport`/`runtime`: they deliberately no longer take
+  one.
+- `item/tool/call` is the only server-initiated request answered normally.
+  Everything else in the runtime's `ServerRequest` schema — approvals,
+  elicitations, `account/chatgptAuthTokens/refresh`, or an unknown method —
+  fails closed in `serve_request`: the run is invalidated, and the reply is
+  that method's own decline shape, or a JSON-RPC error where the only valid
+  response would grant something (a token refresh returns an `accessToken`,
+  which ToyMath must never hold).
 - Optional Langfuse tracing of do! runs is off by default; set
   `TOYMATH_OBSERVABILITY=on` (with `LANGFUSE_PUBLIC_KEY`/
   `LANGFUSE_SECRET_KEY`/`LANGFUSE_BASE_URL`) to send one trace per run —
@@ -281,9 +342,22 @@ if isinstance(n, IntegerValue): ...
   (OpenInference instrumentor → OTEL → Langfuse). It is observability only:
   it never touches the ledger or oracle, and any Langfuse failure is
   downgraded to a warning so a derivation always runs. LANDMINE: the
-  instrumentor rides the Agents-SDK tracing pipeline, so `build_model` only
-  calls `set_tracing_disabled(True)` when tracing is inactive — enabling it
-  with tracing disabled would silently emit nothing.
+  instrumentor rides the Agents-SDK tracing pipeline, so
+  `agent_backends/openrouter.py`'s `build_model` keys
+  `set_tracing_disabled` on `observability.instrumented()`, NOT on
+  `active()`. Both directions are traps: disabling it while the
+  instrumentor is attached silently emits nothing to Langfuse, and leaving
+  it enabled when the instrumentor is absent (a Codex-only install with a
+  live Langfuse client) ships traces to OpenAI's backend instead. Tracing
+  now survives a missing instrumentor — the run span still exports — so the
+  two states must stay distinct.
+- Backends other than the Agents SDK trace through
+  `observability.capture_context()` + `child_span()`. OTel context is
+  thread-local and Codex tool callbacks run on transport worker threads, so
+  a child span without the captured context starts an orphan trace rather
+  than nesting. The Codex thread also pins `otel.exporter="none"`: the
+  runtime has its own telemetry pipeline, and a ToyMath derivation must not
+  ship anything anywhere by default.
 - To research a misbehaving do! run from its Langfuse trace, invoke the
   `langfuse-research` skill (`.claude/skills/langfuse-research/SKILL.md`):
   re-run with `TOYMATH_OBSERVABILITY=on`, then pull the trace with the

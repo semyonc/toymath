@@ -34,9 +34,17 @@ export interface IItemNode {
   querySelector(selector: string): IButtonNode | null;
 }
 
+/** The backend whose model ids need no label: the historical default. */
+const DEFAULT_BACKEND = 'openrouter';
+
 /**
  * Write `model` into the kernel-name button of `item`, or restore
  * `kernelDisplayName` when there is no ToyMath model to show.
+ *
+ * `backend` names the agent backend the notebook runs on. It is shown in the
+ * label only when it is not the default one - an OpenRouter model id already
+ * implies its backend, while `codex` is an opt-in experiment worth seeing at
+ * a glance. The tooltip always names both.
  *
  * Returns whether the button was rewritten: `false` means either React has not
  * (re)rendered the button yet or it already reads what it should.
@@ -44,22 +52,25 @@ export interface IItemNode {
 export function applyModelTitle(
   item: IItemNode | null,
   model: string | null,
-  kernelDisplayName: string
+  kernelDisplayName: string,
+  backend: string | null = null
 ): boolean {
   const button = item?.querySelector(KERNEL_NAME_BUTTON);
   const label = button?.querySelector(BUTTON_LABEL);
   if (!button || !label) {
     return false;
   }
-  const text = model ? `Toy Math · ${model}` : kernelDisplayName;
+  const badge = backend && backend !== DEFAULT_BACKEND ? `${backend} · ` : '';
+  const text = model ? `Toy Math · ${badge}${model}` : kernelDisplayName;
   const marked = button.dataset.toymathModel === 'true';
   if (label.textContent === text && marked === !!model) {
     return false;
   }
   label.textContent = text;
   if (model) {
+    const routing = backend ? `${backend} · ${model}` : model;
     button.dataset.toymathModel = 'true';
-    button.title = `ToyMath agent model: ${model}. Click to switch kernel.`;
+    button.title = `ToyMath agent: ${routing}. Click to switch kernel.`;
     button.setAttribute('aria-label', `Toy Math agent model ${model}`);
   } else {
     delete button.dataset.toymathModel;

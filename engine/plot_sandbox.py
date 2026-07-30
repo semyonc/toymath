@@ -29,6 +29,7 @@ backend-agnostic so a Docker / llm-sandbox backend can be added later.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -174,6 +175,45 @@ class PyodideBackend(object):
         return result
 
 
+#: picture environments a submission may open; `\begin{document}` goes
+#: before whichever appears first
+_TIKZ_PICTURE = re.compile(r'^[ \t]*\\begin\{(tikzpicture|tikzcd)\}',
+                           re.MULTILINE)
+#: `\documentclass{x}` with optional [options], possibly spanning lines
+_DOCUMENTCLASS = re.compile(
+    r'[ \t]*\\document(?:class|style)\s*(?:\[[^\]]*\])?\s*\{[^}]*\}[ \t]*\n?')
+
+
+def normalize_tikz_source(code):
+    """Shape agent TeX into what node-tikzjax actually accepts.
+
+    The engine supplies its own `\\documentclass` but *not* a `document`
+    environment, which is an unusual middle ground: a bare `tikzpicture`
+    dies with `Missing \\begin{document}`, and a complete document dies
+    with `Two \\documentclass commands`. A model writing either
+    perfectly-reasonable form gets a TeX error that says nothing about the
+    real rule, and spends its turns guessing at scaffolding instead of at
+    the drawing - which is exactly what one traced run did, four times.
+
+    So both forms are accepted here. This only ever moves scaffolding: a
+    figure is an unverified illustration that never enters the ledger, so
+    being forgiving about its wrapper costs no trust.
+    """
+    if not code:
+        return code
+    text = _DOCUMENTCLASS.sub('', code, count=1)
+    if '\\begin{document}' in text:
+        return text
+    picture = _TIKZ_PICTURE.search(text)
+    if picture is None:
+        # nothing recognisable to wrap; let the TeX log speak for itself
+        return text
+    head, body = text[:picture.start()], text[picture.start():]
+    if '\\end{document}' not in body:
+        body = body.rstrip() + '\n\\end{document}'
+    return f'{head}\\begin{{document}}\n{body}'
+
+
 class TikzBackend(object):
     name = 'node-tikzjax'
 
@@ -250,7 +290,9 @@ class TikzBackend(object):
         cmd = [self.deno, 'run'] + flags + [TIKZ_RUNNER_PATH]
         try:
             proc = subprocess.run(
-                cmd, input=json.dumps({'code': code}).encode('utf-8'),
+                cmd,
+                input=json.dumps(
+                    {'code': normalize_tikz_source(code)}).encode('utf-8'),
                 capture_output=True, timeout=timeout, env=_child_env())
         except subprocess.TimeoutExpired:
             return {'ok': False,

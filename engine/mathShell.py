@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import html as _html
+import inspect
 import re
 
 from notation import Notation, Symbol
@@ -10,6 +11,7 @@ from LatexWriter import LaTexWriter
 from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
+import agent_config
 import model_config
 import prompt_commands
 
@@ -36,6 +38,49 @@ def _display_math_spans(text):
     parts = text.split('$')
     return ''.join(f'${_display_latex(part)}$' if i % 2 else part
                    for i, part in enumerate(parts))
+
+
+def _open_browser(url):
+    """Hand a one-time sign-in URL to the OS browser. Never raises."""
+    if not url:
+        return False
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
+def _display_replacing(obj):
+    """Display `obj` after clearing the cell's earlier output.
+
+    Used to retract a spent login challenge before the notebook is saved.
+    The kernel's display handler clears on this keyword; other handlers
+    (console, embedders) simply display, which is why the challenge text
+    also says it is one-time.
+    """
+    try:
+        display(obj, clear_output=True)
+    except TypeError:
+        display(obj)
+
+
+def _notify_route(handler, route):
+    """Send routing changes to the frontend.
+
+    The callback now takes an `AgentRoute`; a two-argument
+    `(model, providers)` handler from before the backend seam keeps
+    working, so embedders do not break on the transition.
+    """
+    try:
+        positional = [p for p in inspect.signature(handler).parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    except (TypeError, ValueError):      # a builtin or C callable
+        positional = []
+    if len(positional) >= 2:
+        handler(route.model, route.providers)
+    else:
+        handler(route)
 
 
 def split_lines(self, code):
@@ -80,10 +125,13 @@ class MathShell(object):
         self.show_quotes = False
         # notebook-wide derivation ledger fed by do! cells
         self.ledger = Ledger()
-        # Agent routing is notebook-local: model! changes this shell without
-        # mutating process-wide environment variables or other kernels.
-        self.model_name = model_config.current_model()
-        self.model_providers = ()
+        # Agent routing is notebook-local: backend!/model! change this shell
+        # without mutating process-wide environment variables or other
+        # kernels.
+        # No model until one is chosen: each backend supplies its own
+        # default, so an OpenRouter model id can never be handed to Codex
+        # (or the reverse) just because auto-resolution moved.
+        self.route = agent_config.AgentRoute(backend=agent_config.AUTO)
         self.model_change_handler = None
         # commands! reloads the discoverable prompt-command registry.
 
@@ -139,6 +187,12 @@ class MathShell(object):
         if name == 'model':
             self.exec_model(rest)
             return True
+        if name == 'login':
+            self.exec_login(rest)
+            return True
+        if name == 'backend':
+            self.exec_backend(rest)
+            return True
         if name == 'do':
             # the free-form agent endpoint: rest is the instruction verbatim
             self.exec_do(rest, execution_count, add_to_history)
@@ -183,31 +237,103 @@ class MathShell(object):
         display(HTML('<div><b>notebook commands</b>' + table
                      + '<div style="color:#888;margin-top:4px">plus '
                      '<code>do!</code> (free-form instruction), '
-                     '<code>model!</code> (agent model), and '
+                     '<code>model!</code> (agent model), '
+                     '<code>backend!</code> (agent backend), '
+                     '<code>login!</code> (Codex account), and '
                      '<code>commands!</code> (this list)</div></div>'))
 
+    # Compatibility for embedders and the kernel comm, which read the model
+    # routing directly. The route is the single source of truth.
+    @property
+    def model_name(self):
+        return self.route.model
+
+    @property
+    def model_providers(self):
+        return self.route.providers
+
+    @property
+    def backend_name(self):
+        """The backend this notebook would run on right now (never starts a
+        Codex runtime to find out)."""
+        return agent_config.preview(self.route).backend
+
     def _model_status_html(self):
-        providers = self.model_providers
-        if providers:
-            routing = ('providers <code>'
-                       + _html.escape(', '.join(providers))
-                       + '</code>; fallbacks disabled')
+        routing = agent_config.describe(self.route)
+        model = routing['model'] or f'{routing["backend"]} default'
+        if routing['backend'] == agent_config.CODEX:
+            detail = 'your own Codex account'
+        elif routing['providers']:
+            detail = ('providers <code>'
+                      + _html.escape(', '.join(routing['providers']))
+                      + '</code>; fallbacks disabled')
         else:
-            routing = 'OpenRouter default provider routing'
-        return ('<div><strong>agent model:</strong> <code>'
-                + _html.escape(self.model_name) + '</code> &mdash; '
-                + routing + '</div>')
+            detail = 'OpenRouter default provider routing'
+        flag = (' <span style="color:#b65c00">(experimental)</span>'
+                if routing['experimental'] else '')
+        return ('<div><strong>agent backend:</strong> <code>'
+                + _html.escape(routing['backend']) + '</code>' + flag
+                + ' &mdash; ' + _html.escape(routing['reason'])
+                + '</div><div><strong>agent model:</strong> <code>'
+                + _html.escape(model) + '</code> &mdash; ' + detail
+                + '</div>')
+
+    def _route_changed(self):
+        """Notify the frontend and render the effective routing."""
+        if self.model_change_handler is not None:
+            _notify_route(self.model_change_handler, self.route)
+        display(HTML(self._model_status_html()))
 
     def _set_model(self, model, providers=()):
         """Set notebook-local agent routing and render its effective value."""
-        self.model_name = model
-        self.model_providers = tuple(providers)
-        if self.model_change_handler is not None:
-            self.model_change_handler(model, self.model_providers)
-        display(HTML(self._model_status_html()))
+        self.route = self.route.with_model(model, providers)
+        self._route_changed()
+
+    def _note_account(self, status):
+        """Record an observed Codex account and republish the routing.
+
+        On `backend! auto` the effective backend is a function of the login
+        state, so signing in or out can change where the next `do!` runs
+        without the route object changing at all. The toolbar would
+        otherwise keep advertising the pre-login answer.
+        """
+        before = self.backend_name
+        agent_config.note_codex_account(status)
+        if (self.backend_name != before
+                and self.model_change_handler is not None):
+            _notify_route(self.model_change_handler, self.route)
+        return status
+
+    def exec_backend(self, arguments):
+        """Handle ``backend! [auto|openrouter|codex]`` for this notebook."""
+        name = (arguments or '').strip().lower()
+        if not name:
+            display(HTML(self._model_status_html()
+                         + '<div style="color:#666">Use <code>backend! '
+                         'auto</code>, <code>backend! openrouter</code>, or '
+                         '<code>backend! codex</code> (experimental, needs '
+                         '<code>login!</code>).</div>'))
+            return
+        try:
+            agent_config.check(name)
+        except ValueError as e:
+            display(HTML('<div style="color:#c00">backend! error: '
+                         + _html.escape(str(e)) + '</div>'))
+            return
+        # Switching is explicit and never automatic: a run must not move a
+        # user's spending or quota to the other provider by surprise.
+        self.route = self.route.with_backend(name)
+        self._route_changed()
 
     def exec_model(self, arguments):
-        """Handle ``model! [MODEL[, PROVIDER...]]`` for this notebook."""
+        """Handle ``model! [MODEL[, PROVIDER...]]`` for this notebook.
+
+        The catalog is backend-aware: OpenRouter reads `models.yaml` and its
+        provider order, while Codex reports its own models and takes no
+        provider argument."""
+        if self.backend_name == agent_config.CODEX:
+            self._exec_codex_model(arguments)
+            return
         try:
             endpoints = model_config.load_model_config()
         except model_config.ModelConfigError as e:
@@ -238,6 +364,150 @@ class MathShell(object):
                      '<code>model! </code> and press <kbd>Tab</kbd> or '
                      '<kbd>Ctrl</kbd>+<kbd>Space</kbd> to choose from '
                      '<code>engine/models.yaml</code>.</div>'))
+
+    def _exec_codex_model(self, arguments):
+        """``model!`` while Codex is selected: its own catalog, no providers."""
+        import agent_do
+        if ',' in (arguments or ''):
+            display(HTML('<div style="color:#c00">model! error: the Codex '
+                         'backend has no provider routing; use '
+                         '<code>model! MODEL</code></div>'))
+            return
+        try:
+            models = agent_config.codex_models()
+        except agent_do.DoAgentError as e:
+            display(HTML('<div style="color:#c00">model! error: '
+                         + _html.escape(str(e)) + '</div>'))
+            return
+        name = (arguments or '').strip()
+        if name:
+            known = [m.id for m in models]
+            if known and name not in known:
+                display(HTML('<div style="color:#c00">model! error: '
+                             + _html.escape(name) + ' is not offered by '
+                             'this Codex account &mdash; choose from <code>'
+                             + _html.escape(', '.join(known))
+                             + '</code></div>'))
+                return
+            self._set_model(name, ())
+            return
+        listing = ', '.join(f'<code>{_html.escape(m.id)}</code>'
+                            for m in models)
+        display(HTML(self._model_status_html()
+                     + '<div style="color:#666">Codex models: ' + listing
+                     + '</div>'))
+
+    # ------------------------------------------------------------------
+    # login! — managed Codex authentication
+    # ------------------------------------------------------------------
+
+    _LOGIN_USAGE = ('<div style="color:#666">use <code>login!</code>, '
+                    '<code>login! device</code>, <code>login! status</code>, '
+                    'or <code>login! logout</code></div>')
+
+    def exec_login(self, arguments):
+        """Handle ``login! [device|status|logout]``.
+
+        Authentication and backend choice are separate operations: signing
+        in never changes which backend this notebook runs on.
+        """
+        from agent_backends import codex
+        import agent_do
+        action = (arguments or '').strip().lower()
+        # the same list the completer offers: an option cannot appear in the
+        # popup without being accepted here, or the reverse
+        if action and action not in agent_config.LOGIN_ACTIONS:
+            display(HTML('<div style="color:#c00">login! error: unknown '
+                         f'option {_html.escape(action)}</div>'
+                         + self._LOGIN_USAGE))
+            return
+        try:
+            if action == 'status':
+                self._render_account(self._note_account(
+                    codex.account_status()))
+            elif action == 'logout':
+                self._render_account(self._note_account(codex.logout()),
+                                     signed_out=True)
+            else:
+                mode = 'chatgptDeviceCode' if action == 'device' else 'chatgpt'
+                status = codex.login(mode,
+                                     on_challenge=self._render_challenge)
+                # replace: the spent challenge leaves the cell output here
+                self._render_account(self._note_account(status), replace=True)
+        except agent_do.DoAgentError as e:
+            _display_replacing(HTML('<div style="color:#c00">login! error: '
+                                    + _html.escape(str(e)) + '</div>'))
+        except KeyboardInterrupt:
+            # the pending challenge was cancelled through the app-server,
+            # and is cleared from the notebook as well
+            _display_replacing(HTML(
+                '<div style="color:#b65c00">login cancelled — the '
+                'pending sign-in was discarded.</div>'))
+
+    @staticmethod
+    def _render_challenge(challenge):
+        """Show a one-time sign-in prompt, keeping it out of the saved file.
+
+        Never a token - the app-server owns the OAuth exchange - but a
+        challenge is still a short-lived secret, and Jupyter persists cell
+        output into the `.ipynb`. So the browser flow hands the URL to the
+        OS browser instead of printing it, and the device code is wiped
+        from the cell by `_render_account` once the flow ends.
+        """
+        if challenge.kind == 'chatgptDeviceCode':
+            # this code has to be readable: the user types it. It is cleared
+            # from the output as soon as the sign-in completes.
+            display(HTML(
+                '<div>Open <a href="'
+                + _html.escape(challenge.verification_uri or '', quote=True)
+                + '" target="_blank">'
+                + _html.escape(challenge.verification_uri or '')
+                + '</a> and enter the code <code>'
+                + _html.escape(challenge.user_code or '')
+                + '</code>. Waiting for the sign-in to complete…</div>'))
+            return
+        url = challenge.auth_url or ''
+        if _open_browser(url):
+            display(HTML(
+                '<div>A Codex sign-in page was opened in your browser. '
+                'Waiting for the sign-in to complete…<br>'
+                '<span style="color:#888">The one-time link is not stored '
+                'in this notebook.</span></div>'))
+            return
+        # headless or no browser available: the link is the only way in, so
+        # show it and say plainly that it lands in the saved output
+        display(HTML(
+            '<div>Sign in to Codex: <a href="'
+            + _html.escape(url, quote=True)
+            + '" target="_blank">open the authorization page</a>. '
+            'Waiting for the sign-in to complete…<br>'
+            '<span style="color:#888">No browser could be opened, so this '
+            'one-time link is shown here; it is cleared when the sign-in '
+            'ends.</span></div>'))
+
+    @staticmethod
+    def _render_account(status, signed_out=False, replace=False):
+        """Render the account status. `replace` wipes the cell first, so a
+        spent sign-in challenge never reaches the saved notebook."""
+        if not status.logged_in:
+            body = ('<div>Codex: <strong>signed out</strong>'
+                    + ('.' if signed_out else ' — run <code>login!</code> to '
+                       'use your own Codex account.') + '</div>')
+        elif not status.usable:
+            # logged in, but on a credential this backend refuses to spend
+            body = ('<div>Codex: signed in with '
+                    f'<strong>{_html.escape(status.auth_mode or "unknown")}'
+                    '</strong> authentication, which ToyMath does not use — '
+                    'run <code>login! out</code> then <code>login!</code> for '
+                    'a managed ChatGPT account.</div>')
+        else:
+            plan = (f' ({_html.escape(status.plan_type)} plan)'
+                    if status.plan_type else '')
+            body = ('<div>Codex: <strong>signed in</strong> with '
+                    f'{_html.escape(status.auth_mode)} '
+                    f'authentication{plan}. Usage follows that account\'s '
+                    'own plan and limits.</div>')
+        _display_replacing(HTML(body)) if replace else display(HTML(body))
 
     def exec_stmt(self, code, execution_count, add_to_history, do_output):
         self.current_echo = False
@@ -519,6 +789,39 @@ class MathShell(object):
         display(HTML(f'<div style="color:#c00">do! error: '
                      f'{_html.escape(message)}</div>'))
 
+    _CANCEL_LABELS = {'budget_exhausted': 'budget exhausted',
+                      'capability_violation': 'capability violation'}
+
+    @classmethod
+    def _do_cancelled(cls, res):
+        """Amber notice for a stopped run: what was checked is kept."""
+        label = cls._CANCEL_LABELS.get(res.get('status'), 'cancelled')
+        steps = len([s for s in (res.get('steps') or [])
+                     if s.get('result') is not None])
+        kept = (f'{steps} mechanically checked step'
+                f'{"s" if steps != 1 else ""} preserved' if steps
+                else 'nothing was recorded before it stopped')
+        display(HTML(
+            f'<div style="color:#b65c00"><strong>{_html.escape(label)}'
+            f'</strong> &mdash; {kept}. This cell designates no result and '
+            'is not available to <code>[[n]]</code>.</div>'))
+
+    @classmethod
+    def _do_partial_result(cls, res):
+        """A verified value the run reached before it was stopped. Shown as
+        preserved work, never as the cell's answer."""
+        partial = res.get('partial_result')
+        if not partial:
+            return
+        provenance = res.get('partial_provenance') or {}
+        source = provenance.get('step') or provenance.get('claim') or '?'
+        display(HTML(
+            '<div style="color:#b65c00">partial result from '
+            f'<code>{_html.escape(str(source))}</code> '
+            f'({_html.escape(str(provenance.get("method", "?")))}) '
+            '&mdash; verified before the stop, not designated as the '
+            f'answer:</div><div>${_display_latex(partial)}$</div>'))
+
     def exec_do(self, instruction, execution_count, add_to_history,
                 proof_goal=None):
         import agent_do
@@ -555,12 +858,16 @@ class MathShell(object):
                                            on_step=on_step,
                                            on_plot=on_plot,
                                            proof_goal=proof_goal,
-                                           model_name=self.model_name,
-                                           providers=self.model_providers)
+                                           route=self.route)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return
-        if not res['ok']:
+        if res.get('cancelled'):
+            # not a failure: the work that was mechanically checked before
+            # the interrupt is kept and still replays. Amber, not red — and
+            # the cell deliberately produces no chainable output below.
+            self._do_cancelled(res)
+        elif not res['ok']:
             self._do_error(res.get('error', 'agent failed'))
         elif res.get('turn_limit_reached'):
             # finished on its last turn: the result is designated and
@@ -611,6 +918,9 @@ class MathShell(object):
                 asm = '; '.join(self._assumption_html(a) for a in shown)
                 display(HTML(f'<div style="color:#888">{label}: '
                              f'{asm}</div>'))
+        if res.get('cancelled'):
+            self._do_partial_result(res)
+            return          # no output history, no [[n]] backreference
         open_prov = res.get('final_provenance') or {}
         if not res.get('final_result') and open_prov.get('source') == 'open':
             # run-level open outcome: no certified result exists, and no
@@ -667,8 +977,7 @@ class MathShell(object):
                 pass  # rendering must never fail a derivation step
 
         def run_selected(instruction, **kwargs):
-            kwargs['model_name'] = self.model_name
-            kwargs['providers'] = self.model_providers
+            kwargs['route'] = self.route
             return agent_do.run_instruction(instruction, **kwargs)
 
         resolver = expr_commands.ExprResolver(

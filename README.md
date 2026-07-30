@@ -60,35 +60,14 @@ algebra is exact where supported; the independent oracle is reproducible but
 probabilistic outside that fragment. Assumptions such as `a + b \ne 0` remain
 attached to the derivation.
 
-## Math commands compose
-
-Reusable notebook commands are Markdown prompt templates in `commands/`:
-
-```text
-int! x^3
-diff! \sin x
-solve! 2x + 3 = 7
-```
-
-Commands marked as expression-capable can be nested directly in LaTeX:
-
-```text
-{diff! {int! x^3}}          -> x^3
-{int! x^2} + {int! x^2}     -> 2/3 x^3 + 2C
-2 {diff! x^2} - 1           -> 4x - 1
-```
-
-Subcommands resolve from the inside out. Their arithmetic glue is combined by
-the deterministic `expand` primitive and checked by the oracle—without another
-LLM call.
-
 ## Surfaces
 
 - **Jupyter:** `do!` accepts a free-form instruction; `[[n]]` chains results
-  across cells; steps stream into a notebook-wide ledger. `model!` selects the
-  notebook-local OpenRouter model from `engine/models.yaml` (or accepts
-  `model! MODEL, PROVIDER...`); native completion opens after `model! ` and
-  the toolbar title tracks the active selection.
+  across cells; steps stream into a notebook-wide ledger. `backend!` and
+  `model!` set notebook-local routing — the model catalog follows the active
+  backend (`engine/models.yaml` and `model! MODEL, PROVIDER...` for
+  OpenRouter, the account's own list for Codex); native completion opens
+  after `model! ` and the toolbar title tracks the active selection.
 - **Named commands:** `name!` loads reusable instructions from `commands/*.md`.
 - **Inline composition:** `{name! expression}` embeds checked sub-derivations
   inside a larger expression.
@@ -102,6 +81,77 @@ ledger and replay ignores them. Agent-generated figure code runs outside the
 kernel in deny-by-default Deno sandboxes — Python (matplotlib/seaborn/plotly)
 under Pyodide, and TeX/TikZ through a WebAssembly TeX engine that renders to
 SVG with no network access at all.
+
+## Agent backends
+
+`do!` runs on one of two providers, selected per notebook with `backend!`:
+
+```text
+backend!             # show the effective backend and why it was selected
+backend! openrouter  # a shared OpenRouter key
+backend! codex       # your own ChatGPT subscription (experimental)
+backend! auto        # default: resolve from what is configured
+```
+
+Both drive the *same* tool surface. Names, descriptions, schemas, and
+handlers come from one canonical definition, so the model sees an identical
+set of tactics whichever provider is running, and a parity test fails if the
+two adapters ever diverge. The trust boundary does not move either: the
+tactic registry, the independent oracle, and the ledger remain the only
+authority for a checked result.
+
+A run **never fails over**. A Codex rate limit will not silently create
+OpenRouter charges, and an OpenRouter outage will not silently consume a
+Codex allowance. Switching providers is always an explicit act.
+
+### No OpenRouter account? Use the one you already pay for
+
+The OpenRouter backend needs an API key with credits — usage is billed per
+token on top of whatever you already subscribe to. The **Codex backend
+removes that second bill**: it runs `do!` through the Codex app-server against
+your personal ChatGPT account, so the work draws on the Plus/Pro subscription
+you already have, under that plan's own quota and rate limits. There is no
+ToyMath-side key, no shared credential, and no per-token charge.
+
+```bash
+uv pip install ".[codex]"      # pins the Codex runtime ToyMath was validated against
+```
+
+```text
+login!               # managed ChatGPT sign-in, opens your browser
+login! device        # device-code flow, for headless machines
+login! status        # auth mode and plan type
+login! logout
+```
+
+Then `backend! codex`, or leave `backend! auto` — with no OpenRouter key
+configured, a signed-in account is selected automatically.
+
+`model!` lists what your account offers rather than the OpenRouter catalog —
+`gpt-5.6-sol`, `-terra`, `-luna`, and older releases with the currently
+pinned runtime. ToyMath hardcodes no Codex model: with no explicit choice the
+runtime's own default is used, so the two catalogs never mix.
+
+What ToyMath does and does not touch:
+
+- **Authentication is managed by the app-server.** ToyMath receives a sign-in
+  URL, a completion notification, and an account status. It never handles,
+  stores, logs, or displays a ChatGPT token, and it keeps no account
+  identifier or email. The general `~/.codex` home and its `auth.json` are
+  never read or copied.
+- **Only a managed ChatGPT account runs a derivation.** The runtime also
+  reports API-key and Amazon Bedrock accounts as signed in; those bill a
+  different — possibly organizational — credential, so they are refused with
+  an explanation rather than spent on a math run.
+- **A sign-in challenge never reaches the saved notebook.** Jupyter persists
+  cell output into the `.ipynb`, so the browser flow hands its one-time URL
+  to the OS browser and prints no link; the device code, which has to be
+  readable while you type it, is cleared from the cell as soon as the flow
+  ends.
+- **Each run is contained.** A fresh ephemeral thread, an empty working
+  directory outside the repository, a read-only sandbox, no approvals, and
+  every capability switch off, in a dedicated Codex home separate from your
+  CLI one.
 
 ## Quick start
 
@@ -118,14 +168,24 @@ uv pip install -r requirements.txt
 uv pip install --no-deps .             # installs the prebuilt Lab extension
 jupyter kernelspec install kernel_spec --user --name toymath --replace
 
-# Required only for do! and prompt commands
-echo 'OPEN_ROUTER=sk-or-...' >> .env
-
 jupyter lab
 ```
 
 Pick the **Toy Math** kernel. Console mode is also available with
 `python console.py`.
+
+Plain math cells work with no credentials at all. `do!` and prompt commands
+need an agent backend — pick one:
+
+```bash
+# A: OpenRouter — an API key with credits, billed per token
+echo 'OPEN_ROUTER=sk-or-...' >> .env
+
+# B: your own ChatGPT subscription — no OpenRouter account needed
+uv pip install ".[codex]"     # then run `login!` in a notebook cell
+```
+
+See [Agent backends](#agent-backends) for what each one costs and contains.
 
 ## Read more
 
@@ -140,5 +200,51 @@ Pick the **Toy Math** kernel. Console mode is also available with
 
 Run the offline test suite with `pytest`. Live OpenRouter and sandbox probes
 are opt-in; the commands are documented in the project overview.
+
+## Environment variables
+
+All are optional — ToyMath runs plain math cells with none of them set. Those
+marked *(secret)* belong in `.env`, which is git-ignored; nothing here is ever
+written into a notebook, a ledger, or a trace.
+
+### Agent backends
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPEN_ROUTER` | — | OpenRouter API key *(secret)*. Enables the OpenRouter backend, and selects it under `backend! auto`. |
+| `OPENROUTER_MODEL` | `google/gemini-3.6-flash` | Default OpenRouter model. `model!` overrides it per notebook. |
+| `TOYMATH_AGENT_BACKEND` | unset | Forces `openrouter` or `codex`. Outranked only by an explicit `backend!` in the notebook. |
+| `TOYMATH_CODEX_MODEL` | the account's own default | Default model for the Codex backend. ToyMath hardcodes none — the runtime chooses (`gpt-5.6-sol` with the currently pinned one). `model!` overrides it per notebook. |
+| `TOYMATH_CODEX_HOME` | `~/.toymath/codex-home` | ToyMath's dedicated Codex home. Must not be the general one; a directory ToyMath did not create is refused rather than overwritten. |
+| `CODEX_HOME` | `~/.codex` | Read only to know which home to stay out of. ToyMath never reads its contents or its `auth.json`. |
+
+Backend resolution under `backend! auto`, in order: an explicit `backend!` in
+this notebook → `TOYMATH_AGENT_BACKEND` → OpenRouter if `OPEN_ROUTER` is set →
+Codex if a managed ChatGPT account is signed in. If nothing is configured, the
+cell says so instead of guessing.
+
+### Figure sandboxes
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TOYMATH_SANDBOX` | `auto` | `auto` \| `pyodide` \| `off`. `off` unregisters the `plot` and `tikz` tools entirely. |
+| `TOYMATH_WHEEL_CACHE` | `~/.cache/toymath/wheels` | Wheel cache for the Pyodide sandbox; without it seaborn and plotly re-download on every call. |
+
+### Observability (off by default)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TOYMATH_OBSERVABILITY` | `off` | Set `on` to send one Langfuse trace per `do!` run. Never touches the ledger or oracle; any failure downgrades to a warning. |
+| `LANGFUSE_PUBLIC_KEY` | — | Langfuse credential *(secret)*, required when tracing is on. |
+| `LANGFUSE_SECRET_KEY` | — | Langfuse credential *(secret)*, required when tracing is on. |
+| `LANGFUSE_BASE_URL` | `cloud.langfuse.com` | Langfuse host. `LANGFUSE_HOST` is accepted as a fallback. |
+
+### Opt-in tests
+
+| Variable | Purpose |
+|---|---|
+| `TOYMATH_LIVE_TESTS=1` | Adds a live OpenRouter derivation test (spends credits). |
+| `TOYMATH_CODEX_LIVE_TESTS=1` | Adds a live Codex derivation test (needs `login!` first). |
+| `TOYMATH_PLOT_TESTS=1` | Adds the Deno figure-sandbox probes. |
 
 MIT License · Semyon C

@@ -39,6 +39,22 @@ except (ImportError, AttributeError):
 from dotenv import load_dotenv
 load_dotenv()
 
+def _model_endpoints(shell):
+    """The catalog `model!` completes from, or None for models.yaml.
+
+    Codex reports its own models, so the static OpenRouter catalog is not
+    the answer while that backend is selected.
+    """
+    from engine import agent_config, model_config
+    if shell is None or shell.backend_name != agent_config.CODEX:
+        return None
+    try:
+        return tuple(model_config.ModelEndpoint(model.id, ())
+                     for model in agent_config.codex_models())
+    except Exception:
+        return ()          # Codex selected but unreachable: no completions
+
+
 class MathKernel(Kernel):
     implementation = "toymath"
     implementation_version = "1.0"
@@ -87,8 +103,13 @@ class MathKernel(Kernel):
         setShell(self.mathShell)
 
     def _model_payload(self):
-        return {'model': self.mathShell.model_name,
-                'providers': list(self.mathShell.model_providers)}
+        from engine import agent_config
+        route = self.mathShell.route
+        routing = agent_config.describe(route)
+        return {'model': routing['model'] or f"{routing['backend']} default",
+                'backend': routing['backend'],
+                'experimental': routing['experimental'],
+                'providers': list(routing['providers'])}
 
     def _open_model_comm(self, comm, _open_msg):
         """Connect the JupyterLab model-title extension to this kernel."""
@@ -96,7 +117,7 @@ class MathKernel(Kernel):
         comm.on_close(lambda _msg: self._model_comms.discard(comm))
         comm.send(self._model_payload())
 
-    def _broadcast_model(self, _model, _providers):
+    def _broadcast_model(self, _route):
         payload = self._model_payload()
         for comm in tuple(self._model_comms):
             try:
@@ -105,10 +126,19 @@ class MathKernel(Kernel):
                 self._model_comms.discard(comm)
 
     async def do_complete(self, code, cursor_pos):
-        """Complete configured model ids and providers for ``model!``."""
-        from engine import model_config
+        """Complete `backend!` names, `login!` options, and `model!` ids for
+        the selected backend: models.yaml under OpenRouter, the account's
+        own catalog under Codex."""
+        from engine import agent_config, model_config
+        for complete in (agent_config.complete_backend_command,
+                         agent_config.complete_login_command):
+            reply = complete(code, cursor_pos)
+            if reply is not None:
+                return reply
         try:
-            reply = model_config.complete_model_command(code, cursor_pos)
+            reply = model_config.complete_model_command(
+                code, cursor_pos,
+                endpoints=_model_endpoints(getattr(self, 'mathShell', None)))
         except model_config.ModelConfigError:
             reply = None
         if reply is not None:
