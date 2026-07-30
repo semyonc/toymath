@@ -106,7 +106,9 @@ once: a claim whose chain mixes them is refused, and the ledger lists such
 hypotheses as alternatives rather than as one condition. When the cases end in
 different answers, finish with `cases_assemble`: propose their union as a
 `\lor` disjunction and pass the endpoint step of each case, in the order the
-union writes them. Each disjunct must restate what its case recorded — the
+union writes them. State each hypothesis in the spelling the answer should
+read — `x \gt 3`, not `x - 3 \gt 0` (both pin the factor's sign) — because a
+disjunct may only restate the endpoint or the hypothesis exactly as recorded. Each disjunct must restate what its case recorded — the
 endpoint when it stayed inside its hypothesis, or the hypothesis itself when
 the endpoint outgrew it (deriving `x \lt \frac{1}{2}` under `x \lt 0` solves
 that case as `x \lt 0`; assembling the raw endpoint there is a coverage error
