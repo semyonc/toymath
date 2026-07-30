@@ -191,6 +191,270 @@ def _limit_squeeze_from_steps(context, args):
     return result
 
 
+def _limit_from_sides_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('limit_from_sides',
+                      'limit_from_sides requires a session')
+    by_id = {step['id']: step for step in steps}
+    resolved = {}
+    for tag in ('left', 'right'):
+        source_id = args[f'{tag}_step']
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('limit_from_sides',
+                          f'unknown transforming step {source_id!r}')
+        try:
+            expected = limits.limit_with_direction(args['expr'], tag)
+        except primitives.PrimitiveError as exc:
+            return _error('limit_from_sides', str(exc))
+        if not primitives.same_expression(source.get('input') or '',
+                                          expected):
+            return _error(
+                'limit_from_sides',
+                f'{source_id!r} does not record the {tag} one-sided '
+                f'limit {expected!r}')
+        resolved[tag] = source['result']
+    if not primitives.same_expression(resolved['left'], resolved['right']):
+        equal = core.equal_exprs(resolved['left'], resolved['right'])
+        if not (equal.get('ok') and equal.get('verdict') == 'yes'):
+            return _error(
+                'limit_from_sides',
+                'the recorded one-sided limits are not the same value: '
+                f'{resolved["left"]!r} vs {resolved["right"]!r}')
+    result = limits.limit_from_sides(args['expr'], resolved['left'])
+    if result.get('ok'):
+        result['sources'] = {'left': args['left_step'],
+                             'right': args['right_step']}
+    return result
+
+
+def _points_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('points_assemble',
+                      'points_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    roots_id = args['roots_step']
+    roots = by_id.get(roots_id)
+    if roots is None or roots.get('result') is None:
+        return _error('points_assemble',
+                      f'unknown transforming step {roots_id!r}')
+    source_ids = args['value_steps']
+    values = []
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('points_assemble',
+                          f'unknown transforming step {source_id!r}')
+        values.append(source['result'])
+    result = equations.points_assemble(
+        args['expr'], args['var'], roots['result'], values)
+    if result.get('ok'):
+        result['sources'] = {
+            'roots': roots_id,
+            'values': list(source_ids),
+        }
+    return result
+
+
+def _system_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('system_assemble',
+                      'system_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    source_ids = args['value_steps']
+    values = []
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('system_assemble',
+                          f'unknown transforming step {source_id!r}')
+        values.append(source['result'])
+    result = equations.system_assemble(args['target'], values)
+    if result.get('ok'):
+        result['sources'] = {'assignments': list(source_ids)}
+    return result
+
+
+def _case_chain_hypotheses(steps, endpoint_id, target):
+    """(hypotheses, error) walking the recorded chain backward from a case
+    endpoint step to the stated target, collecting `assuming` constraints.
+
+    The hypothesis of a case is usually recorded on an earlier step of its
+    chain (the `apply --assuming` move), not on the endpoint the agent
+    names — so the case is the whole chain segment rooted at the target,
+    and the walk reuses the ledger's own chaining comparator so linkage
+    can never disagree with topology or replay."""
+    from ledger import _chain_links
+    by_id = {step['id']: step for step in steps}
+    order = {step['id']: position for position, step in enumerate(steps)}
+    current = by_id.get(endpoint_id)
+    if current is None or current.get('result') is None:
+        return None, f'unknown transforming step {endpoint_id!r}'
+    constraints = []
+    visited = set()
+    while True:
+        if current['id'] in visited:
+            return None, f'circular chain at {current["id"]}'
+        visited.add(current['id'])
+        for assumption in current.get('assumptions') or []:
+            constraint = assumption.get('constraint')
+            if constraint:
+                constraints.append(constraint)
+        cur_input = current.get('input') or ''
+        if (primitives.same_expression(cur_input, target)
+                or _chain_links(target, cur_input)):
+            distinct = []
+            for constraint in constraints:
+                if not any(equations._same_relation(constraint, kept)
+                           for kept in distinct):
+                    distinct.append(constraint)
+            if not distinct:
+                return None, (
+                    f'no case hypothesis is recorded on the chain of '
+                    f'{endpoint_id}; a case is stated with assuming')
+            if len(distinct) > 1:
+                return None, (
+                    f'the chain of {endpoint_id} mixes several distinct '
+                    f'hypotheses ({", ".join(repr(c) for c in distinct)}); '
+                    'assemble one case per stated hypothesis')
+            return distinct[0], None
+        producer = None
+        for step in steps[:order[current['id']]]:
+            if step.get('result') is None:
+                continue
+            if (step['result'] == cur_input
+                    or _chain_links(step['result'], cur_input)):
+                producer = step
+        if producer is None:
+            return None, (
+                f'step {current["id"]} does not chain back to the stated '
+                f'target {target!r}; every case must derive from it')
+        current = producer
+
+
+def _cases_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('cases_assemble',
+                      'cases_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    endpoints = []
+    hypotheses = []
+    for source_id in args['case_steps']:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('cases_assemble',
+                          f'unknown transforming step {source_id!r}')
+        hypothesis, walk_error = _case_chain_hypotheses(
+            steps, source_id, args['target'])
+        if walk_error:
+            return _error('cases_assemble', walk_error)
+        endpoints.append(source['result'])
+        hypotheses.append(hypothesis)
+    result = equations.cases_assemble(
+        args['target'], args['union'], endpoints, hypotheses)
+    if result.get('ok'):
+        result['sources'] = {'cases': list(args['case_steps'])}
+    return result
+
+
+def _validate_cases_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    source_ids = sources.get('cases') or []
+    endpoints = args.get('endpoints') or []
+    hypotheses = args.get('hypotheses') or []
+    if not (len(source_ids) == len(endpoints) == len(hypotheses)):
+        return 'case provenance mismatch'
+    steps = list(seen.values())
+    for source_id, endpoint, hypothesis in zip(source_ids, endpoints,
+                                               hypotheses):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != endpoint:
+            return f'case endpoint provenance mismatch at {source_id}'
+        walked, walk_error = _case_chain_hypotheses(
+            steps, source_id, args.get('target', ''))
+        if walk_error:
+            return f'case chain invalid at {source_id}: {walk_error}'
+        if not equations._same_relation(walked, hypothesis):
+            return f'case hypothesis provenance mismatch at {source_id}'
+    return None
+
+
+def _validate_limit_from_sides(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    for tag in ('left', 'right'):
+        source = seen.get(sources.get(tag))
+        if source is None or source.get('result') is None:
+            return f'missing {tag}-limit provenance'
+        try:
+            expected = limits.limit_with_direction(args.get('expr', ''),
+                                                   tag)
+        except primitives.PrimitiveError:
+            return f'malformed {tag} one-sided limit'
+        if not primitives.same_expression(source.get('input') or '',
+                                          expected):
+            return f'{tag}-limit provenance mismatch'
+        if not primitives.same_expression(source['result'],
+                                          args.get('value', '')):
+            return f'{tag}-limit value mismatch'
+    return None
+
+
+def _validate_points_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    roots = seen.get(sources.get('roots'))
+    if roots is None or roots.get('result') is None:
+        return 'missing root-step provenance'
+    if roots.get('result') != args.get('roots'):
+        return 'root-step provenance mismatch'
+    source_ids = sources.get('values') or []
+    values = args.get('values') or []
+    if len(source_ids) != len(values):
+        return 'point-value provenance mismatch'
+    for source_id, value in zip(source_ids, values):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != value:
+            return f'point-value provenance mismatch at {source_id}'
+    recorded = step.get('points')
+    if recorded is not None:
+        try:
+            expected = equations.point_pairs(
+                args.get('roots', ''), args.get('var', ''), values)
+        except primitives.PrimitiveError:
+            return 'unreadable point association'
+        if recorded != expected:
+            return 'point association mismatch'
+    return None
+
+
+def _validate_system_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    source_ids = sources.get('assignments') or []
+    values = args.get('assignments') or []
+    if len(source_ids) != len(values):
+        return 'assignment provenance mismatch'
+    for source_id, value in zip(source_ids, values):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != value:
+            return f'assignment provenance mismatch at {source_id}'
+    recorded = step.get('unknowns')
+    if recorded is not None:
+        try:
+            expected = equations.assignment_pairs(values)
+        except primitives.PrimitiveError:
+            return 'unreadable assignment'
+        if recorded != expected:
+            return 'assignment association mismatch'
+    return None
+
+
 def _validate_integrate_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -266,12 +530,17 @@ TACTICS = (
                (_arg('equation', 'EQUATION', 'LaTeX relation'),
                 _arg('op', 'OP', 'operation',
                      choices=('+', '-', '*', '/', '^')),
-                _arg('arg', 'ARG', 'operand'))),
+                _arg('arg', 'ARG', 'operand'),
+                _arg('assuming', 'ASSUMING',
+                     'case hypothesis to record, e.g. "x > 0"; a strict one '
+                     'about the factor decides an inequality direction',
+                     default=None, option='--assuming'))),
     TacticSpec('expand', 'expand', 'core',
                'canonicalize rational algebra and combine opaque atoms',
                core.expand, (E,)),
     TacticSpec('collect', 'collect', 'core',
-               'group an expression by powers of a variable',
+               'group an expression by powers of a variable '
+               'or of a function application like \\cos x',
                core.collect, (E, V)),
     TacticSpec('evaluate', 'evaluate', 'core',
                'evaluate closed arithmetic or a closed relation',
@@ -285,6 +554,11 @@ TACTICS = (
                 _arg('at', 'AT', 'target subterm LaTeX or 1-based match '
                      'index when several subterms match', default=None,
                      option='--at'))),
+    TacticSpec('rewrite_as', 'rewrite_as', 'core',
+               'replace an expression by a mechanically equal proposal',
+               core.rewrite_as,
+               (E, _arg('new_expr', 'NEW_EXPR',
+                        'the proposed equal expression'))),
     TacticSpec('factor_gcd', 'factor_gcd', 'core',
                'pull out a common factor', core.factor_gcd, (E,)),
     TacticSpec('factor_quadratic', 'factor_quadratic', 'core',
@@ -294,7 +568,10 @@ TACTICS = (
                'check whether two expressions are equal',
                core.equal_exprs,
                (_arg('expr1', 'EXPR1', 'first expression'),
-                _arg('expr2', 'EXPR2', 'second expression')),
+                _arg('expr2', 'EXPR2', 'second expression'),
+                _arg('assuming', 'ASSUMING',
+                     'restrict the question to a stated region, '
+                     'e.g. "x > 0"', default=None, option='--assuming')),
                transforming=False),
     TacticSpec('lemmas', 'lemmas', 'core',
                'list registered rewrite lemmas', core.list_lemmas,
@@ -307,6 +584,98 @@ TACTICS = (
     TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',
                'find every rational root of a quadratic expression or '
                'equality', equations.quadratic_roots, (E, V)),
+    TacticSpec('match_coefficients', 'match_coefficients', 'equations',
+               'equate like powers of a variable on both sides of a '
+               'polynomial identity, giving the coefficient system',
+               equations.match_coefficients, (E, V)),
+    TacticSpec(
+        'points_assemble', 'points_assemble', 'equations',
+        'assemble recorded roots and their recorded values into the '
+        'complete point collection',
+        equations.points_assemble,
+        (E, V, _arg('roots', 'ROOTS', 'recorded solution relation'),
+         _arg('values', 'VALUE', 'recorded values, one per root',
+              nargs='+')),
+        agent_arguments=(
+            E, V, _arg('roots_step', 'ROOTS_STEP',
+                       'ledger step id of the recorded solutions'),
+            _arg('value_steps', 'STEP',
+                 'ordered value step ids, one per root', nargs='+')),
+        agent_handler=_points_assemble_from_steps,
+        cli_arguments=(
+            E, V, _arg('roots_step', 'ROOTS_STEP',
+                       'ledger step id of the recorded solutions'),
+            _arg('value_steps', 'STEP',
+                 'ordered value step ids, one per root', nargs='+')),
+        cli_handler=_points_assemble_from_steps,
+        provenance_validator=_validate_points_assemble),
+    TacticSpec(
+        'system_assemble', 'system_assemble', 'equations',
+        'assemble recorded per-unknown values into the checked answer for '
+        'a stated equality or comma system',
+        equations.system_assemble,
+        (_arg('target', 'TARGET',
+              'equality (or comma system) the values must satisfy — '
+              'the problem, never the answer'),
+         _arg('assignments', 'ASSIGNMENT',
+              'recorded "unknown = value" relations', nargs='+')),
+        agent_arguments=(
+            _arg('target', 'TARGET',
+                 'equality (or comma system) the values must satisfy — '
+                 'the problem, never the answer'),
+            _arg('value_steps', 'STEP',
+                 'ledger step ids, one per unknown, each recording '
+                 '"unknown = value"', nargs='+')),
+        agent_handler=_system_assemble_from_steps,
+        cli_arguments=(
+            _arg('target', 'TARGET',
+                 'equality (or comma system) the values must satisfy — '
+                 'the problem, never the answer'),
+            _arg('value_steps', 'STEP',
+                 'ledger step ids, one per unknown, each recording '
+                 '"unknown = value"', nargs='+')),
+        cli_handler=_system_assemble_from_steps,
+        provenance_validator=_validate_system_assemble),
+    TacticSpec(
+        'cases_assemble', 'cases_assemble', 'equations',
+        'assemble recorded case endpoints under their stated hypotheses '
+        'into the checked union of solutions for a stated relation',
+        equations.cases_assemble,
+        (_arg('target', 'TARGET',
+              'relation the cases solve — the problem, never the answer'),
+         _arg('union', 'UNION',
+              'proposed \\lor disjunction; each disjunct restates its '
+              "case's recorded endpoint or stated hypothesis, in order"),
+         _arg('endpoints', 'ENDPOINT',
+              'recorded case endpoint relations, one per disjunct',
+              nargs='+'),
+         _arg('hypotheses', 'HYPOTHESIS',
+              'stated case hypotheses, one per disjunct', nargs='+')),
+        agent_arguments=(
+            _arg('target', 'TARGET',
+                 'relation the cases solve — the problem, never the '
+                 'answer'),
+            _arg('union', 'UNION',
+                 'proposed \\lor disjunction; each disjunct restates its '
+                 "case's recorded endpoint or stated hypothesis, in order"),
+            _arg('case_steps', 'STEP',
+                 'ledger step ids of the case endpoints, one per '
+                 'disjunct, in the order the union writes them',
+                 nargs='+')),
+        agent_handler=_cases_assemble_from_steps,
+        cli_arguments=(
+            _arg('target', 'TARGET',
+                 'relation the cases solve — the problem, never the '
+                 'answer'),
+            _arg('union', 'UNION',
+                 'proposed \\lor disjunction; each disjunct restates its '
+                 "case's recorded endpoint or stated hypothesis, in order"),
+            _arg('case_steps', 'STEP',
+                 'ledger step ids of the case endpoints, one per '
+                 'disjunct, in the order the union writes them',
+                 nargs='+')),
+        cli_handler=_cases_assemble_from_steps,
+        provenance_validator=_validate_cases_assemble),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',
@@ -395,6 +764,25 @@ TACTICS = (
             _arg('upper_step', 'UPPER_STEP', 'upper-bound limit step id')),
         agent_handler=_limit_squeeze_from_steps,
         provenance_validator=_validate_limit_squeeze),
+    TacticSpec(
+        'limit_from_sides', 'limit_from_sides', 'limits',
+        'close a two-sided limit from its recorded agreeing one-sided '
+        'limits',
+        limits.limit_from_sides,
+        (E, _arg('value', 'VALUE', 'common one-sided limit value')),
+        agent_arguments=(
+            E, _arg('left_step', 'LEFT_STEP',
+                    'left one-sided limit step id'),
+            _arg('right_step', 'RIGHT_STEP',
+                 'right one-sided limit step id')),
+        agent_handler=_limit_from_sides_from_steps,
+        cli_arguments=(
+            E, _arg('left_step', 'LEFT_STEP',
+                    'left one-sided limit step id'),
+            _arg('right_step', 'RIGHT_STEP',
+                 'right one-sided limit step id')),
+        cli_handler=_limit_from_sides_from_steps,
+        provenance_validator=_validate_limit_from_sides),
 
     TacticSpec('sum_from_ellipsis', 'sum_from_ellipsis',
                'finite_operators',
@@ -510,6 +898,10 @@ def _parse_ordered(spec, argv, surface):
             raise ValueError(f'missing {arg.metavar}')
         value = argv[offset]
         offset += 1
+        if value is None and arg.default is not _MISSING:
+            # an explicit null for an optional argument means "omitted"
+            values[arg.name] = arg.default
+            continue
         if not isinstance(value, str):
             raise ValueError(f'{arg.metavar} must be a string')
         if arg.choices and value not in arg.choices:

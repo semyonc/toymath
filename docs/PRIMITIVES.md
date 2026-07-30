@@ -97,6 +97,13 @@ by an identity the canonicalizer does not know.
 Domain changes are surfaced. A value agreement on a common domain does not
 erase the fact that one expression is defined where the other is not.
 
+A recorded assumption may carry a constraint, and the oracle then samples only
+inside it — strict hypotheses only, so the assumed region always has an
+interior; an unsatisfiable one leaves the check `skipped` rather than agreed.
+Relations get a second, independent leg: the input and output relation must be
+true at exactly the same sampled points. Per-side value comparison cannot see a
+wrong inequality direction, which is what that leg exists for.
+
 ## Ledger and claims
 
 A transforming record becomes a step only when it succeeds and its `op` is a
@@ -126,6 +133,14 @@ The ledger provides:
 source graph closes the claim. A relation-valued endpoint must itself be
 mechanically true; an equivalent no-op rewrite cannot establish an arbitrary
 relation.
+
+A claim that states what an unknown IS (`A = 1/2`) can never be decided on its
+own — asking whether `A` equals the value is the claim itself. Such a claim
+closes only when the chain's endpoint is the claim, and then it closes
+CONDITIONAL on that chain's first input, which is recorded as the conclusion's
+premise and displayed with the verdict. The implication is one-directional and
+is all that is asserted; a chain starting from a mechanically false relation, or
+from the claim itself, is refused rather than closed vacuously.
 
 Re-recording a claim whose statement matches an existing same-parent claim —
 open or concluded — focuses that claim instead of minting a duplicate id, and
@@ -168,6 +183,13 @@ remains comment-grade annotation and is deliberately distinct from future
 assumption-bearing mathematical case splits. The ledger stays append-only:
 checked work on an abandoned path is never deleted.
 
+Rich ledger views derive one additional presentation spelling without changing
+the replayable record: an agent's explicit keyboard multiplication `*` renders
+as `\cdot`. The candidate is accepted only when both strings parse to the same
+notation shape; invalid or non-mathematical star contexts remain verbatim.
+Hashes, tactic arguments, persisted inputs/results, replay, and terse text/JSON
+views continue to use the exact recorded spelling.
+
 ### Provenance-aware composition
 
 Linearity and squeeze tactics expose an important rule: checking a value is not
@@ -175,6 +197,23 @@ the same as checking where it came from. Integration/limit assembly therefore
 retrieves ordered recorded pieces, recomputes the combined result, persists the
 source ids, and revalidates them during replay. Squeeze likewise requires the
 recorded lower- and upper-bound limit steps.
+
+Complete answers that are collections of associated values follow the same
+rule. A solution set of points is assembled by `points_assemble` from the
+recorded solution step and one recorded value step per root: every
+root-to-value association is gated symbolically and then re-derived by the
+independent evaluator, which is what sees the pairing. A typed collection an
+agent writes out by hand is a claim about where each number came from, so it
+is not admissible as a result on its own.
+
+An answer that is several statements at once — the values of A, B and C, the
+assignment satisfying a system — is assembled the same way by `system_assemble`
+from one recorded `unknown = value` step per unknown. It puts the recorded
+values back into the stated target, gates the outcome symbolically, and has the
+independent evaluator re-derive the whole assignment by binding each unknown to
+its own value. The record says the assignment satisfies the target, never that
+it is the only one that does; a target that already states one of the values
+verifies nothing and is refused.
 
 The same principle governs inline notebook commands:
 
@@ -204,7 +243,10 @@ Important verified-layer behaviors include:
   as `\{(-1,2),(1,-2)\}` survive parse/write, graph replication, normal-form
   comparison, and notebook `[[n]]` history; they deliberately have no set
   algebra or scalar numeric-oracle meaning, while bare `x,y` remains the
-  existing command/system `C_LIST`;
+  existing command/system `C_LIST`. Because the oracle cannot sample such a
+  value, selecting one as the final result relies on structural identity with
+  a recorded step result — the same comparison the ledger uses to validate the
+  selection — so item order is significant and never rearranged;
 - maximal non-fragment subtrees become opaque atoms so rational algebra can
   still combine coefficients around `sin`, `ln`, integrals, and other forms;
 - indexed big operators consume their scoped bodies as one atom; free-symbol
@@ -222,6 +264,12 @@ Important verified-layer behaviors include:
   matrices are never confused with scalar absolute value;
 - matrix-valued factor runs become ordered noncommutative word atoms, while
   scalar factors remain commutative;
+- absolute value, floor, and ceiling are bracket *operators*, not grouping:
+  `|x+1|`, `\lfloor x \rfloor`, and `\lceil x \rceil` (bare, `\left`-sized, or
+  in the `\lvert`/`\rvert` spelling) stay opaque atoms for symbolic algebra
+  while the independent oracle computes the real `|·|`, floor, and ceiling,
+  so `\lfloor x+1 \rfloor = \lfloor x \rfloor + 1` is checkable and
+  `\lfloor x \rfloor = x` is refused with a witness;
 - rule-built derivatives pass through checked canonical algebra before being
   recorded; if removing zero-multiplied domain-bearing terms widens the
   written domain, the step remains visibly `domain-differs` rather than being
@@ -245,8 +293,13 @@ writer, comparer, and replicator landmines.
 
 - Partial multivariate common factors may remain uncancelled, although exact
   cross-multiplication keeps equality checking sound.
-- Symbolic-sign multiplication/division of inequalities is refused; there is
-  no case-split constraint store yet.
+- Moving an inequality by a symbolic factor requires the agent to state the
+  case as a strict hypothesis; the tactic records it, derives the direction
+  from it, and refuses when it does not pin the factor's sign. Cases are
+  separate steps, not one branching record: there is no case-split branch
+  topology yet, so a claim whose chain mixes mutually exclusive hypotheses is
+  refused and such hypotheses are displayed as alternatives, never as one
+  condition.
 - Rewrite defaults to the first matching subterm; the optional `at` argument
   (target subterm LaTeX or 1-based match index) selects among several
   matches, and a failed selection lists the available positions. Match
@@ -269,7 +322,11 @@ writer, comparer, and replicator landmines.
   both-sides operations, but there is no autonomous elimination, row-combine,
   or general linear-system solver.
 - Quadratic root finding returns complete rational roots; irrational and
-  complex roots remain outside the executable equation tactics.
+  complex roots remain outside the executable equation tactics. Point
+  assembly completes those roots into `\{(x_1,y_1),...\}` only from recorded
+  steps: it associates values with roots and checks each association, but it
+  finds no roots, evaluates nothing on its own, and has no collection
+  algebra.
 - Infinite sums/products enter only through the definitional
   partial-sums rewrite (value = limit of partial sums, if it exists);
   ellipsis and infinite bounds never become sampled ring variables.

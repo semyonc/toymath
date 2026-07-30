@@ -10,6 +10,17 @@ from io import StringIO
 from notation import Notation, Symbol
 
 
+# `br` holds one character per side so every existing consumer can keep
+# indexing it; delimiters with no single-character spelling map to their
+# LaTeX control word here.
+_DELIM_LATEX = {
+    '⌊': '\\lfloor',
+    '⌋': '\\rfloor',
+    '⌈': '\\lceil',
+    '⌉': '\\rceil',
+}
+
+
 class LaTexWriter(object):
     namemap = {
         '\\above': 'write_above',
@@ -566,19 +577,19 @@ class LaTexWriter(object):
                 self.writeString('`')
             if br == '{}':
                 self.writeString('{')
-        self.writeString(br[0])
+        self.writeString(_DELIM_LATEX.get(br[0], br[0]))
         self.write_formula(f.args[0])
-        self.writeString(br[1])
+        self.writeString(_DELIM_LATEX.get(br[1], br[1]))
         if self.show_quotes and br == '{}':
             self.writeString('}')
 
     def write_vgroup(self, f):
         br = f.props['br']
         self.writeString('\\left')
-        self.writeString(br[0])
+        self.writeString(_DELIM_LATEX.get(br[0], br[0]))
         self.write_formula(f.args[0])
         self.writeString('\\right')
-        self.writeString(br[1])
+        self.writeString(_DELIM_LATEX.get(br[1], br[1]))
 
     def write_sgroup(self, f):
         self.writeString('\\{')

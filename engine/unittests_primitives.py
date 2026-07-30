@@ -386,6 +386,452 @@ class TestAtomPowers(unittest.TestCase):
         self.assertEqual(r['check']['status'], 'agree')
 
 
+class TestPoweredHeadMatching(unittest.TestCase):
+    # gen 58: the atomizer and the oracle already read \sin^2 x and
+    # (\sin x)^2 as one object; the structural matcher used to see two.
+    # \sin^2 x parses as P_LIST[INDEX(\sin, 2), x], so a pattern a^2 bound
+    # a to the bare function name and stranded the argument.
+
+    def test_powered_head_spelling_matches(self):
+        r = Core.rewrite('\\sin^2 x - \\cos^2 x', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\sin x+ \\cos x)( \\sin x- \\cos x)')
+
+    def test_both_spellings_give_the_same_result(self):
+        for lemma, powered, parens in (
+                ('diff_squares', '\\sin^2 x - \\cos^2 x',
+                 '(\\sin x)^2 - (\\cos x)^2'),
+                ('diff_cubes', '\\tan^3 x - 8', '(\\tan x)^3 - 8'),
+                ('sum_cubes', '\\sin^3 x + \\cos^3 x',
+                 '(\\sin x)^3 + (\\cos x)^3')):
+            a, b = Core.rewrite(powered, lemma), Core.rewrite(parens, lemma)
+            self.assertTrue(a['ok'], lemma)
+            self.assertEqual(a['result'], b['result'], lemma)
+
+    def test_compound_argument_matches(self):
+        r = Core.rewrite('\\sin^2 (2x) - \\cos^2 (2x)', 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_expand_output_is_matchable(self):
+        # expand normalizes into the powered-head spelling, so its own
+        # output has to be consumable by rewrite
+        e = Core.expand('(\\sin x)^2 - (\\cos x)^2')
+        self.assertEqual(e['result'], '\\sin^{2}x- \\cos^{2}x')
+        r = Core.rewrite(e['result'], 'diff_squares')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_inverse_power_is_not_normalized(self):
+        # \sin^{-1} must keep its own reading: no a^2 - b^2 match here
+        r = Core.rewrite('\\sin^{-1} x - \\cos^2 x', 'diff_squares')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_plain_variable_rewrites_unchanged(self):
+        self.assertEqual(Core.rewrite('x^2 - y^2', 'diff_squares')['result'],
+                         '(x+y)(x-y)')
+        self.assertEqual(Core.rewrite('x^2 - 9', 'diff_squares')['result'],
+                         '(x+3)(x-3)')
+
+    def test_lemma_pattern_is_normalized_too(self):
+        # gen 59: normalizing only the expression side left a lemma written
+        # in the standard spelling matching NOTHING, which would have
+        # shipped a registry whose own headline lemma silently never fired
+        Core.register_lemma('g59_pyth', '\\sin^2 t', '1 - \\cos^2 t',
+                            ['t'], 'pythagorean')
+        try:
+            for expr in ('\\sin^2 x', '(\\sin x)^2', '\\sin^2 (2x)'):
+                r = Core.rewrite(expr, 'g59_pyth')
+                self.assertTrue(r['ok'], expr)
+                self.assertEqual(r['check']['status'], 'agree', expr)
+        finally:
+            Core.LEMMAS.pop('g59_pyth', None)
+
+    def test_both_lemma_spellings_behave_alike(self):
+        Core.register_lemma('g59_a', '\\sin^2 t', '1 - \\cos^2 t', ['t'])
+        Core.register_lemma('g59_b', '(\\sin t)^2', '1 - (\\cos t)^2', ['t'])
+        try:
+            a = Core.rewrite('\\sin^2 x', 'g59_a')
+            b = Core.rewrite('\\sin^2 x', 'g59_b')
+            self.assertEqual(a['result'], b['result'])
+        finally:
+            Core.LEMMAS.pop('g59_a', None)
+            Core.LEMMAS.pop('g59_b', None)
+
+
+class TestProductUnitMatching(unittest.TestCase):
+    # gen 62: gen 58 grouped POWERED heads at the matching boundary and left
+    # bare product units open, so `2 \sin x \cos x` did not match `2ab` while
+    # `2(\sin x)(\cos x)` did -- the backward direction of every trig lemma,
+    # which is the direction that collapses. Spans come from the oracle's own
+    # _func_arg_span, so a grouping cannot disagree with the numeric leg.
+
+    def test_bare_product_of_applications_matches(self):
+        r = Core.rewrite('2 \\sin x \\cos x', 'sin_double', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '\\sin 2x')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_both_product_spellings_give_one_result(self):
+        bare = Core.rewrite('2 \\sin x \\cos x', 'sin_double', 'backward')
+        grouped = Core.rewrite('2 (\\sin x)(\\cos x)', 'sin_double',
+                               'backward')
+        self.assertTrue(bare['ok'])
+        self.assertEqual(bare['result'], grouped['result'])
+
+    def test_matches_a_product_inside_a_sum(self):
+        r = Core.rewrite('y + 2 \\sin x \\cos x', 'sin_double', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], 'y+ \\sin 2x')
+
+    def test_argument_binding_is_preserved_not_flattened(self):
+        # `2 \sin x \cos x y` reads as 2*sin(x)*cos(x*y) -- the same span rule
+        # the oracle uses -- so it genuinely is NOT the double-angle shape and
+        # must refuse rather than flatten into a match
+        r = Core.rewrite('2 \\sin x \\cos x y', 'sin_double', 'backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_whole_product_application_stays_matchable(self):
+        # a product that IS one application must not be wrapped: a ()-group
+        # matches no pattern at all, so wrapping it would hide the root
+        r = Core.rewrite('\\sin 2x', 'sin_double')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '2 \\sin x \\cos x')
+
+    def test_backward_square_lemmas_close_over_bare_trig(self):
+        # the round trip gen 58 opened and could only half close
+        for lemma, expr in (
+                ('square_of_diff',
+                 '\\sin^2 x - 2\\sin x \\cos x + \\cos^2 x'),
+                ('square_of_sum',
+                 '\\sin^2 x + 2\\sin x \\cos x + \\cos^2 x')):
+            r = Core.rewrite(expr, lemma, 'backward')
+            self.assertTrue(r['ok'], lemma)
+            self.assertEqual(r['check']['status'], 'agree', lemma)
+
+    def test_plain_products_are_untouched(self):
+        self.assertEqual(Core.rewrite('x^2 - y^2', 'diff_squares')['result'],
+                         '(x+y)(x-y)')
+
+
+class TestSubstitutedGroupIsSelfDelimiting(unittest.TestCase):
+    # gen 62: Substitutor wrapped every non-symbol replacement in (), even one
+    # that already was a ()-group, and the relax pass cannot reach inside an
+    # INDEX base -- so the doubled layer survived into user-visible results.
+
+    def test_substitute_does_not_double_parens(self):
+        r = Core.substitute('a^2 + 1', 'a', '(x+1)')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '(x+1)^{2}+1')
+
+    def test_lemma_destination_keeps_one_layer(self):
+        r = Core.rewrite('(x+1)^3 + y^3', 'sum_cubes')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'],
+                         '((x+1)+y)((x+1)^{2}-(x+1)y+y^{2})')
+
+    def test_function_binding_in_an_index_base(self):
+        r = Core.rewrite('\\sin^2 x - 2\\sin x \\cos x + \\cos^2 x',
+                         'square_of_diff', 'backward')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '(( \\sin x)-( \\cos x))^{2}')
+
+
+class TestTrigLemmaCatalog(unittest.TestCase):
+    # gen 62: the capability behind four recorded agent asks. A lemma is an
+    # EXACT structural rewrite where the same move through rewrite_as is
+    # numerically sampled, so the catalog is a trust improvement, not just a
+    # convenience. Registering it needed no loader and no always-on budget.
+
+    TRIG = ('pythagorean', 'sin_squared', 'cos_squared', 'sin_double',
+            'cos_double')
+
+    def test_registered_and_discoverable(self):
+        names = {l['name'] for l in Core.list_lemmas()['lemmas']}
+        for name in self.TRIG:
+            self.assertIn(name, names)
+            self.assertTrue(Core.LEMMAS[name].description)
+
+    def test_every_trig_lemma_applies_forward(self):
+        for name in self.TRIG:
+            src = Core.LEMMAS[name].lhs.replace('a', 'x')
+            r = Core.rewrite(src, name)
+            self.assertTrue(r['ok'], name)
+            self.assertEqual(r['check']['status'], 'agree', name)
+
+    def test_solved_forms_apply_backward(self):
+        # pythagorean is excluded on purpose: its right side is the bare
+        # literal 1, so backward leaves the parameter unbound
+        for name in ('sin_squared', 'cos_squared', 'sin_double',
+                     'cos_double'):
+            dst = Core.LEMMAS[name].rhs.replace('a', 'x')
+            r = Core.rewrite(dst, name, 'backward')
+            self.assertTrue(r['ok'], name)
+            self.assertEqual(r['check']['status'], 'agree', name)
+
+    def test_pythagorean_backward_refuses_cleanly(self):
+        r = Core.rewrite('1', 'pythagorean', 'backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('unbound', r['error'])
+
+    def test_gen57_critical_path_lemma(self):
+        # the int1 failure needed exactly this rewrite on its critical path
+        r = Core.rewrite('\\sin^2 t \\cos t', 'sin_squared')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('\\cos^{2}t', r['result'])
+
+    def test_compound_arguments_bind(self):
+        r = Core.rewrite('\\sin^2 (3y)', 'sin_squared')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_two_term_pattern_needs_the_whole_sum(self):
+        # measured limit, not a bug: matching is structural, so a two-term
+        # pattern does not select two terms out of a longer sum. The granular
+        # route is sin_squared forward, then expand.
+        self.assertTrue(Core.rewrite('\\sin^2 x + \\cos^2 x',
+                                     'pythagorean')['ok'])
+        self.assertFalse(Core.rewrite('y + \\sin^2 x + \\cos^2 x',
+                                      'pythagorean')['ok'])
+        step = Core.rewrite('y + \\sin^2 x + \\cos^2 x', 'sin_squared')
+        self.assertTrue(step['ok'])
+        self.assertEqual(Core.expand(step['result'])['result'], 'y+1')
+
+
+class TestRewriteAs(unittest.TestCase):
+    # gen 59: congruence with an agent-supplied witness. Reaches identities
+    # with no registered lemma and spellings the structural matcher cannot
+    # bind; equal? is the check, and its trust level is reported, not hidden.
+
+    def test_reaches_an_identity_with_no_lemma(self):
+        r = Core.rewrite_as('\\sin(2x)', '2\\sin x \\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '2\\sin x \\cos x')
+
+    def test_reaches_what_the_matcher_cannot_bind(self):
+        # bare product units: structural rewrite refuses this shape
+        r = Core.rewrite_as(
+            '(\\sin x)^2 - 2\\sin x \\cos x + (\\cos x)^2',
+            '( \\sin x - \\cos x)^2')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_trust_level_is_named_not_hidden(self):
+        exact = Core.rewrite_as('(x+1)^2', 'x^2+2x+1')
+        probabilistic = Core.rewrite_as('\\sin^2 x + \\cos^2 x', '1')
+        self.assertIn('canonical', exact['check']['method'])
+        self.assertIn('numeric-oracle', probabilistic['check']['method'])
+        self.assertIn('samples', probabilistic['check'])
+
+    def test_refuses_a_false_proposal_with_a_counterexample(self):
+        r = Core.rewrite_as('(\\sin x - \\cos x)^2', '\\sin^2 x - \\cos^2 x')
+        self.assertFalse(r['ok'])
+        self.assertIn('not mechanically equal', r['error'])
+        self.assertIn('counterexample', r['error'])
+
+    def test_refuses_an_unknown_verdict(self):
+        r = Core.rewrite_as('f(x)', 'g(x)')
+        self.assertFalse(r['ok'])
+        self.assertIn('not mechanically equal', r['error'])
+
+    def test_refuses_a_no_op(self):
+        r = Core.rewrite_as('x+1', 'x+1')
+        self.assertFalse(r['ok'])
+        self.assertIn('changes nothing', r['error'])
+
+    def test_refuses_an_unparseable_proposal(self):
+        r = Core.rewrite_as('x+1', '\\frac{')
+        self.assertFalse(r['ok'])
+
+    def test_accepts_an_equal_relation(self):
+        r = Core.rewrite_as('x+1 = 2', '1+x = 2')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+
+class TestMatchCoefficients(unittest.TestCase):
+    # gen 61: the producer for system_assemble. A live int! run spent 55% of
+    # its turn budget hand-guessing partial-fraction coefficients, failing
+    # `integrate_rewrite ... verdict: no` nine times, because no move derived
+    # them. This derives them.
+
+    def test_matches_like_powers(self):
+        r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], 'A = 2, B = 0, C = 5')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_result_is_a_relation_system(self):
+        # the gen-35 comma container, which is what system_assemble consumes
+        r = Equations.match_coefficients('A x + B = 3x - 1', 'x')
+        sym, notation = P.parse_latex(r['result'])
+        self.assertIsNotNone(notation.getf(sym, Notation.C_LIST))
+
+    def test_partial_fraction_shape(self):
+        r = Equations.match_coefficients('x = A(x+1) + B(x-1)', 'x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['result'], '1 = A+B, 0 = A-B')
+
+    def test_impossible_ansatz_is_reported_not_hidden(self):
+        # a degree that cannot balance must surface as 1 = 0, telling the
+        # agent the ansatz is wrong rather than the arithmetic
+        r = Equations.match_coefficients('x^2 = A(x+1) + B(x-1)', 'x')
+        self.assertTrue(r['ok'])
+        self.assertIn('1 = 0', r['result'])
+
+    def test_symbolic_on_both_sides(self):
+        r = Equations.match_coefficients('A x^2 + B = C x^2 + D', 'x')
+        self.assertEqual(r['result'], 'A = C, B = D')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_check_is_independent_of_the_symbolic_extraction(self):
+        # corrupting the symbolic buckets must be caught by the oracle leg
+        original = Equations._coefficient_buckets
+
+        def corrupt(poly, var):
+            buckets = original(poly, var)
+            if buckets:
+                buckets[sorted(buckets)[0]] = Poly.const(999)
+            return buckets
+
+        Equations._coefficient_buckets = corrupt
+        try:
+            r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5',
+                                             'x')
+            self.assertEqual(r['check']['status'], 'disagree')
+        finally:
+            Equations._coefficient_buckets = original
+
+    def test_refusals(self):
+        for expr, var, msg in (
+                ('A x + B', 'x', 'equality'),
+                ('A x \\lt B x', 'x', 'only be matched'),
+                ('A = B', 'x', 'does not occur'),
+                ('A x + B = A x + B', 'x', 'nothing to equate'),
+                ('\\frac{1}{x} = A', 'x', 'must be polynomials')):
+            r = Equations.match_coefficients(expr, var)
+            self.assertFalse(r['ok'], expr)
+            self.assertIn(msg, r['error'], expr)
+
+
+class TestDomainNarrowingAssumptions(unittest.TestCase):
+    # gen 60: cancelling a factor drops the points where it vanished. The
+    # canonical leg decides equality as rational functions and the numeric
+    # legs CANNOT see the loss (a removable singularity is measure-zero, so
+    # sampling never lands on it), so it has to be stated symbolically.
+
+    def nonzero(self, rec):
+        return [a.get('nonzero') for a in rec.get('assumptions') or []]
+
+    def test_sampling_cannot_see_it(self):
+        # the premise of the whole feature: both spot-checks say 'agree'
+        for a, b in (('\\frac{x^2-1}{x-1}', 'x+1'),
+                     ('\\frac{(x+y)(x-z)}{(x+y)(x-w)}',
+                      '\\frac{x-z}{x-w}')):
+            self.assertEqual(P.numeric_spot_check(a, b)['status'], 'agree')
+
+    def test_expand_records_a_cancelled_factor(self):
+        self.assertEqual(self.nonzero(Core.expand('\\frac{x^2-1}{x-1}')),
+                         ['x-1'])
+        self.assertEqual(self.nonzero(Core.expand('\\frac{x}{x}')), ['x'])
+
+    def test_expand_records_a_cancelled_opaque_atom(self):
+        # the trig case simplify! actually meets; needs one shared atom
+        # store across both denominators or the names never line up
+        r = Core.expand('\\frac{\\sin x \\cos x}{\\sin x}')
+        self.assertEqual(r['result'], '\\cos x')
+        self.assertEqual(self.nonzero(r), ['\\sin x'])
+
+    def test_rewrite_as_records_a_cancelled_factor(self):
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('\\frac{x^2-1}{x-1}', 'x+1')),
+            ['x-1'])
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as(
+                '\\frac{(x+y)(x-z)}{(x+y)(x-w)}', '\\frac{x-z}{x-w}')),
+            ['x+y'])
+
+    def test_a_sum_of_fractions_reports_every_lost_condition(self):
+        # found by the FIRST live simplify! run: a top-level-only scan saw
+        # no fraction here and reported nothing, losing both conditions
+        r = Core.expand(
+            '\\frac{\\sin x \\cos x}{\\sin x} + \\frac{x^2-1}{x-1}')
+        self.assertEqual(self.nonzero(r), ['\\sin x', 'x-1'])
+
+    def test_loss_is_attributed_to_the_written_denominators(self):
+        # a partial factor reports just the cancelled part, not the whole
+        # denominator it came from
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as(
+                '\\frac{(x+y)(x-z)}{(x+y)(x-w)}', '\\frac{x-z}{x-w}')),
+            ['x+y'])
+
+    def test_it_is_symmetric(self):
+        # introducing a denominator excludes points just as removing one does
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('x+1', '\\frac{x^2-1}{x-1}')),
+            ['x-1'])
+
+    def test_assumption_uses_the_established_shape(self):
+        a = (Core.expand('\\frac{x^2-1}{x-1}')['assumptions'] or [])[0]
+        self.assertEqual(a['text'], 'x-1 \\ne 0')
+        self.assertEqual(a['nonzero'], 'x-1')
+
+    def test_no_assumption_when_nothing_is_lost(self):
+        for expr in ('(x+1)^2', '\\frac{1}{x+1}', '2\\sin x + 3\\sin x',
+                     '\\frac{x^2+1}{x-1}', '\\frac{\\cos x}{\\sin x}'):
+            self.assertEqual(self.nonzero(Core.expand(expr)), [], expr)
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('\\sin^2 x + \\cos^2 x', '1')), [])
+        self.assertEqual(
+            self.nonzero(Core.rewrite_as('(x+1)^2', 'x^2+2x+1')), [])
+
+
+class TestCollectNamedAtom(unittest.TestCase):
+    # gen 58: the agent may name an opaque atom (\cos x) as the collection
+    # variable; it resolves to the atom the atomizer already minted.
+
+    def test_collect_by_named_atom(self):
+        r = Core.collect('A\\cos^2 x + B\\cos x + C', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], 'A \\cos^{2}x+B \\cos x+C')
+
+    def test_coefficients_actually_combine(self):
+        r = Core.collect('A\\cos x + B\\cos^2 x + D\\cos x', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], 'B \\cos^{2}x+(A+D) \\cos x')
+
+    def test_either_spelling_names_the_same_atom(self):
+        a = Core.collect('A\\cos^2 x + B\\cos x', '\\cos x')
+        b = Core.collect('A(\\cos x)^2 + B(\\cos x)', '\\cos x')
+        self.assertEqual(a['result'], b['result'])
+
+    def test_relation_sides_collect_by_atom(self):
+        r = Core.collect('A\\cos^2 x + B\\cos x = 3\\cos x + 1', '\\cos x')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertIn('=', r['result'])
+
+    def test_absent_atom_is_refused(self):
+        # lookup only: naming an atom the expression lacks must not mint one
+        r = Core.collect('A\\cos^2 x + B\\cos x', '\\tan x')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_atom_is_still_usable_as_a_coefficient(self):
+        r = Core.collect('y\\cos^2 x + 2y\\cos x + y', 'y')
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['result'], '( \\cos^{2}x+2 \\cos x+1)y')
+
+
 class TestDifferentiate(unittest.TestCase):
     def check(self, expr, var='x'):
         r = Differentiation.differentiate(expr, var)
@@ -462,6 +908,23 @@ class TestRewrite(unittest.TestCase):
     def test_square_of_sum(self):
         r = Core.rewrite('(u + v)^2', 'square_of_sum')
         self.assertTrue(r['ok'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_repeated_param_mismatch_refused(self):
+        # backward square_of_sum binds 'a' twice; the false match used
+        # to win with the last binding and return a disagree-checked
+        # record instead of refusing
+        r = Core.rewrite('x^2 + 2 x z + y^2', 'square_of_sum',
+                      direction='backward')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not match', r['error'])
+
+    def test_repeated_param_accepts_compound_binding(self):
+        # compound bindings are distinct DAG nodes per occurrence, so
+        # repeated-param consistency must compare structurally
+        r = Core.rewrite('(x+1)^2 + 2 (x+1) y + y^2', 'square_of_sum',
+                      direction='backward')
+        self.assertTrue(r['ok'], r.get('error'))
         self.assertEqual(r['check']['status'], 'agree')
 
 
@@ -825,6 +1288,455 @@ class TestQuadraticRoots(unittest.TestCase):
         self.assertIn('solution metadata', replay['reason'])
 
 
+class TestPointsAssemble(unittest.TestCase):
+    def test_assembles_the_complete_point_collection(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['2', '-2'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(r['input'], r'x=-1 \lor x=1')
+        self.assertEqual(r['points'], [{'root': '-1', 'value': '2'},
+                                       {'root': '1', 'value': '-2'}])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_result_is_a_typed_collection_of_pairs(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['2', '-2'])
+        sym, notation = P.parse_latex(r['result'])
+        collection = notation.getf(sym, Notation.COLLECTION)
+        self.assertIsNotNone(collection)
+        self.assertEqual(len(collection.args), 2)
+        for item in collection.args:
+            self.assertIsNotNone(notation.getf(item, Notation.PAIR))
+
+    def test_single_repeated_root_and_fraction_roots(self):
+        repeated = Equations.points_assemble('x^2-6x+9', 'x', 'x=3', ['0'])
+        self.assertTrue(repeated['ok'], repeated.get('error'))
+        self.assertEqual(repeated['result'], r'\{(3,0)\}')
+        fraction = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=-\frac{1}{2} \lor x=1',
+            [r'\frac{11}{8}', '-2'])
+        self.assertTrue(fraction['ok'], fraction.get('error'))
+        self.assertEqual(fraction['check']['status'], 'agree')
+        self.assertTrue(P.same_expression(
+            fraction['result'], r'\{(-\frac{1}{2},\frac{11}{8}),(1,-2)\}'))
+
+    def test_symbolic_values_stay_associated(self):
+        r = Equations.points_assemble('ax^2', 'x', r'x=-1 \lor x=2',
+                                      ['a', '4a'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertGreater(r['check']['samples'], 2)
+
+    def test_swapped_values_are_refused(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
+                                      ['-2', '2'])
+        self.assertFalse(r['ok'])
+        self.assertIn('is not the value of', r['error'])
+
+    def test_value_count_must_match_the_recorded_solutions(self):
+        r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1', ['2'])
+        self.assertFalse(r['ok'])
+        self.assertIn('one recorded value step per root', r['error'])
+
+    def test_only_recorded_solution_relations_are_accepted(self):
+        inequality = Equations.points_assemble('x^3-3x', 'x', r'x \lt 1',
+                                               ['2'])
+        self.assertFalse(inequality['ok'])
+        self.assertIn('equality', inequality['error'])
+        other_var = Equations.points_assemble('x^3-3x', 'x', 'y=1', ['-2'])
+        self.assertFalse(other_var['ok'])
+        self.assertIn("must name 'x'", other_var['error'])
+        plain = Equations.points_assemble('x^3-3x', 'x', '1', ['-2'])
+        self.assertFalse(plain['ok'])
+        self.assertIn('solution relation', plain['error'])
+
+    def test_repeated_root_spellings_are_refused(self):
+        structural = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=1 \lor x=1', ['-2', '-2'])
+        self.assertFalse(structural['ok'])
+        self.assertIn('the same root', structural['error'])
+        respelled = Equations.points_assemble(
+            'x^3-3x', 'x', r'x=1 \lor x=\frac{2}{2}', ['-2', '-2'])
+        self.assertFalse(respelled['ok'])
+        self.assertIn('the same root', respelled['error'])
+        distinct = Equations.points_assemble(
+            'ax^2', 'x', r'x=b \lor x=-b', ['ab^2', 'ab^2'])
+        self.assertTrue(distinct['ok'], distinct.get('error'))
+
+    def test_independent_check_sees_the_pairing(self):
+        swapped = Equations._points_check(
+            'x^3-3x', 'x', [('-1', '-2'), ('1', '2')])
+        self.assertEqual(swapped['status'], 'disagree')
+        self.assertEqual(swapped['root'], '-1')
+        aligned = Equations._points_check(
+            'x^3-3x', 'x', [('-1', '2'), ('1', '-2')])
+        self.assertEqual(aligned['status'], 'agree')
+
+    def test_undefined_value_at_a_root_is_a_domain_signal(self):
+        check = Equations._points_check('\\frac{1}{x}', 'x', [('0', '0')])
+        self.assertEqual(check['status'], 'domain-differs')
+        self.assertEqual(check['root'], '0')
+
+
+ANSATZ = r'\frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}'
+
+
+class TestSystemAssemble(unittest.TestCase):
+    def test_assembles_the_several_part_answer(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['input'], ANSATZ)
+        self.assertEqual(r['unknowns'],
+                         [{'unknown': 'A', 'value': r'\frac {1} {2}'},
+                          {'unknown': 'B', 'value': r'- \frac {1} {2}'}])
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertTrue(P.same_expression(
+            r['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
+
+    def test_result_is_a_system_of_equalities(self):
+        r = Equations.system_assemble('x+y=3, x-y=1', ['x=2', 'y=1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x=2,y=1')
+        sym, notation = P.parse_latex(r['result'])
+        head = notation.get(sym)
+        self.assertEqual(head.sym.name, Notation.C_LIST.name)
+        for item in head.args:
+            self.assertIsNotNone(notation.getf(item, Notation.COMP))
+
+    def test_symbolic_coefficients_stay_associated(self):
+        r = Equations.system_assemble(
+            'a = A + B, b = A - B',
+            [r'A = \frac{a+b}{2}', r'B = \frac{a-b}{2}'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertGreater(r['check']['samples'], 2)
+
+    def test_swapped_values_are_refused(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = -\frac{1}{2}', r'B = \frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('do not satisfy', r['error'])
+
+    def test_a_missing_unknown_names_what_is_still_free(self):
+        r = Equations.system_assemble(ANSATZ, [r'A = \frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('still free there', r['error'])
+        self.assertIn('B', r['error'])
+
+    def test_only_resolved_assignments_are_accepted(self):
+        unresolved = Equations.system_assemble(
+            ANSATZ, ['A = B', r'B = -\frac{1}{2}'])
+        self.assertFalse(unresolved['ok'])
+        self.assertIn("still contains 'B'", unresolved['error'])
+        inequality = Equations.system_assemble(
+            ANSATZ, [r'A > \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertFalse(inequality['ok'])
+        self.assertIn('is not an equality', inequality['error'])
+        compound = Equations.system_assemble(
+            ANSATZ, [r'2A = 1', r'B = -\frac{1}{2}'])
+        self.assertFalse(compound['ok'])
+        self.assertIn('plain unknown on the left', compound['error'])
+        twice = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'A = \frac{1}{2}'])
+        self.assertFalse(twice['ok'])
+        self.assertIn('assigned twice', twice['error'])
+
+    def test_the_answer_is_never_its_own_target(self):
+        # measured live: an agent passed the assignment list as the target,
+        # which substitutes to "value = value" and certifies nothing
+        r = Equations.system_assemble(
+            r'A = \frac{1}{2}, B = -\frac{1}{2}',
+            [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertFalse(r['ok'])
+        self.assertIn('states the value of every unknown', r['error'])
+        flipped = Equations.system_assemble(
+            r'\frac{1}{2} = A', [r'A = \frac{1}{2}'])
+        self.assertFalse(flipped['ok'])
+        self.assertIn('never the answer itself', flipped['error'])
+        defining = Equations.system_assemble('2A = 1', [r'A = \frac{1}{2}'])
+        self.assertTrue(defining['ok'], defining.get('error'))
+        self.assertEqual(defining['check']['status'], 'agree')
+
+    def test_a_respelled_answer_is_still_the_answer(self):
+        # the live int1 run: target in factored spelling, recorded values
+        # expanded, so a structural comparison saw two different objects
+        # while the substitution check passed trivially
+        target = (r'A = \frac{-b}{(n-1)(a^2-b^2)}, '
+                  r'B = \frac{a(2n-3)}{(n-1)(a^2-b^2)}, '
+                  r'C = \frac{-(n-2)}{(n-1)(a^2-b^2)}')
+        values = [r'A = \frac {-b} {a^{2}n-b^{2}n-a^{2}+b^{2}}',
+                  r'B = \frac {2an-3a} {a^{2}n-b^{2}n-a^{2}+b^{2}}',
+                  r'C = \frac {-n+2} {a^{2}n-b^{2}n-a^{2}+b^{2}}']
+        self.assertFalse(P.same_expression(
+            r'\frac{-b}{(n-1)(a^2-b^2)}', values[0].split('=', 1)[1]))
+        r = Equations.system_assemble(target, values)
+        self.assertFalse(r['ok'])
+        self.assertIn('every unknown (A, B, C)', r['error'])
+
+    def test_a_target_pinning_only_some_unknowns_is_real_evidence(self):
+        # a system genuinely containing the row `x = 3` still constrains y
+        r = Equations.system_assemble('x = 3, x+y = 5', ['x=3', 'y=2'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], 'x=3,y=2')
+        self.assertEqual(r['check']['status'], 'agree')
+        constraint = Equations.system_assemble(
+            'A = 2B, A+B = 3', ['A=2', 'B=1'])
+        self.assertTrue(constraint['ok'], constraint.get('error'))
+
+    def test_unknown_must_be_one_the_target_names(self):
+        r = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}', 'C = 1'])
+        self.assertFalse(r['ok'])
+        self.assertIn("'C' does not occur", r['error'])
+
+    def test_only_equality_targets_are_verifiable(self):
+        r = Equations.system_assemble('x+y > 3', ['x=2', 'y=1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('verifies equalities', r['error'])
+        plain = Equations.system_assemble('x+y', ['x=2', 'y=1'])
+        self.assertFalse(plain['ok'])
+        self.assertIn('must be an equality', plain['error'])
+
+    def test_independent_check_sees_the_association(self):
+        relations = ['a = A + B', 'b = A - B']
+        aligned = Equations._system_check(
+            relations, [{'unknown': 'A', 'value': r'\frac{a+b}{2}'},
+                        {'unknown': 'B', 'value': r'\frac{a-b}{2}'}])
+        self.assertEqual(aligned['status'], 'agree')
+        swapped = Equations._system_check(
+            relations, [{'unknown': 'A', 'value': r'\frac{a-b}{2}'},
+                        {'unknown': 'B', 'value': r'\frac{a+b}{2}'}])
+        self.assertEqual(swapped['status'], 'disagree')
+        self.assertEqual(swapped['relation'], 'b = A - B')
+
+    def test_undefined_assignment_is_a_domain_signal(self):
+        check = Equations._system_check(
+            ['A = 1'], [{'unknown': 'A', 'value': r'\frac{1}{0}'}])
+        self.assertEqual(check['status'], 'domain-differs')
+
+    def test_assignment_pairs_is_the_shared_reader(self):
+        pairs = Equations.assignment_pairs(['x=2', 'y=1'])
+        self.assertEqual(pairs, [{'unknown': 'x', 'value': '2'},
+                                 {'unknown': 'y', 'value': '1'}])
+        with self.assertRaises(P.PrimitiveError):
+            Equations.assignment_pairs([])
+
+
+class TestNumericUnionCheck(unittest.TestCase):
+    TARGET = r'\frac{1}{x} \lt 2'
+
+    def test_true_union_agrees_with_both_sides_exercised(self):
+        check = P.numeric_union_check(self.TARGET,
+                                      [r'x \lt 0', r'x \gt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+    def test_raw_endpoint_trap_disagrees_inside_the_gap(self):
+        # the case x<0 derived the endpoint x<1/2 under its hypothesis;
+        # assembling that raw endpoint claims (0, 1/2) as solutions
+        check = P.numeric_union_check(
+            self.TARGET, [r'x \gt \frac{1}{2}', r'x \lt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'disagree')
+        witness = check['point']['x']
+        self.assertGreater(witness, 0)
+        self.assertLess(witness, 0.5)
+        self.assertEqual(check['holds'],
+                         {'target': False, 'union': True})
+
+    def test_too_narrow_union_disagrees(self):
+        check = P.numeric_union_check(self.TARGET, [r'x \gt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'disagree')
+        self.assertEqual(check['holds'],
+                         {'target': True, 'union': False})
+
+    def test_one_sided_sample_is_skipped_not_agreed(self):
+        # a tautological target never fails, so coverage of the union is
+        # never exercised in the failing direction
+        check = P.numeric_union_check(r'x^2 \gt -1',
+                                      [r'x \lt 1', r'x \gt 0'])
+        self.assertEqual(check['status'], 'skipped')
+        self.assertIn('one-sided', check['reason'])
+
+    def test_non_relation_disjunct_is_skipped(self):
+        check = P.numeric_union_check(self.TARGET, [r'x^2'])
+        self.assertEqual(check['status'], 'skipped')
+
+    def test_multi_variable_union_uses_random_sampling(self):
+        check = P.numeric_union_check(r'x - y \gt 0',
+                                      [r'x \gt y', r'x - y \gt 5'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+
+class TestCasesAssemble(unittest.TestCase):
+    TARGET = r'\frac{1}{x} \lt 2'
+    ENDPOINTS = [r'\frac{1}{2} \lt x', r'\frac{1}{2} \gt x']
+    HYPOTHESES = [r'x \gt 0', r'x \lt 0']
+
+    def test_assembles_the_union_of_cases(self):
+        # disjunct 1 restates its endpoint mirrored; disjunct 2 restates
+        # its hypothesis, because the endpoint x<1/2 outgrew the case
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['input'], self.TARGET)
+        self.assertEqual(r['check']['status'], 'agree')
+        sym, notation = P.parse_latex(r['result'])
+        head = notation.get(sym)
+        self.assertEqual(head.sym.name, Notation.O_LIST.name)
+        for item in head.args:
+            self.assertIsNotNone(notation.getf(item, Notation.COMP))
+
+    def test_raw_endpoints_are_refused_with_a_witness(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt \frac{1}{2}',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('does not hold at exactly the points', r['error'])
+        self.assertIn('hypothesis instead', r['error'])
+
+    def test_invented_disjunct_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt -1',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('neither the recorded endpoint', r['error'])
+
+    def test_non_strict_hypothesis_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, [r'x \gt 0', r'x \le 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('not a strict relation', r['error'])
+
+    def test_mirror_spelled_duplicate_disjuncts_are_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \lt 0 \lor 0 \gt x',
+            [r'\frac{1}{2} \gt x', r'\frac{1}{2} \gt x'],
+            [r'x \lt 0', r'x \lt 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('same relation', r['error'])
+
+    def test_foreign_variable_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor y \lt 0',
+            [r'\frac{1}{2} \lt x', r'y \lt 0'],
+            [r'x \gt 0', r'y \lt 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('names y', r['error'])
+
+    def test_single_disjunct_needs_no_assembly(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2}',
+            [self.ENDPOINTS[0]], [self.HYPOTHESES[0]])
+        self.assertFalse(r['ok'])
+        self.assertIn('needs no assembly', r['error'])
+
+    def test_case_count_must_match_the_disjuncts(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            [self.ENDPOINTS[0]], [self.HYPOTHESES[0]])
+        self.assertFalse(r['ok'])
+        self.assertIn('one recorded case per disjunct', r['error'])
+
+    def test_target_must_be_a_relation(self):
+        r = Equations.cases_assemble(
+            r'\frac{1}{x}', r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('stated relation', r['error'])
+
+    def test_sign_split_of_a_quadratic_inequality(self):
+        r = Equations.cases_assemble(
+            r'x^2 \gt 1', r'x \gt 1 \lor x \lt -1',
+            [r'x \gt 1', r'x \lt -1'], [r'x \gt 0', r'x \lt 0'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_same_relation_tolerates_only_true_mirrors(self):
+        self.assertTrue(Equations._same_relation(
+            r'x \gt \frac{1}{2}', r'\frac{1}{2} \lt x'))
+        self.assertTrue(Equations._same_relation(r'x \lt 0', r'0 \gt x'))
+        self.assertFalse(Equations._same_relation(
+            r'x \gt \frac{1}{2}', r'\frac{1}{2} \gt x'))
+        self.assertFalse(Equations._same_relation(r'x \lt 0', r'x \gt 0'))
+
+
+class TestLedgerPremises(unittest.TestCase):
+    """Inputs a session states rather than derives — where checking stops."""
+
+    def _washed(self):
+        # the live int1 shape: typed answers laundered into green steps by
+        # multiplying by 1 and canonicalizing
+        ledger = Ledger()
+        for equation in (r'A = -\frac{b}{(n-1)(a^2-b^2)}',
+                         r'B = \frac{a(2n-3)}{(n-1)(a^2-b^2)}'):
+            applied = ledger.record(
+                Core.apply_both_sides(equation, '*', '1'))
+            ledger.record(Core.expand(applied['result']))
+        return ledger
+
+    def test_a_derivation_reports_its_starting_point(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        self.assertEqual(ledger.premises(),
+                         [{'step': 's1', 'input': '(x+1)^2'}])
+
+    def test_a_continued_chain_adds_no_premise(self):
+        ledger = Ledger()
+        first = ledger.record(Core.apply_both_sides('2x+3 = 7', '-', '3'))
+        ledger.record(Core.expand(first['result']))
+        self.assertEqual([p['input'] for p in ledger.premises()],
+                         ['2x+3 = 7'])
+
+    def test_typed_assertions_surface_as_premises(self):
+        ledger = self._washed()
+        self.assertEqual([p['step'] for p in ledger.premises()],
+                         ['s1', 's3'])
+        self.assertIn('premises (stated, not derived here)', ledger.render())
+        self.assertIn(r'A = -\frac{b}{(n-1)(a^2-b^2)}', ledger.render())
+        self.assertIn('Rests on 2 stated premises',
+                      ledger.render_markdown())
+
+    def test_recorded_parts_of_a_result_are_derived_not_stated(self):
+        # linearity splits one object into pieces it records; working on a
+        # piece continues from recorded work even though no whole result
+        # equals that input
+        ledger = Ledger()
+        linearity = Integration.integrate_linearity(
+            r'\int (x^2 + x) \, dx', 'x')
+        ledger.record(linearity)
+        for piece in linearity['integrals']:
+            ledger.record(Integration.integrate_power_rule(piece, 'x'))
+        self.assertEqual([p['input'] for p in ledger.premises()],
+                         [r'\int (x^2 + x) \, dx'])
+
+    def test_the_same_given_is_stated_once(self):
+        ledger = Ledger()
+        ledger.record(Core.expand('(x+1)^2'))
+        ledger.record(Core.substitute('(x+1)^2', 'x', '1'))
+        self.assertEqual(len(ledger.premises()), 1)
+
+    def test_premises_can_be_restricted_to_the_selected_spine(self):
+        ledger = self._washed()
+        self.assertEqual([p['step'] for p in ledger.premises(['s3', 's4'])],
+                         ['s3'])
+        topology = ledger.presentation_topology()
+        self.assertEqual([p['step'] for p in topology['spine_premises']],
+                         ['s1', 's3'])
+
+    def test_query_only_and_empty_ledgers_have_no_premises(self):
+        self.assertEqual(Ledger().premises(), [])
+        ledger = Ledger()
+        ledger.record_comment('a note is not a premise')
+        self.assertEqual(ledger.premises(), [])
+
+
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = Core.expand('2 \\cdot x \\cdot (x+1)')
@@ -837,6 +1749,33 @@ class TestParsingEdges(unittest.TestCase):
         self.assertEqual(Core.evaluate('2*3*4')['result'], '24')
         self.assertEqual(Core.equal_exprs('a \\cdot b * c', 'c b a')['verdict'],
                          'yes')
+
+    def test_cdot_is_presentation_only_in_normal_forms(self):
+        # the explicit-\cdot P_LIST prop is display marking: structural
+        # identity must not split on it (live: it severed a verified
+        # int! chain), while the passive round trip keeps the dots
+        self.assertTrue(P.same_expression('a \\cdot b', 'a b'))
+        self.assertFalse(P.same_expression('a \\cdot b', 'a + b'))
+        sym, n = P.parse_latex('1 \\cdot 2')
+        self.assertIn('\\cdot', P.write_latex(sym, n))
+
+    def test_display_latex_prettifies_only_structural_product_stars(self):
+        cases = {
+            '3*x': '3 \\cdot x',
+            '2 * 3': '2 \\cdot 3',
+            '\\sin x*y': '\\sin x \\cdot y',
+            '\\lim_{x \\to 0} x*\\sin x':
+                '\\lim_{x \\to 0} x \\cdot \\sin x',
+            'a*b+\\ldots': 'a \\cdot b+\\ldots',
+        }
+        for source, expected in cases.items():
+            self.assertEqual(P.display_latex(source), expected, source)
+        self.assertEqual(P.display_latex('3x'), '3x')
+        self.assertEqual(P.display_latex('3 \\cdot x'), '3 \\cdot x')
+        # Invalid or non-mathematical star contexts fail closed.
+        for source in ('x**2', '\\text{a*b}',
+                       '\\begin{matrix*}a\\end{matrix*}', 'x\\*y'):
+            self.assertEqual(P.display_latex(source), source)
 
     def test_substitute_into_equation(self):
         r = Core.substitute('x^2 - 6x + 5 = 0', 'x', '5')
@@ -936,6 +1875,56 @@ class TestIntegration(unittest.TestCase):
     def test_table_mixed_sum(self):
         self.ok(Integration.integrate_table('x + \\sin x', 'x'))
 
+    def test_table_arctan_unit(self):
+        r = self.ok(Integration.integrate_table('\\frac{1}{1+v^2}', 'v'))
+        self.assertEqual(r['result'], '\\arctan\\left(v\\right) + C')
+
+    def test_table_arctan_scaled(self):
+        # completed-square residue from the live Weierstrass run
+        r = self.ok(Integration.integrate_table(
+            '\\frac{1}{3 w^2 + \\frac{5}{3}}', 'w'))
+        self.assertIn('\\arctan', r['result'])
+
+    def test_table_arctan_constant_numerator_peel(self):
+        # numerator outside the rational fragment, denominator in it:
+        # the constant peels and the reciprocal reaches the arctan rule
+        r = self.ok(Integration.integrate_table(
+            '\\frac{\\sqrt{5}}{5 (z^2 + 1)}', 'z'))
+        self.assertIn('\\arctan', r['result'])
+
+    def test_table_arctan_denominator_constant_factor_split(self):
+        # var-free irrational factor inside the denominator (second live
+        # route): \sqrt{5}(v^2+1) splits so the variable core reaches the
+        # arctan rule; the whole product spelling closes too
+        r = self.ok(Integration.integrate_table(
+            '\\frac{1}{\\sqrt{5} (v^2 + 1)}', 'v'))
+        self.assertIn('\\arctan', r['result'])
+        r2 = self.ok(Integration.integrate_table(
+            '\\frac{1}{\\sqrt{5}} \\cdot \\frac{1}{v^2 + 1}', 'v'))
+        self.assertIn('\\arctan', r2['result'])
+
+    def test_table_quadratic_linear_term_steers_to_square(self):
+        r = Integration.integrate_table('\\frac{1}{3 u^2 + 2 u + 2}', 'u')
+        self.assertFalse(r['ok'])
+        self.assertIn('complete the square', r['error'])
+
+    def test_table_negative_shift_no_arctan(self):
+        # x^2 - 1 is not the arctan family (b < 0) and must not steer
+        # to completing the square either
+        r = Integration.integrate_table('\\frac{1}{x^2-1}', 'x')
+        self.assertFalse(r['ok'])
+        self.assertNotIn('complete the square', r['error'])
+
+    def test_table_irrational_constant_integrand(self):
+        # \frac{\sqrt{5}}{5} is var-free but outside the rational
+        # fragment; a constant integrates to c v regardless of spelling
+        r = self.ok(Integration.integrate_table('\\frac{\\sqrt{5}}{5}', 'v'))
+        self.assertEqual(r['result'], '\\frac {\\sqrt{5}} {5} v + C')
+
+    def test_table_sum_constant_integrand(self):
+        r = self.ok(Integration.integrate_table('1 + \\sqrt{2}', 'v'))
+        self.assertIn('v + C', r['result'])
+
     def test_table_refuses_product(self):
         r = Integration.integrate_table('x \\sin x', 'x')
         self.assertFalse(r['ok'])
@@ -1026,6 +2015,18 @@ class TestIntegration(unittest.TestCase):
         self.assertIn('# Verified derivation', md)
         self.assertIn('assumptions', md)
         self.assertIn('\\Longrightarrow', md)
+
+    def test_markdown_render_prettifies_star_without_mutating_ledger(self):
+        ledger = Ledger()
+        step = ledger.record(
+            Differentiation.differentiate('x^3 - 3*x', 'x'))
+        stored_hash = step['hash']
+        md = ledger.render_markdown()
+        self.assertIn('x^3 - 3 \\cdot x', md)
+        self.assertNotIn('3*x', md)
+        self.assertEqual(step['input'], 'x^3 - 3*x')
+        self.assertEqual(step['hash'], stored_hash)
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 class TestEqual(unittest.TestCase):
@@ -1605,6 +2606,29 @@ class TestLedger(unittest.TestCase):
         ledger.save()
         self.assertEqual(len(Ledger(path).assumptions), 1)
 
+    def test_disagreeing_result_is_not_recorded(self):
+        # admission mirrors replay: replay hard-fails a disagree check,
+        # so record refuses it up front instead of poisoning the session
+        ledger = Ledger(os.path.join(tempfile.mkdtemp(), 'session.json'))
+        bad = dict(Core.expand('(x+1)^2'))
+        bad['check'] = {'status': 'disagree'}
+        with self.assertRaises(ValueError):
+            ledger.record(bad)
+        self.assertEqual(len(ledger.steps), 0)
+
+    def test_sourceless_provenance_step_is_not_recorded(self):
+        # the explicit-value squeeze form sets no sources while its
+        # replay validator demands them; record must refuse, not defer
+        # the failure to replay
+        ledger = Ledger(os.path.join(tempfile.mkdtemp(), 'session.json'))
+        rec = Limits.limit_squeeze(
+            '\\lim_{x \\to 0} x^2 \\sin{\\frac{1}{x}}',
+            '(-x^2)', 'x^2', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        with self.assertRaises(ValueError):
+            ledger.record(rec)
+        self.assertEqual(len(ledger.steps), 0)
+
     def test_relation_system_step_replays(self):
         path = os.path.join(tempfile.mkdtemp(), 'system.json')
         ledger = Ledger(path)
@@ -1664,6 +2688,48 @@ class TestGoalAwareLedger(unittest.TestCase):
         step = ledger.record(Core.expand('x = 2'), goal=claim['id'])
         with self.assertRaisesRegex(ValueError, 'does not close claim'):
             ledger.conclude(claim['id'], [step['id']])
+
+    def _answer_chain(self, ledger, claim):
+        first = ledger.record(Core.apply_both_sides('2A = 1', '/', '2'),
+                              goal=claim['id'])
+        second = ledger.record(Core.expand(first['result']),
+                               goal=claim['id'])
+        return [first['id'], second['id']]
+
+    def test_answer_shaped_claim_closes_conditional_on_its_premise(self):
+        # "A = 1/2" states what an unknown IS: no standalone check can
+        # decide it, but the checked chain from 2A = 1 does establish it
+        ledger = Ledger()
+        claim = ledger.record_claim(r'A = \frac{1}{2}')
+        closed = ledger.conclude(claim['id'],
+                                 self._answer_chain(ledger, claim))
+        self.assertEqual(closed['verdict'], 'conditional')
+        self.assertEqual(closed['conclusion']['closure'],
+                         'derived-from-premise')
+        self.assertEqual(closed['conclusion']['premise'], '2A = 1')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        self.assertIn('given 2A = 1', ledger.render())
+        self.assertIn('stated premise', ledger.render_markdown())
+
+    def test_premise_closure_is_replay_checked(self):
+        ledger = Ledger()
+        claim = ledger.record_claim(r'A = \frac{1}{2}')
+        ledger.conclude(claim['id'], self._answer_chain(ledger, claim))
+        claim['conclusion']['premise'] = '3A = 1'
+        replay = ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('conclusion mismatch', replay['reason'])
+
+    def test_a_claim_is_never_derived_from_a_false_premise(self):
+        ledger = Ledger()
+        claim = ledger.record_claim('0 = 1')
+        first = ledger.record(Core.apply_both_sides('2 = 3', '-', '2'),
+                              goal=claim['id'])
+        second = ledger.record(Core.expand(first['result']),
+                               goal=claim['id'])
+        with self.assertRaisesRegex(ValueError, 'which is false'):
+            ledger.conclude(claim['id'], [first['id'], second['id']])
+        self.assertEqual(claim['verdict'], 'open')
 
     def test_true_relation_endpoint_can_close_identity(self):
         ledger = Ledger()
@@ -1813,6 +2879,142 @@ class TestAbsoluteValue(unittest.TestCase):
         # the numeric leg alone must see |.|, independent of the symbolic path
         c = P.numeric_spot_check('|x|', 'x')
         self.assertEqual(c['status'], 'disagree')
+
+
+class TestBareAbsBars(unittest.TestCase):
+    # Bare `|...|` used to parse only around a single scalar, so a live agent
+    # proposing \sqrt{|\cos 1/x|} got a syntax error. The grammar cannot fix
+    # this (| is its own opener and closer: a wider rule puts the LALR
+    # machine in a shift/reduce conflict at every middle bar), so bar pairs
+    # are matched by a scanner at the shared parse boundary.
+
+    def test_composite_bodies_parse(self):
+        for latex in ('|x+1|', '|2x|', '|\\cos x|', '|-x|',
+                      '\\sqrt{|\\cos\\frac{1}{x}|}', '|x+1|^2'):
+            with self.subTest(latex=latex):
+                sym, notation = P.parse_latex(latex)
+                self.assertIsNotNone(sym)
+
+    def test_lowered_bars_build_the_same_node_as_a_bare_scalar(self):
+        self.assertEqual(P.write_latex(*P.parse_latex('|x+1|')), '|x+1|')
+        self.assertEqual(Core.equal_exprs('|x+1|', 'x+1')['verdict'], 'no')
+
+    def test_adjacent_bar_pairs_stay_a_product(self):
+        # |a|b|c| is |a| b |c| — bars pair left to right, the human reading
+        self.assertEqual(Core.equal_exprs('|x||y|', '|x| \\cdot |y|')['verdict'],
+                         'yes')
+        self.assertEqual(Core.equal_exprs('|a|b|c|', '|a| \\cdot b \\cdot |c|')
+                         ['verdict'], 'yes')
+
+    def test_vert_spellings_are_the_same_operator(self):
+        for latex in ('\\lvert x+1 \\rvert', '\\vert x+1 \\vert',
+                      '\\left\\lvert x+1\\right\\rvert'):
+            with self.subTest(latex=latex):
+                self.assertEqual(
+                    Core.equal_exprs(latex, '|x+1|')['verdict'], 'yes')
+
+    def test_set_builder_separator_is_not_an_abs_bar(self):
+        # the retained \{x | P\} spelling keeps its condition separator even
+        # when the condition itself contains absolute values
+        sym, notation = P.parse_latex('\\{x | x \\gt |a|\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.S_GROUP))
+
+    def test_collection_literals_still_parse(self):
+        sym, notation = P.parse_latex('\\{(-1,2),(1,-2)\\}')
+        self.assertIsNotNone(notation.getf(sym, Notation.COLLECTION))
+
+    def test_commands_that_name_their_own_delimiters_keep_them(self):
+        # \abovewithdelims names a delimiter PAIR; pairing its bars as an
+        # absolute value would swallow the command's arguments
+        for latex in ('a \\abovewithdelims || 2pt b',
+                      'a \\atopwithdelims .| b'):
+            with self.subTest(latex=latex):
+                sym, notation = P.parse_latex(latex)
+                self.assertIsNotNone(sym)
+
+    def test_prose_arguments_are_not_scanned_for_bars(self):
+        from LatexParser import _lower_bare_abs
+        self.assertEqual(_lower_bare_abs('\\text{a|b|c}'), '\\text{a|b|c}')
+        self.assertEqual(_lower_bare_abs('\\left|x\\right|'),
+                         '\\left|x\\right|')
+
+
+class TestFloorAndCeiling(unittest.TestCase):
+    # \lfloor / \lceil used to lex as ordinary letters, so the delimiters
+    # became free variables in BOTH trust legs: expand('\lfloor x+1 \rfloor')
+    # returned the mangled '\lfloor x+ \rfloor' with a green oracle check.
+    # They are bracket operators now, exactly like |...| since gen 12.
+
+    def test_floor_is_not_its_argument(self):
+        self.assertEqual(Core.equal_exprs('\\lfloor x \\rfloor', 'x')
+                         ['verdict'], 'no')
+        self.assertEqual(Core.equal_exprs('\\lceil x \\rceil', 'x')
+                         ['verdict'], 'no')
+
+    def test_expand_keeps_the_bracket_whole(self):
+        for latex, expected in (
+                ('\\lfloor x+1 \\rfloor', '\\lfloor x+1 \\rfloor'),
+                ('\\lfloor 2x \\rfloor', '\\lfloor 2x \\rfloor'),
+                ('\\lceil x+1 \\rceil', '\\lceil x+1 \\rceil')):
+            with self.subTest(latex=latex):
+                r = Core.expand(latex)
+                self.assertTrue(r['ok'])
+                self.assertEqual(r['result'], expected)
+                self.assertEqual(r['check']['status'], 'agree')
+
+    def test_like_bracket_terms_collect_over_atoms(self):
+        r = Core.expand('\\lfloor x \\rfloor + 2\\lfloor x \\rfloor')
+        self.assertEqual(r['result'], '3 \\lfloor x \\rfloor')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_floor_and_ceiling_are_distinct_atoms(self):
+        r = Core.expand('\\lfloor x \\rfloor + \\lceil x \\rceil')
+        self.assertTrue(r['ok'])
+        self.assertEqual(Core.equal_exprs('\\lfloor x \\rfloor',
+                                          '\\lceil x \\rceil')['verdict'], 'no')
+
+    def test_oracle_computes_real_floor_and_ceiling(self):
+        # true identities the independent leg must confirm
+        self.assertEqual(
+            Core.equal_exprs('\\lfloor x+1 \\rfloor',
+                             '\\lfloor x \\rfloor + 1')['verdict'], 'yes')
+        self.assertEqual(
+            Core.equal_exprs('\\lceil -x \\rceil',
+                             '-\\lfloor x \\rfloor')['verdict'], 'yes')
+        # and a false one it must refuse
+        self.assertEqual(
+            Core.equal_exprs('\\lfloor x \\rfloor + \\lceil x \\rceil',
+                             '2x')['verdict'], 'no')
+
+    def test_evaluate_constant_floor_and_ceiling(self):
+        self.assertEqual(float(Core.evaluate('\\lfloor 2.7 \\rfloor')['result']),
+                         2.0)
+        self.assertEqual(float(Core.evaluate('\\lceil 2.1 \\rceil')['result']),
+                         3.0)
+
+    def test_differentiate_refuses_by_name(self):
+        r = Differentiation.differentiate('\\lfloor x \\rfloor', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('floor', r['error'])
+        r = Differentiation.differentiate('\\lceil x \\rceil', 'x')
+        self.assertFalse(r['ok'])
+        self.assertIn('ceiling', r['error'])
+
+    def test_sized_delimiters_are_the_same_operator(self):
+        self.assertEqual(
+            Core.equal_exprs('\\left\\lfloor x \\right\\rfloor',
+                             '\\lfloor x \\rfloor')['verdict'], 'yes')
+        self.assertEqual(
+            Core.equal_exprs('\\left\\lceil x \\right\\rceil', 'x')['verdict'],
+            'no')
+
+    def test_presentation_round_trip_is_stable(self):
+        for latex in ('\\lfloor x \\rfloor', '\\lceil\\frac {x} {2}\\rceil',
+                      '\\lfloor x \\rfloor^{2}', '|x+1|'):
+            with self.subTest(latex=latex):
+                once = P.write_latex(*P.parse_latex(latex))
+                twice = P.write_latex(*P.parse_latex(once))
+                self.assertEqual(once, twice)
 
 
 class TestBigOperatorScoping(unittest.TestCase):
@@ -3439,6 +4641,84 @@ class TestLimitSqueeze(unittest.TestCase):
         self.assertFalse(rec['ok'])
 
 
+OSC_ROOT = '\\lim_{x \\to 0} x \\sqrt{\\cos\\frac{1}{x}}'
+
+
+class TestApproachOracleKinkedBodies(unittest.TestCase):
+    # The finite-point approach oracle extrapolates over a geometric
+    # h-ladder with Aitken acceleration, so |x|-kinked continuous bodies
+    # converge (the smooth Richardson model alone skipped every sample).
+
+    def test_abs_body_substitutes(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} (|x|)')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_negative_abs_body_substitutes(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} (-|x|)')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_two_sided_abs_squeeze_closes_oscillating_root(self):
+        # the live-run bounds: -|x| <= x sqrt(cos(1/x)) <= |x|
+        rec = Limits.limit_squeeze(OSC_ROOT, '(-|x|)', '(|x|)', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+
+    def test_signed_bounds_still_refused_two_sided(self):
+        # the flipping bounds -x <= body <= x are genuinely wrong for x < 0
+        rec = Limits.limit_squeeze(OSC_ROOT, '(-x)', 'x', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('ordering', rec['error'])
+
+    def test_oscillating_body_still_refuses(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} \\sin\\frac{1}{x}')
+        self.assertFalse(rec['ok'])
+
+    def test_leading_minus_body_names_the_repair(self):
+        rec = Limits.limit_substitute('\\lim_{x \\to 0} -x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('parenthesize', rec['error'])
+
+
+class TestLimitFromSides(unittest.TestCase):
+    # The core tactic validates the two-sided target and the value; the
+    # recorded one-sided premises are enforced by the registry handlers
+    # (session-required) and re-validated by replay provenance — a
+    # source-less step fails replay, mirroring limit_squeeze.
+
+    def test_two_sided_from_agreeing_sides(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('^{-}', rec['left'])
+        self.assertIn('^{+}', rec['right'])
+
+    def test_one_sided_target_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0^+} x', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('two-sided', rec['error'])
+
+    def test_value_with_bound_variable_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_contradicted_value_refused(self):
+        rec = Limits.limit_from_sides('\\lim_{x \\to 0} x^2', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('contradicts', rec['error'])
+
+    def test_unconverged_oracle_defers_to_premises(self):
+        # sampling cannot converge on this oscillating (true) limit; the
+        # record is exact-by-theorem and only the registry handlers
+        # (recorded premises) can admit it
+        rec = Limits.limit_from_sides(
+            '\\lim_{x \\to 0} x \\sin\\frac{1}{x}', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'exact')
+
+
 class TestEllipsisClaim(unittest.TestCase):
     def test_ellipsis_claim_records_and_closes_conditionally(self):
         ledger = Ledger()
@@ -3837,6 +5117,210 @@ class TestApplyMatrixArguments(unittest.TestCase):
         rec = Core.apply_both_sides('x = y', '^', A_LIT)
         self.assertFalse(rec['ok'])
         self.assertIn('matrix-valued', rec['error'])
+
+
+class TestConstrainedOracle(unittest.TestCase):
+    """The oracle samples only inside a stated region."""
+
+    POSITIVE = [{'text': 'x \\gt 0', 'constraint': 'x \\gt 0'}]
+
+    def test_spot_check_agrees_only_under_the_hypothesis(self):
+        self.assertEqual(
+            P.numeric_spot_check('\\sqrt{x^2}', 'x')['status'], 'disagree')
+        self.assertEqual(
+            P.numeric_spot_check('\\sqrt{x^2}', 'x',
+                                 assumptions=self.POSITIVE)['status'],
+            'agree')
+
+    def test_region_without_interior_is_skipped_not_agreed(self):
+        both = self.POSITIVE + [{'text': 'x \\lt 0',
+                                 'constraint': 'x \\lt 0'}]
+        check = P.numeric_spot_check('\\sqrt{x^2}', 'x', assumptions=both)
+        self.assertEqual(check['status'], 'skipped')
+
+    def test_hypothesis_variables_are_sampled_too(self):
+        # a hypothesis about a variable the compared sides never mention
+        # must not reject every point
+        check = P.numeric_spot_check('y + y', '2y',
+                                     assumptions=self.POSITIVE)
+        self.assertEqual(check['status'], 'agree')
+
+    def test_relation_check_sees_a_wrong_flip(self):
+        kept = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\lt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\gt 0'}])
+        self.assertEqual(kept['status'], 'agree')
+        flipped = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\gt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\gt 0'}])
+        self.assertEqual(flipped['status'], 'disagree')
+        # ... and the same flip is right on the other side of zero
+        negative = P.numeric_relation_check(
+            'a x \\lt b', '\\frac{ax}{a} \\gt \\frac{b}{a}',
+            assumptions=[{'constraint': 'a \\lt 0'}])
+        self.assertEqual(negative['status'], 'agree')
+
+    def test_relation_check_needs_two_relations(self):
+        self.assertEqual(
+            P.numeric_relation_check('x + 1', 'x + 1')['status'], 'skipped')
+
+    def test_exclusive_hypotheses_recognises_a_sign_split(self):
+        split = [{'text': 'x \\gt 0', 'constraint': 'x \\gt 0'},
+                 {'text': 'x \\lt 0', 'constraint': 'x \\lt 0'}]
+        self.assertEqual(P.exclusive_hypotheses(split), [(0, 1)])
+        crossed = [{'constraint': 'x \\gt 0'}, {'constraint': '0 \\gt x'}]
+        self.assertEqual(P.exclusive_hypotheses(crossed), [(0, 1)])
+        compatible = [{'constraint': 'x \\gt 0'}, {'constraint': 'y \\lt 0'}]
+        self.assertEqual(P.exclusive_hypotheses(compatible), [])
+        # a side condition is not a hypothesis
+        self.assertEqual(
+            P.exclusive_hypotheses([{'text': 'a \\ne 0', 'nonzero': 'a'}]),
+            [])
+
+
+class TestApplyUnderHypothesis(unittest.TestCase):
+    """Sign case splits: the agent states the case, the tactic records it."""
+
+    def test_unknown_sign_refusal_names_the_available_move(self):
+        rec = Core.apply_both_sides('a x \\lt b', '/', 'a')
+        self.assertFalse(rec['ok'])
+        self.assertIn('assuming', rec['error'])
+        self.assertIn('a > 0', rec['error'])
+
+    def test_positive_case_keeps_and_negative_case_flips(self):
+        positive = Core.apply_both_sides('a x \\lt b', '/', 'a',
+                                         assuming='a > 0')
+        self.assertTrue(positive['ok'], positive.get('error'))
+        self.assertIn('\\lt', positive['result'])
+        self.assertEqual(positive['check']['status'], 'agree')
+        self.assertEqual([a['text'] for a in positive['assumptions']],
+                         ['a \\gt 0'])
+        self.assertEqual(positive['args']['assuming'], 'a > 0')
+        negative = Core.apply_both_sides('a x \\lt b', '/', 'a',
+                                         assuming='a < 0')
+        self.assertTrue(negative['ok'], negative.get('error'))
+        self.assertIn('\\gt', negative['result'])
+        self.assertEqual(negative['check']['status'], 'agree')
+
+    def test_hypothesis_about_another_expression_does_not_pin_the_sign(self):
+        rec = Core.apply_both_sides('a x \\lt b', '/', 'a', assuming='x > 0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown sign', rec['error'])
+
+    def test_rearranged_hypothesis_pins_the_factor(self):
+        rec = Core.apply_both_sides('a \\lt b', '*', 'x-3', assuming='x > 3')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\lt', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_hypothesis_contradicting_a_literal_is_refused(self):
+        rec = Core.apply_both_sides('x \\lt b', '*', '2', assuming='2 < 0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('contradicts', rec['error'])
+
+    def test_unsatisfiable_hypothesis_cannot_read_as_checked(self):
+        rec = Core.apply_both_sides('a x \\lt b', '*', 'x^2',
+                                    assuming='x^2 < 0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'skipped')
+
+    def test_only_strict_hypotheses_are_accepted(self):
+        for bad, needle in ((r'a \ge 0', 'strict'), ('a = 1', 'strict'),
+                            ('a', 'must be a relation')):
+            rec = Core.apply_both_sides('a x \\lt b', '/', 'a', assuming=bad)
+            self.assertFalse(rec['ok'], bad)
+            self.assertIn(needle, rec['error'])
+
+    def test_strict_hypothesis_replaces_the_nonzero_side_condition(self):
+        rec = Core.apply_both_sides('x = y', '*', 'z', assuming='z > 0')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertEqual(texts, ['z \\gt 0'])
+
+    def test_equation_case_workflow_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'cases.json')
+            book = Ledger(path)
+            first = Core.apply_both_sides('\\frac{1}{x} \\lt 2', '*', 'x',
+                                          assuming='x > 0')
+            book.record(first)
+            book.record(Core.expand(first['result']))
+            second = Core.apply_both_sides('\\frac{1}{x} \\lt 2', '*', 'x',
+                                           assuming='x < 0')
+            book.record(second)
+            book.record(Core.expand(second['result']))
+            book.save()
+            self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+
+class TestEqualUnderHypothesis(unittest.TestCase):
+    def test_domain_mismatch_steers_to_the_restricted_question(self):
+        rec = Core.equal_exprs('\\ln(x^2)', '2\\ln x')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertIn('assuming', rec['note'])
+
+    def test_restricted_yes_carries_its_condition(self):
+        rec = Core.equal_exprs('\\ln(x^2)', '2\\ln x', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertIn('under the stated assumptions', rec['method'])
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['x \\gt 0'])
+
+    def test_several_hypotheses_may_be_comma_separated(self):
+        rec = Core.equal_exprs('\\ln(xy)', '\\ln x + \\ln y',
+                               assuming='x > 0, y > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertEqual(len(rec['assumptions']), 2)
+
+    def test_a_restricted_no_is_still_a_no(self):
+        rec = Core.equal_exprs('\\sqrt{x^2}', 'x', assuming='x < 0')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertIn('counterexample', rec)
+
+    def test_unconditional_verdicts_stay_unconditional(self):
+        rec = Core.equal_exprs('x', 'x + 1', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'no')
+        self.assertEqual(rec['method'], 'canonical')
+        self.assertNotIn('assumptions', rec)
+
+    def test_relation_sides_inherit_the_hypothesis(self):
+        rec = Core.equal_exprs('\\sqrt{x^2} = 3', 'x = 3', assuming='x > 0')
+        self.assertEqual(rec['verdict'], 'yes')
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['x \\gt 0'])
+
+
+class TestAlternativeCasesInTheLedger(unittest.TestCase):
+    def _two_case_ledger(self):
+        # one connected chain whose two steps were recorded under opposite
+        # sign hypotheses: individually checked, jointly worth nothing
+        first = Core.apply_both_sides('x = x', '*', 'y', assuming='y > 0')
+        second = Core.apply_both_sides(first['result'], '+', '1',
+                                       assuming='y < 0')
+        book = Ledger()
+        claim = book.record_claim(second['result'])
+        book.record(first, goal=claim['id'])
+        book.record(second, goal=claim['id'])
+        return book, claim
+
+    def test_conclusion_refuses_mutually_exclusive_hypotheses(self):
+        book, claim = self._two_case_ledger()
+        with self.assertRaises(ValueError) as caught:
+            book.conclude(claim['id'], ['s1', 's2'])
+        self.assertIn('mutually exclusive', str(caught.exception))
+
+    def test_markdown_never_conjoins_alternative_cases(self):
+        book, _ = self._two_case_ledger()
+        out = book.render_markdown()
+        self.assertIn('Alternative case hypotheses', out)
+        head = out.split('**s1**')[0]
+        self.assertNotIn('Valid under the assumptions', head)
+
+    def test_compatible_assumptions_still_render_as_one_condition(self):
+        book = Ledger()
+        book.record(Core.apply_both_sides('x = y', '*', 'z'))
+        out = book.render_markdown()
+        self.assertIn('Valid under the assumptions', out)
+        self.assertNotIn('Alternative case', out)
 
 
 if __name__ == '__main__':

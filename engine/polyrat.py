@@ -468,10 +468,10 @@ def to_ratfunc(sym, notation):
         return RatFunc(Poly.var(sym.name))
     name = f.sym.name
     if f.sym in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP):
-        if f.props.get('br') == '||':
-            # absolute value is not a transparent bracket: |x| != x. Leave
-            # the fragment so the atom layer keeps it opaque.
-            raise NotInFragment('absolute value')
+        if Notation.is_semantic_bracket(f):
+            # |x|, floor and ceiling are bracket operators, not transparent
+            # brackets. Leave the fragment so the atom layer keeps them opaque.
+            raise NotInFragment(Notation.BRACKET_NAMES[f.props['br']])
         return to_ratfunc(f.args[0], notation)
     if f.sym == Notation.MINUS:
         return -to_ratfunc(f.args[0], notation)

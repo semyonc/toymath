@@ -108,9 +108,14 @@ class TestTacticRegistry(unittest.TestCase):
         limits = tactic_skills.render('limits')
         self.assertIn('limit_squeeze EXPR LOWER UPPER LOWER_STEP UPPER_STEP',
                       limits)
+        self.assertIn('limit_from_sides EXPR LEFT_STEP RIGHT_STEP', limits)
         self.assertNotIn('integrate_by_parts EXPR', limits)
         equations = tactic_skills.render('equations')
         self.assertIn('quadratic_roots EXPR VAR', equations)
+        self.assertIn('points_assemble EXPR VAR ROOTS_STEP STEP...',
+                      equations)
+        self.assertIn('system_assemble TARGET STEP...', equations)
+        self.assertIn('cases_assemble TARGET UNION STEP...', equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
     def test_existing_cli_shapes_are_preserved(self):
@@ -132,10 +137,124 @@ class TestTacticRegistry(unittest.TestCase):
         roots = parser.parse_args(['quadratic_roots', 'x^2-1', 'x'])
         self.assertEqual((roots.cmd, roots.expr, roots.var),
                          ('quadratic_roots', 'x^2-1', 'x'))
+        points = parser.parse_args([
+            'points_assemble', 'x^3-3x', 'x', 's2', 's5', 's6'])
+        self.assertEqual((points.cmd, points.roots_step, points.value_steps),
+                         ('points_assemble', 's2', ['s5', 's6']))
+        sides = parser.parse_args([
+            'limit_from_sides', 'L', 's6', 's3'])
+        self.assertEqual((sides.cmd, sides.left_step, sides.right_step),
+                         ('limit_from_sides', 's6', 's3'))
         branch = parser.parse_args([
             'branch', 's2', 'try another route', '--session', 'work.json'])
         self.assertEqual((branch.cmd, branch.from_step, branch.reason),
                          ('branch', 's2', 'try another route'))
+
+    def test_cli_points_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core, differentiation, equations
+
+        path = os.path.join(tempfile.mkdtemp(), 'points.json')
+        ledger = Ledger(path)
+        ledger.record(differentiation.differentiate('x^3-3x', 'x'))
+        ledger.record(equations.quadratic_roots('3x^{2}-3', 'x'))
+        for value in ('(-1)^{3}-3(-1)', '(1)^{3}-3(1)'):
+            ledger.record(core.evaluate(value))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'points_assemble', 'x^3-3x', 'x', 's2', 's3', 's4',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(rec['sources'],
+                         {'roots': 's2', 'values': ['s3', 's4']})
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_system_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'system.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('x+2-2 = 6-2'))
+        ledger.record(core.expand('y+1-1 = 3-1'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'system_assemble', 'x+y=6, x-y=2', 's1', 's2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], 'x=4,y=2')
+        self.assertEqual(rec['sources'], {'assignments': ['s1', 's2']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_cases_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'cases.json')
+        ledger = Ledger(path)
+        target = r'\frac{1}{x} \lt 2'
+        for hypothesis in (r'x \gt 0', r'x \lt 0'):
+            applied = core.apply_both_sides(target, '*', 'x',
+                                            assuming=hypothesis)
+            ledger.record(applied)
+            cleared = core.expand(applied['result'])
+            ledger.record(cleared)
+            halved = core.apply_both_sides(cleared['result'], '/', '2')
+            ledger.record(halved)
+            ledger.record(core.expand(halved['result']))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'cases_assemble', target,
+                r'x \gt \frac{1}{2} \lor x \lt 0', 's4', 's8',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {'cases': ['s4', 's8']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_cases_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'cases_assemble', r'\frac{1}{x} \lt 2',
+                r'x \gt \frac{1}{2} \lor x \lt 0', 's4', 's8'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
+
+    def test_cli_system_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main(['system_assemble', 'x+y=6', 's1', 's2'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
+
+    def test_cli_points_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'points_assemble', 'x^3-3x', 'x', 's2', 's3', 's4'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
 
     def test_cli_branch_records_and_replays_marker(self):
         from ledger import Ledger
@@ -183,6 +302,23 @@ class TestTacticRegistry(unittest.TestCase):
             toymath_cli.main(['show', '--session', path])
         self.assertIn('OPEN r1#', shown.getvalue())
 
+    def test_cli_squeeze_session_refuses_sourceless_record(self):
+        # the CLI explicit-value squeeze cannot carry step provenance;
+        # recording it would produce a session that fails replay, so the
+        # ledger refuses at admission and no session file is written
+        path = os.path.join(tempfile.mkdtemp(), 'squeeze.json')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'limit_squeeze',
+                '\\lim_{x \\to 0} x^2 \\sin{\\frac{1}{x}}',
+                '(-x^2)', 'x^2', '0', '--session', path])
+        self.assertEqual(code, 1)
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('provenance', rec['error'])
+        self.assertFalse(os.path.exists(path))
+
     def test_cli_markdown_show_uses_persisted_selection_to_fold_path(self):
         from ledger import Ledger
         from tactics import core
@@ -229,6 +365,48 @@ class TestTacticRegistry(unittest.TestCase):
             'direction': 'forward'})
         self.assertTrue(legacy['ok'])
         self.assertEqual(legacy['result'], '(x+2)(x-2)')
+
+    def test_case_hypothesis_flows_through_agent_cli_and_replay(self):
+        session = agent_do.DoSession()
+        record = tactic_registry.invoke_agent(
+            'apply', ['a x \\lt b', '/', 'a', 'a > 0'], session)
+        self.assertTrue(record['ok'], record.get('error'))
+        self.assertIn('\\lt', record['result'])
+        replayed = tactic_registry.replay(record['op'], record['args'])
+        self.assertEqual(replayed['result'], record['result'])
+        # records from before the hypothesis argument replay unchanged
+        legacy = tactic_registry.replay('apply_both_sides', {
+            'equation': '2x = 4', 'op': '/', 'arg': '2'})
+        self.assertTrue(legacy['ok'])
+        self.assertEqual(legacy['result'], '\\frac{2x}{2} = \\frac{4}{2}')
+
+    def test_omitted_optional_argument_may_arrive_as_a_null(self):
+        session = agent_do.DoSession()
+        record = tactic_registry.invoke_agent(
+            'apply', ['2x = 4', '/', '2', None], session)
+        self.assertTrue(record['ok'], record.get('error'))
+        self.assertNotIn('assuming', record['args'])
+
+    def test_cli_accepts_the_hypothesis_option(self):
+        from ledger import Ledger
+
+        def run(*argv):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                toymath_cli.main(list(argv))
+            return json.loads(output.getvalue())
+
+        path = os.path.join(tempfile.mkdtemp(), 'cases.json')
+        rec = run('apply', 'a x \\lt b', '/', 'a',
+                  '--assuming', 'a < 0', '--session', path)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\gt', rec['result'])
+        self.assertEqual([a['text'] for a in rec['assumptions']],
+                         ['a \\lt 0'])
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+        verdict = run('equal', '\\sqrt{x^2}', 'x', '--assuming', 'x > 0')
+        self.assertEqual(verdict['verdict'], 'yes')
+        self.assertIn('under the stated assumptions', verdict['method'])
 
 
 if __name__ == '__main__':

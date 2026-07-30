@@ -7,6 +7,8 @@ import re
 from fractions import Fraction
 from itertools import combinations
 
+from frac_utils import is_frac, get_denominator
+from LatexParser import MathParser
 from notation import Notation, Symbol, Func
 from value import Value, IntegerValue, FracValue, FloatValue
 from replicator import Replicator
@@ -23,8 +25,8 @@ from primitives import (
     _write_std, _GroupStripper, _big_operator_name, _bound_symbols,
     _contains_free_infinity, _subscript_var, free_symbols,
     _num_agree, numeric_eval, _func_power, _func_arg_span, _sample_point,
-    numeric_spot_check, Substitutor, _result, _error, _paren, _is_sum_str,
-    same_expression,
+    numeric_spot_check, numeric_relation_check, Substitutor, _result, _error,
+    _paren, _is_sum_str, same_expression,
 )
 
 # ---------------------------------------------------------------------------
@@ -62,7 +64,7 @@ def _frac_power_var(sym, f, notation):
     base = f.args[0]
     while True:
         g = notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         base = g.args[0]
     sub_l, sup_l, power, sub_r = f.args[1]
@@ -205,7 +207,7 @@ class _PuiseuxOut(Replicator):
         base = f.args[0]
         while True:
             g = self.notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
-            if g is None or g.props.get('br') == '||':
+            if g is None or Notation.is_semantic_bracket(g):
                 break
             base = g.args[0]
         sub_l, sup_l, power, sub_r = f.args[1]
@@ -305,7 +307,7 @@ def _is_zero_term(term, notation):
             term = f.args[0]
             continue
         if f.sym in (Notation.GROUP, Notation.V_GROUP):
-            if f.props.get('br') == '||':
+            if Notation.is_semantic_bracket(f):
                 return False
             term = f.args[0]
             continue
@@ -484,7 +486,113 @@ def _needs_parens_factor(sym, notation):
                                 Notation.PLUS]) is not None
 
 
-def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
+# ---------------------------------------------------------------------------
+# stated case hypotheses ("assuming")
+# ---------------------------------------------------------------------------
+
+# Only strict hypotheses are accepted. `x \ge 0` together with `x \le 0`
+# would name a region with no interior, where the oracle can never sample
+# and where two canonically distinct expressions may still agree — the
+# assumed region must be somewhere the checks can actually live.
+_CONSTRAINT_REL = {'<', '\\lt', '>', '\\gt', '\\ne', '\\neq'}
+_STRICT_CONSTRAINT_REL = {'<', '\\lt', '>', '\\gt'}
+
+
+def _assumption_records(assuming):
+    """Turn an agent-stated hypothesis into assumption records the oracle
+    samples under. Several hypotheses may be comma-separated. Returns
+    (records, error); the hypothesis is recorded, never established."""
+    if assuming is None:
+        return [], None
+    if not isinstance(assuming, str):
+        return None, 'assuming must be a LaTeX relation'
+    if not assuming.strip():
+        return [], None
+    try:
+        sym, notation = parse_latex(assuming)
+    except PrimitiveError as e:
+        return None, f'cannot parse the assumption: {e}'
+    system = _relation_system_items(sym, notation)
+    if system is not None:
+        items = system[1]
+    elif notation.getf(sym, Notation.COMP) is not None:
+        items = [sym]
+    else:
+        return None, ('an assumption must be a relation such as "x > 0" '
+                      '(comma-separate several)')
+    records = []
+    for item in items:
+        rel = notation.getf(item, Notation.COMP).sym.props.get('op')
+        if rel not in _CONSTRAINT_REL:
+            return None, (
+                f'assumption relation {rel!r} is not supported: state a '
+                'strict hypothesis (<, >) or \\ne, so the assumed region '
+                'is one the checks can sample')
+        text = write_latex(item, notation)
+        record = {'text': text, 'constraint': text}
+        if record not in records:
+            records.append(record)
+    return records, None
+
+
+def _is_zero_expression(latex):
+    """True when an expression canonicalizes to exactly 0, in the rational
+    fragment or over opaque atoms. Symbolic only — a sign gate must never
+    rest on sampling."""
+    try:
+        sym, notation = parse_latex(latex)
+    except PrimitiveError:
+        return False
+    try:
+        rf = to_ratfunc(sym, notation)
+        return rf.is_const() and rf.const_value() == 0
+    except (NotInFragment, ZeroDivisionError):
+        pass
+    try:
+        rf = _atomized_ratfunc(sym, notation, _AtomStore())
+        return rf.is_const() and rf.const_value() == 0
+    except (NotInFragment, ZeroDivisionError, PrimitiveError):
+        return False
+
+
+def _sign_from_assumptions(records, arg_latex):
+    """(sign, error): +1/-1 when a recorded strict hypothesis pins the sign
+    of `arg`, None when none of them does. The hypothesis has to be about
+    the factor itself — its sides must differ by exactly `arg`, decided
+    canonically, so `x - 3 > 0` and `x > 3` both pin `x - 3`."""
+    sign = None
+    for record in records:
+        constraint = record.get('constraint')
+        if not constraint:
+            continue
+        try:
+            csym, cnotation = parse_latex(constraint)
+        except PrimitiveError:
+            continue
+        comp = cnotation.getf(csym, Notation.COMP)
+        if comp is None:
+            continue
+        rel = comp.sym.props.get('op')
+        if rel not in _STRICT_CONSTRAINT_REL:
+            continue
+        lhs = write_latex(comp.args[0], cnotation)
+        rhs = write_latex(comp.args[1], cnotation)
+        positive = rel in ('>', '\\gt')
+        if _is_zero_expression(f'({lhs}) - ({rhs}) - ({arg_latex})'):
+            found = 1 if positive else -1
+        elif _is_zero_expression(f'({rhs}) - ({lhs}) - ({arg_latex})'):
+            found = -1 if positive else 1
+        else:
+            continue
+        if sign is not None and sign != found:
+            return None, ('the stated hypotheses disagree about the sign '
+                          f'of {arg_latex}')
+        sign = found
+    return sign, None
+
+
+def _apply_one_relation(comp, notation, op, asym, anotation, arg_const,
+                        assumed=(), arg_sign=None):
     rel = comp.sym.props.get('op')
     if rel not in _SUPPORTED_REL:
         return None, f'unsupported relation {rel!r}'
@@ -496,6 +604,9 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
     arg_s = write_latex(asym, anotation)
 
     assumptions = []
+    # the direction of an inequality moved by a factor of stated sign is
+    # the claim of the step; the relation-equivalence leg checks it
+    direction_claimed = False
 
     def additive(side):
         a = arg_s
@@ -515,11 +626,11 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
         if arg_const == 0:
             return None, 'multiplying both sides by 0 destroys the relation'
         if is_ineq:
-            if arg_const is None:
-                return None, (
-                    'cannot multiply an inequality by an expression of '
-                    'unknown sign; use a constant or split into cases')
-            if arg_const < 0:
+            sign, error = _factor_sign('multiply', arg_const, arg_sign, arg_s)
+            if error is not None:
+                return None, error
+            direction_claimed = arg_const is None
+            if sign < 0:
                 out_rel = _FLIP_REL[rel]
         elif arg_const is None:
             if _is_matrix_valued(asym, anotation):
@@ -529,8 +640,9 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
                     'text': f'{arg_s} \\text{{ is invertible}}',
                     'display': f'${arg_s}$ is invertible',
                     'nonzero': arg_s})
-            else:
+            elif arg_sign is None:
                 # if the factor can vanish, the step may introduce solutions
+                # (a stated strict sign hypothesis already excludes that)
                 assumptions.append({'text': f'{arg_s} \\ne 0',
                                     'nonzero': arg_s})
         new_lhs = multiplicative(lhs, lhs_s)
@@ -542,13 +654,13 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
         if arg_const == 0:
             return None, 'division by zero'
         if is_ineq:
-            if arg_const is None:
-                return None, (
-                    'cannot divide an inequality by an expression of '
-                    'unknown sign; use a constant or split into cases')
-            if arg_const < 0:
+            sign, error = _factor_sign('divide', arg_const, arg_sign, arg_s)
+            if error is not None:
+                return None, error
+            direction_claimed = arg_const is None
+            if sign < 0:
                 out_rel = _FLIP_REL[rel]
-        elif arg_const is None:
+        elif arg_const is None and arg_sign is None:
             assumptions.append({'text': f'{arg_s} \\ne 0', 'nonzero': arg_s})
         new_lhs = f'\\frac{{{lhs_s}}}{{{arg_s}}}'
         new_rhs = f'\\frac{{{rhs_s}}}{{{arg_s}}}'
@@ -569,23 +681,56 @@ def _apply_one_relation(comp, notation, op, asym, anotation, arg_const):
         new_rhs = f'{_paren(rhs_s)}^{{{arg_s}}}'
 
     result = f'{new_lhs} {out_rel} {new_rhs}'
+    guards = list(assumed) + assumptions
     # oracle: each new side must equal op(old side, arg) at sample points
     c1 = numeric_spot_check(new_lhs, _op_expr(lhs_s, op, arg_s),
-                            assumptions=assumptions)
+                            assumptions=guards)
     c2 = numeric_spot_check(new_rhs, _op_expr(rhs_s, op, arg_s),
-                            assumptions=assumptions)
+                            assumptions=guards)
+    check = _merge_checks(c1, c2)
+    if direction_claimed:
+        # per-side values cannot see a wrong flip: check the whole relation
+        check = _merge_checks(
+            check,
+            numeric_relation_check(f'{lhs_s} {rel} {rhs_s}', result,
+                                   assumptions=guards))
     return {'result': result, 'assumptions': assumptions,
-            'check': _merge_checks(c1, c2)}, None
+            'check': check}, None
 
 
-def apply_both_sides(equation, op, arg):
+def _factor_sign(verb, arg_const, arg_sign, arg_s):
+    """(sign, error) for moving an inequality by a factor. A literal's sign
+    is certain; otherwise only a stated hypothesis can supply one."""
+    if arg_const is not None:
+        literal = 1 if arg_const > 0 else -1
+        if arg_sign is not None and arg_sign != literal:
+            return None, (f'the stated hypothesis contradicts the sign of '
+                          f'{arg_s}')
+        return literal, None
+    if arg_sign is not None:
+        return arg_sign, None
+    return None, (
+        f'cannot {verb} an inequality by an expression of unknown sign; '
+        f'state the case hypothesis as `assuming` (e.g. "{arg_s} > 0") and '
+        'record the opposite case as its own step, or use a constant')
+
+
+def apply_both_sides(equation, op, arg, assuming=None):
     """Apply op ∈ {+,-,*,/,^} with argument `arg` to both sides of one
     relation or every relation in a comma/one-column-cases system. Division
-    records the assumption arg ≠ 0."""
+    records the assumption arg ≠ 0. `assuming` states a case hypothesis
+    ("x > 0"): it is recorded, the checks sample only where it holds, and a
+    strict hypothesis about the factor decides whether an inequality keeps
+    or flips its direction."""
     args = {'equation': equation, 'op': op, 'arg': arg}
+    if assuming:
+        args['assuming'] = assuming
     if op not in _APPLY_OPS:
         return _error('apply_both_sides', args,
                       f'op must be one of {_APPLY_OPS}')
+    assumed, error = _assumption_records(assuming)
+    if error is not None:
+        return _error('apply_both_sides', args, error)
     try:
         sym, notation = parse_latex(equation)
         asym, anotation = parse_latex(arg)
@@ -607,14 +752,19 @@ def apply_both_sides(equation, op, arg):
     except (NotInFragment, ZeroDivisionError):
         pass
 
+    arg_sign, error = _sign_from_assumptions(assumed, arg)
+    if error is not None:
+        return _error('apply_both_sides', args, error)
+
     relation_symbols = [sym] if comp is not None else system[1]
     transformed = []
-    assumptions = []
+    assumptions = list(assumed)
     checks = []
     for index, relation_sym in enumerate(relation_symbols):
         relation = notation.getf(relation_sym, Notation.COMP)
         outcome, error = _apply_one_relation(
-            relation, notation, op, asym, anotation, arg_const)
+            relation, notation, op, asym, anotation, arg_const,
+            assumed=assumed, arg_sign=arg_sign)
         if error is not None:
             if system is not None:
                 error = f'relation {index + 1}: {error}'
@@ -664,6 +814,11 @@ def _merge_checks(c1, c2):
         undefined = sum(c.get('undefined_points', 0) for c in (c1, c2))
         if undefined:
             merged['undefined_points'] = undefined
+        # how much of the sample actually exercised a relation direction
+        holding = [c['holding_points'] for c in (c1, c2)
+                   if 'holding_points' in c]
+        if holding:
+            merged['holding_points'] = min(holding)
         return merged
     return {'status': 'skipped',
             'reason': c1.get('reason') or c2.get('reason') or 'partial'}
@@ -755,20 +910,25 @@ class _AtomStore(object):
         self.by_key = {}   # normal-form key -> atom name
         self.exprs = {}    # atom name -> (sym, notation)
 
-    def atom(self, sym, notation):
+    def _identity(self, sym, notation):
+        """(key, canonical_sym, canonical_notation) for a subexpression.
+        The key is the atom's identity: transparent grouping is stripped,
+        so \\sin(x) and \\sin x share one atom."""
         canonical_n = Notation()
         canonical_s = _canonicalize_atom_payload(
             sym, notation, canonical_n)
         latex = _write_std(canonical_s, canonical_n)
         try:
-            # atom identity ignores all transparent grouping, so \sin(x)
-            # and \sin x share one atom
             s2, n2 = parse_latex(latex)
             out = Notation()
             key = _write_std(
                 _GroupStripper(n2, out, all_brackets=True)(s2), out)
         except PrimitiveError:
             key = latex
+        return key, canonical_s, canonical_n
+
+    def atom(self, sym, notation):
+        key, canonical_s, canonical_n = self._identity(sym, notation)
         name = self.by_key.get(key)
         if name is None:
             # 'zz#' prefix: sorts after single-letter variables, so
@@ -777,6 +937,12 @@ class _AtomStore(object):
             self.by_key[key] = name
             self.exprs[name] = (canonical_s, canonical_n)
         return Symbol(name)
+
+    def find(self, sym, notation):
+        """Atom name already minted for this subexpression, or None.
+        Lookup only — never mints one, so a caller naming an atom that the
+        expression does not contain gets a refusal, not a fresh variable."""
+        return self.by_key.get(self._identity(sym, notation)[0])
 
     def mapping(self):
         return {Symbol(name): se for name, se in self.exprs.items()}
@@ -849,9 +1015,10 @@ def _atomize_walk(sym, notation, out_n, store):
     if op in _NON_EXPR_OPS:
         raise NotInFragment(f'{op.name} is not an expression')
     if op in (Notation.GROUP, Notation.V_GROUP):
-        if f.props.get('br') == '||':
-            # |expr| is absolute value, not grouping: the whole bar term is
-            # one opaque atom (identity keeps the bars, so |x| != x).
+        if Notation.is_semantic_bracket(f):
+            # |expr|, floor and ceiling are bracket OPERATORS, not grouping:
+            # the whole bracketed term is one opaque atom (identity keeps the
+            # brackets, so |x| != x and floor(x) != x).
             return store.atom(sym, notation)
         inner = _atomize_walk(f.args[0], notation, out_n, store)
         return out_n.setf(op, (inner,), **f.props)
@@ -1042,6 +1209,116 @@ def _plist_head_kind(a, notation):
     if _func_power(a, notation) is not None:
         return 'func'
     return None
+
+
+class _PoweredHeadNormalizer(Replicator):
+    """Rewrite the function applications inside a product into the explicitly
+    grouped shape they are the standard spelling of, so structural pattern
+    matching sees one object where the atomizer and the numeric oracle already
+    see one: \\sin^{n} x becomes ( \\sin x)^{n} and a bare \\sin x \\cos x
+    becomes ( \\sin x)( \\cos x). Only a plain positive integer n >= 2
+    normalizes a power: \\sin^{-1} (the arcsin reading) and non-integer powers
+    keep their own shape, exactly as in the atomizer. Argument spans come from
+    the oracle's own `_func_arg_span`, so a grouping can never disagree with
+    the reading the numeric leg checks against."""
+
+    def __init__(self, notation, output_notation):
+        Replicator.__init__(self, notation, output_notation)
+        self.changed = False
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        if any(isinstance(a, Symbol) and a.name in Notation.styles
+               for a in args):
+            # spacing factors would be dropped by the span scan; a product
+            # carrying them is left exactly as written
+            return Replicator.enter_plist(self, sym, f)
+
+        def is_head(a):
+            if (isinstance(a, Symbol) and self.notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                return True
+            fp = _func_power(a, self.notation)
+            return fp is not None and fp[0] in FUNC_NAMES
+
+        def bare_head(a):
+            if (isinstance(a, Symbol) and self.notation.get(a) is None
+                    and a.name in FUNC_NAMES):
+                return a.name
+            return None
+
+        out_args, i = [], 0
+        while i < len(args):
+            a = args[i]
+            fp = _func_power(a, self.notation)
+            n = None
+            if fp is not None and fp[0] in FUNC_NAMES:
+                try:
+                    n = _index_power(fp[1], self.notation)
+                except (NotInFragment, PrimitiveError):
+                    n = None
+            head, span = None, None
+            if n is not None and n >= 2:
+                head = fp[0]
+                span, j = _func_arg_span(args, i, self.notation, is_head)
+            elif n is None and bare_head(a) is not None:
+                cand, cj = _func_arg_span(args, i, self.notation, is_head)
+                # Only a genuine product UNIT earns a wrapper. An application
+                # that is the whole product is already one object, and
+                # wrapping it in () would hide that node from the matcher
+                # (a ()-group matches no pattern at all).
+                if cand and cj - i < len(args):
+                    head, span, j = bare_head(a), cand, cj
+            if span:
+                base = self.output_notation.setf(
+                    Notation.P_LIST,
+                    [Symbol(head)] + [self.enter_expr(s) for s in span])
+                group = self.output_notation.setf(
+                    Notation.GROUP, (base,), br='()')
+                if n is None:
+                    out_args.append(group)
+                else:
+                    out_args.append(self.output_notation.setf(
+                        Notation.INDEX,
+                        (group, (None, None, IntegerValue(n), None))))
+                self.changed = True
+                i = j
+                continue
+            out_args.append(self.enter_expr(a))
+            i += 1
+        if len(out_args) == 1:
+            return out_args[0]
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, out_args, **f.props))
+
+
+def _normalized_pattern(pat_src, params):
+    """A lemma pattern comparer whose \\sin^{n}-style factors are respelled
+    exactly as the matched expression's are. Both sides of the match must be
+    normalized or a lemma written in the standard spelling (\\sin^2 t = 1 -
+    \\cos^2 t) matches nothing at all. Mirrors comparer.pattern's own parse
+    path so lemma sources keep parsing exactly as before."""
+    notation = Notation()
+    sym = MathParser(notation).parse(pat_src)
+    if sym is None:
+        return comparer.pattern(pat_src, params)
+    sym, notation = _normalize_powered_heads(sym, notation)
+    return comparer.NotationParametrizedComparer(sym, notation, params)
+
+
+def _normalize_powered_heads(sym, notation):
+    """(sym, notation) with every \\sin^{n}-style factor respelled as a
+    power of the application. Returns the input unchanged when nothing
+    matched, so untouched expressions keep their exact graph."""
+    out_n = Notation()
+    walker = _PoweredHeadNormalizer(notation, out_n)
+    try:
+        new_sym = walker(sym)
+    except (PrimitiveError, NotInFragment):
+        return sym, notation
+    if not walker.changed:
+        return sym, notation
+    return new_sym, out_n
 
 
 def _powered_func_payload(sym, notation):
@@ -1349,7 +1626,8 @@ def expand(expr):
                           'expression contains division by zero')
         return _checked(_result(
             'expand', args, expr, result,
-            assumptions=fold[3] if fold is not None else None,
+            assumptions=_with_domain_assumption(
+                fold[3] if fold is not None else None, expr, result),
             extra={'opaque_atoms': n_atoms}))
     try:
         out_n = Notation()
@@ -1358,9 +1636,12 @@ def expand(expr):
             result = fold[2](result)
     except PrimitiveError as e:
         return _error('expand', args, str(e))
+    # cancelling a factor drops the points where it vanished; the numeric
+    # legs cannot see that (measure-zero), so state it as an assumption
     return _checked(_result(
         'expand', args, expr, result,
-        assumptions=fold[3] if fold is not None else None))
+        assumptions=_with_domain_assumption(
+            fold[3] if fold is not None else None, expr, result)))
 
 
 def collect(expr, var):
@@ -1401,8 +1682,13 @@ def _collect_side(side, notation, var, require_var):
     except NotInFragment:
         store = _AtomStore()
         rf = _atomized_ratfunc(side, notation, store)
+    if store is not None and var not in rf.variables():
+        # the agent may name an opaque atom (\cos x) rather than a plain
+        # variable; resolve it to the atom the atomizer already minted, so
+        # grouping by powers of \cos x works in either spelling
+        var = _atom_variable(var, store) or var
     if require_var and var not in rf.variables():
-        note = (' (opaque subexpressions are not entered)'
+        note = (' (no such variable or opaque subexpression)'
                 if store is not None else '')
         raise PrimitiveError(
             f'variable {var!r} does not occur in expression{note}')
@@ -1418,6 +1704,16 @@ def _collect_side(side, notation, var, require_var):
     except PrimitiveError as e:
         raise PrimitiveError(f'internal: unparseable result: {e}')
     return result
+
+
+def _atom_variable(var, store):
+    """Internal atom name for a LaTeX subexpression the caller named
+    (\\cos x, \\sin^2 x is NOT one — that is the atom squared), or None."""
+    try:
+        v_sym, v_n = parse_latex(var)
+    except PrimitiveError:
+        return None
+    return store.find(v_sym, v_n)
 
 
 def _collect_rf_sym(rf, var, notation):
@@ -1599,6 +1895,22 @@ register_lemma('diff_cubes', 'a^3 - b^3', '(a - b)(a^2 + a b + b^2)',
 register_lemma('sum_cubes', 'a^3 + b^3', '(a + b)(a^2 - a b + b^2)',
                ['a', 'b'], 'sum of cubes')
 
+# Trigonometric identities. These are structural rewrites, so they are EXACT
+# where the same move proposed through rewrite_as is numerically sampled --
+# reach for a lemma first whenever one matches. Patterns are written in the
+# spelling a user would write; both sides are powered-head normalized at the
+# matching boundary, so \sin^2 a and ( \sin a)^2 are one object here.
+register_lemma('pythagorean', '\\sin^2 a + \\cos^2 a', '1',
+               ['a'], 'pythagorean identity')
+register_lemma('sin_squared', '\\sin^2 a', '1 - \\cos^2 a',
+               ['a'], 'square of sine as a cosine expression')
+register_lemma('cos_squared', '\\cos^2 a', '1 - \\sin^2 a',
+               ['a'], 'square of cosine as a sine expression')
+register_lemma('sin_double', '\\sin 2a', '2 \\sin a \\cos a',
+               ['a'], 'sine double angle')
+register_lemma('cos_double', '\\cos 2a', '\\cos^2 a - \\sin^2 a',
+               ['a'], 'cosine double angle')
+
 
 def list_lemmas():
     return {'ok': True, 'op': 'lemmas',
@@ -1736,6 +2048,144 @@ def _lemma_power_variants(src, params):
     return variants
 
 
+def _written_denominators(expr, store):
+    """Every distinct written denominator in the expression as
+    (latex, Poly), plus their product. Deliberately SYNTACTIC: to_ratfunc
+    cancels in its constructor, and what a cancellation excluded is exactly
+    what is invisible afterwards. Returns None outside the fragment."""
+    sym, notation = parse_latex(expr)
+    parts, total, seen = [], Poly.const(1), set()
+    # EVERY denominator, not just a top-level one: the first live simplify!
+    # run was a SUM of fractions, whose excluded points are the union of its
+    # parts' — a top-level-only scan reported none of them.
+    for node in [sym] + list(notation.rel):
+        if not is_frac(notation, node):
+            continue
+        den = get_denominator(notation, node)
+        key = write_latex(den, notation)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            rf = to_ratfunc(den, notation)
+        except NotInFragment:
+            # \sin x is a perfectly good denominator; atomize so the trig
+            # cases simplify! actually meets are covered too. The store is
+            # SHARED across both sides by the caller — separate stores would
+            # give one subexpression two atom names and never divide out.
+            rf = _atomized_ratfunc(den, notation, store)
+        if not rf.is_poly():
+            return None
+        parts.append((key, rf.num))
+        total = total * rf.num
+    return parts, total
+
+
+def _poly_latex(poly, store):
+    out_n = Notation()
+    try:
+        sym = poly_to_notation(poly, out_n)
+        if store.exprs:
+            fin_n = Notation()
+            sym = Substitutor(out_n, fin_n, store.mapping())(sym)
+            sym, out_n = _relax_atom_parens(sym, fin_n)
+        return write_latex(sym, out_n)
+    except PrimitiveError:
+        return None
+
+
+def _domain_narrowing(expr, new_expr):
+    """The conditions a rewrite drops: what the written input excluded and
+    the result no longer states. Returns a list of LaTeX factors, empty when
+    nothing is lost or the shapes are outside what this can decide. It
+    reports only what it can establish, and the numeric legs cannot help at
+    all here — a removable singularity is a measure-zero set that sampling
+    never lands on."""
+    store = _AtomStore()
+    try:
+        left = _written_denominators(expr, store)
+        right = _written_denominators(new_expr, store)
+    except (PrimitiveError, NotInFragment, ZeroDivisionError):
+        return []
+    if left is None or right is None:
+        return []
+    (parts_a, da), (parts_b, db) = left, right
+    # symmetric: the equality holds only where BOTH sides are defined, so a
+    # denominator introduced into the result excludes points just as one
+    # divided away does
+    lost, parts = da.div_exact(db), parts_a
+    if lost is None or lost.is_const():
+        lost, parts = db.div_exact(da), parts_b
+    if lost is None or lost.is_const():
+        return []
+    # attribute the loss to the denominators as WRITTEN where they account
+    # for it exactly - two readable conditions beat one expanded product
+    named, acc = [], Poly.const(1)
+    for key, poly in parts:
+        if not poly.is_const() and lost.div_exact(poly) is not None:
+            named.append(key)
+            acc = acc * poly
+    if named and acc.div_exact(lost) is not None \
+            and lost.div_exact(acc) is not None:
+        return named
+    single = _poly_latex(lost, store)
+    return [single] if single else []
+
+
+def _with_domain_assumption(assumptions, expr, result):
+    """`assumptions` plus the `factor \\ne 0` a cancellation dropped, if
+    any. Shared by every tactic whose result can be defined where its input
+    was not."""
+    lost = _domain_narrowing(expr, result)
+    if not lost:
+        return assumptions
+    return list(assumptions or []) + [
+        {'text': f'{factor} \\ne 0', 'nonzero': factor} for factor in lost]
+
+
+def rewrite_as(expr, new_expr):
+    """Congruence with an agent-supplied witness: replace an expression by
+    a proposed one that equal? confirms is the same. The equality IS the
+    checked content, so this reaches identities with no registered lemma
+    and spellings the structural matcher cannot bind — at the cost of
+    equal?'s trust level, which the check record names. The agent supplies
+    the target; nothing is searched for it."""
+    args = {'expr': expr, 'new_expr': new_expr}
+    try:
+        parse_latex(expr)
+        parse_latex(new_expr)
+    except PrimitiveError as e:
+        return _error('rewrite_as', args, str(e))
+    if same_expression(expr, new_expr):
+        return _error('rewrite_as', args,
+                      'the proposal is the same expression; a step that '
+                      'changes nothing is not a rewrite')
+    eq = equal_exprs(new_expr, expr)
+    if not eq.get('ok'):
+        return _error('rewrite_as', args, str(eq.get('error')))
+    if eq.get('verdict') != 'yes':
+        detail = f'verdict: {eq.get("verdict")}'
+        if eq.get('counterexample'):
+            detail += f', counterexample {eq["counterexample"]}'
+        return _error('rewrite_as', args,
+                      f'the proposal is not mechanically equal to the '
+                      f'expression ({detail})')
+    # a cancelled factor narrows the domain silently: the canonical leg
+    # decides equality as rational functions, and sampling cannot see a
+    # measure-zero exclusion. Record it rather than lose it.
+    rec = _result('rewrite_as', args, expr, new_expr,
+                  assumptions=_with_domain_assumption(
+                      None, expr, new_expr))
+    check = {'status': 'agree',
+             'method': f'proposal equality via equal? ({eq["method"]})'}
+    if 'samples' in eq:
+        check['samples'] = eq['samples']
+    if eq.get('assuming'):
+        check['assuming'] = eq['assuming']
+    rec['check'] = check
+    return rec
+
+
 def rewrite(expr, lemma_name, direction='forward', at=None):
     """Apply a registered equality lemma at the root, or at the subterm
     selected by `at` (target LaTeX or 1-based match index)."""
@@ -1756,6 +2206,11 @@ def rewrite(expr, lemma_name, direction='forward', at=None):
         sym, notation = parse_latex(expr)
     except PrimitiveError as e:
         return _error('rewrite', args, str(e))
+    # \sin^2 x binds the power to the bare function name, so a pattern like
+    # a^2 - b^2 would bind a to \sin and strand the argument. Match against
+    # the ( \sin x)^2 spelling instead; the writer prints the standard form
+    # back, and the oracle checks input against result either way.
+    sym, notation = _normalize_powered_heads(sym, notation)
 
     def stage_positions(pat_src, pat_params, powermap, stage, seen):
         """Matches of one pattern in position order: root first, then
@@ -1764,8 +2219,8 @@ def rewrite(expr, lemma_name, direction='forward', at=None):
         bind perfect n-th power monomials, whose roots are returned bound
         to the original lemma parameter. A node already claimed by an
         earlier stage keeps that stage's binding."""
-        pat = comparer.pattern(pat_src,
-                               [(p, NotationParam.Any) for p in pat_params])
+        pat = _normalized_pattern(
+            pat_src, [(p, NotationParam.Any) for p in pat_params])
 
         def validate(s):
             bound = {}
@@ -2082,11 +2537,18 @@ def factor_quadratic(expr, var):
 # checker: equal?
 # ---------------------------------------------------------------------------
 
-def equal_exprs(expr1, expr2):
+def equal_exprs(expr1, expr2, assuming=None):
     """yes / no / unknown. Canonical forms decide the rational fragment;
     the numeric oracle answers probabilistically outside it. Equations are
-    compared side by side."""
+    compared side by side. `assuming` restricts the question to a stated
+    region ("x > 0"): the oracle then samples only there, and a verdict
+    that needed the restriction says so and carries it."""
     args = {'expr1': expr1, 'expr2': expr2}
+    if assuming:
+        args['assuming'] = assuming
+    assumed, error = _assumption_records(assuming)
+    if error is not None:
+        return _error('equal', args, error)
     try:
         s1, n1 = parse_latex(expr1)
         s2, n2 = parse_latex(expr2)
@@ -2104,19 +2566,25 @@ def equal_exprs(expr1, expr2):
                     'method': 'structural',
                     'reason': f'different relations {sp1[2]!r} vs {sp2[2]!r}'}
         verdicts = []
+        conditional = False
         for a, b in zip(sp1[:2], sp2[:2]):
-            sub = equal_exprs(write_latex(a, n1), write_latex(b, n2))
+            sub = equal_exprs(write_latex(a, n1), write_latex(b, n2),
+                              assuming=assuming)
             if not sub.get('ok'):
                 return sub
             verdicts.append(sub['verdict'])
+            conditional = conditional or bool(sub.get('assumptions'))
         if all(v == 'yes' for v in verdicts):
             verdict = 'yes'
         elif 'no' in verdicts:
             verdict = 'no'
         else:
             verdict = 'unknown'
-        return {'ok': True, 'op': 'equal', 'args': args, 'verdict': verdict,
-                'method': 'per-side'}
+        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': verdict,
+               'method': 'per-side'}
+        if conditional:
+            rec['assumptions'] = list(assumed)
+        return rec
     try:
         rf1 = to_ratfunc(s1, n1)
         rf2 = to_ratfunc(s2, n2)
@@ -2137,19 +2605,33 @@ def equal_exprs(expr1, expr2):
                     'verdict': 'yes', 'method': 'canonical (opaque atoms)'}
     except (NotInFragment, ZeroDivisionError, PrimitiveError):
         pass
-    check = numeric_spot_check(expr1, expr2, samples=20)
+    check = numeric_spot_check(expr1, expr2, samples=20, assumptions=assumed)
+
+    def conditional(rec, method):
+        """Every verdict the restricted sampling produced carries the
+        restriction with it: a conditional yes must never be readable as
+        an unconditional one."""
+        if assumed:
+            rec['method'] = f'{method} under the stated assumptions'
+            rec['assumptions'] = list(assumed)
+        else:
+            rec['method'] = method
+        return rec
+
     if check['status'] == 'agree':
-        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'yes',
-               'method': 'numeric-oracle (probabilistic)',
-               'samples': check['samples']}
+        rec = conditional(
+            {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'yes',
+             'samples': check['samples']},
+            'numeric-oracle (probabilistic)')
         if check.get('undefined_points'):
             rec['note'] = ('compared only where both sides are defined; '
                            f"{check['undefined_points']} sample points fell "
                            'outside both domains')
         return rec
     if check['status'] == 'disagree':
-        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
-               'method': 'numeric-oracle', 'counterexample': check['point']}
+        rec = conditional(
+            {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
+             'counterexample': check['point']}, 'numeric-oracle')
         if 'lhs' in check:
             # for constant inputs (e.g. literal matrices) the evaluated
             # values are the whole witness — the point alone is empty
@@ -2159,15 +2641,20 @@ def equal_exprs(expr1, expr2):
     if check['status'] == 'domain-differs':
         defined, undefined = (('expr1', 'expr2') if check['defined'] == 'lhs'
                               else ('expr2', 'expr1'))
-        rec = {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
-               'method': 'numeric-oracle (domain mismatch)',
-               'counterexample': check['point'],
-               'reason': f'{defined} is defined at the counterexample point '
-                         f'but {undefined} is not'}
+        rec = conditional(
+            {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'no',
+             'counterexample': check['point'],
+             'reason': f'{defined} is defined at the counterexample point '
+                       f'but {undefined} is not'},
+            'numeric-oracle (domain mismatch)')
         if check.get('common_samples'):
             rec['note'] = (f"values agree at all {check['common_samples']} "
                            'sampled points where both sides are defined; '
                            'equality may hold on a restricted domain')
+        if not assumed:
+            rec['note'] = (rec.get('note', '') + ' Restrict the question '
+                           'with `assuming` to ask again on that domain.'
+                           ).strip()
         return rec
     return {'ok': True, 'op': 'equal', 'args': args, 'verdict': 'unknown',
             'method': 'none', 'reason': check.get('reason')}

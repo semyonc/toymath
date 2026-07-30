@@ -33,6 +33,14 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
 
 - Use `apply` plus `expand` to solve equations one visible move at a time.
 - Use `collect` before dividing by a symbolic coefficient.
+- Moving an inequality by a symbolic factor needs that factor's sign: state the
+  case as `assuming` ("a > 0", strict only), then record the opposite case as
+  its own step. Each step is checked only where its own hypothesis holds: when
+  the cases end differently, load the equations skill and assemble their union
+  with cases_assemble; use the open outcome only when no union can be recorded.
+- `equal` takes `assuming` too: after a domain-mismatch `no`, ask again on the
+  restricted domain. A verdict that needed the restriction carries it and is
+  not an unconditional yes.
 - Use `substitute` plus `evaluate` to check candidate solutions.
 - Use `rewrite` only with a registered lemma; use `lemmas` to discover names.
   When several subterms match, the first match is rewritten; pass `at` (the
@@ -40,7 +48,9 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
   A refusal lists the available positions.
 - Use the two named factoring tactics instead of asking for a general factor.
 - Load the `equations` skill when a workflow needs a complete rational root
-  result for a quadratic; candidate checks alone are not a solution record.
+  result for a quadratic, or when the answer is several statements at once —
+  a system solved for two variables, "find A, B and C"; a run that ends by
+  selecting one of them has answered part of the question.
 - Use `equal` for a query; `unknown` is not verification.
 - There is deliberately no `solve`, `simplify`, or general `factor` tactic.
 

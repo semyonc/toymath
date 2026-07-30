@@ -259,6 +259,9 @@ if isinstance(n, IntegerValue): ...
 - Use `primitives.write_latex` for user-visible verified results and notebook
   history/backreferences. Direct `LaTexWriter` is the raw/debug spelling and
   accumulates transparent INDEX brace groups across repeated parse/write hops.
+- Use `primitives.display_latex` when rich-rendering an already-recorded LaTeX
+  string. It derives display-only `*` → `\cdot` spelling behind a structural
+  parse check; never rewrite the persisted ledger input/result or its hash.
 - Array-family nodes require matching lexer, grammar, writer, and Replicator
   dispatch. Standard non-alignment environments (`matrix`, `pmatrix`,
   `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, and `cases`)

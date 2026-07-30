@@ -25,6 +25,19 @@ CMD_PREFIX_RE = re.compile(r'^([A-Za-z_]\w*)!')
 # ({diff! {int! x^3}}); the registry check filters out factorials
 EXPR_TOKEN_RE = re.compile(r'([A-Za-z_][\w-]*)!')
 
+
+def _display_latex(latex):
+    """Derived rich-view spelling; ledger records remain byte-identical."""
+    import primitives
+    return primitives.display_latex(latex)
+
+
+def _display_math_spans(text):
+    parts = text.split('$')
+    return ''.join(f'${_display_latex(part)}$' if i % 2 else part
+                   for i, part in enumerate(parts))
+
+
 def split_lines(self, code):
     bracket = 0
     buffer = ''
@@ -308,8 +321,9 @@ class MathShell(object):
             note = f" {_html.escape(a['op'] + ' ' + a['arg'])}"
         lines = [f"<div{style}><code>{step['id']}#{step['hash']} "
                  f"[{mark}]{branch} {step['op']}{note}</code> "
-                 f"&nbsp;${step['input']} \\;\\Longrightarrow\\; "
-                 f"{step['result']}$</div>"]
+                 f"&nbsp;${_display_latex(step['input'])} "
+                 f"\\;\\Longrightarrow\\; "
+                 f"{_display_latex(step['result'])}$</div>"]
         for a in step['assumptions']:
             lines.append(f'<div style="margin-left:2em;color:#888">'
                          f'assumes {self._assumption_html(a)}</div>')
@@ -366,7 +380,7 @@ class MathShell(object):
                     f'<div><code>{step["id"]}</code>{lineage}</div>'
                     f'<div><code>{_html.escape(step["op"])}{note}</code>'
                     '</div>'
-                    f'<div>${step["result"]}$</div>'
+                    f'<div>${_display_latex(step["result"])}$</div>'
                     f'<div style="color:{color}">{check}{assum}</div>'
                     '</div>')
             return (
@@ -375,7 +389,7 @@ class MathShell(object):
                 f'{lineage}</td>'
                 f'<td style="{cell}"><code>'
                 f'{_html.escape(step["op"])}{note}</code></td>'
-                f'<td style="{cell}">${step["result"]}$</td>'
+                f'<td style="{cell}">${_display_latex(step["result"])}$</td>'
                 f'<td style="{cell};color:{color}">{check}{assum}</td>'
                 '</tr>')
 
@@ -475,8 +489,8 @@ class MathShell(object):
         a bare `text` keeps the historical whole-line math wrapping."""
         display = assumption.get('display')
         if display is None:
-            return f'${assumption["text"]}$'
-        parts = display.split('$')
+            return f'${_display_latex(assumption["text"])}$'
+        parts = _display_math_spans(display).split('$')
         return ''.join(f'${seg}$' if i % 2 else _html.escape(seg)
                        for i, seg in enumerate(parts))
 
@@ -498,7 +512,7 @@ class MathShell(object):
         return (f'<div style="color:{colors.get(verdict, "#444")}">'
                 f'<strong>CLAIM {claim["id"]}: '
                 f'{_html.escape(verdict.upper())}</strong>{detail}<br>'
-                f'${claim["statement"]}$</div>')
+                f'${_display_latex(claim["statement"])}$</div>')
 
     @staticmethod
     def _do_error(message):
@@ -548,6 +562,15 @@ class MathShell(object):
             return
         if not res['ok']:
             self._do_error(res.get('error', 'agent failed'))
+        elif res.get('turn_limit_reached'):
+            # finished on its last turn: the result is designated and
+            # verified, but the run had no room left. Say so - a derivation
+            # that only just fit is worth knowing about before the next one.
+            display(HTML(
+                '<div style="color:#a60">do! note: the turn limit was '
+                'reached; the result below was committed and verified on '
+                'the final turn, so only the closing narrative is '
+                'missing.</div>'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
         chain = self.render_do_chain(
@@ -560,11 +583,34 @@ class MathShell(object):
                      if res.get('summary_unverified') else '')
             display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
                          f'{_html.escape(res["summary"])}</em></div>'))
+        if res.get('premises'):
+            # where this run's checking starts: inputs it stated rather than
+            # derived. Without them a laundered assertion is indistinguishable
+            # from a derivation.
+            import primitives
+            stated = ', '.join(
+                f'\\({primitives.display_latex(p["input"])}\\)'
+                for p in res['premises'])
+            count = len(res['premises'])
+            display(HTML(
+                f'<div style="color:#888">rests on {count} stated '
+                f'premise{"s" if count != 1 else ""}, not derived here: '
+                f'{stated}</div>'))
         if res['assumptions']:
-            asm = '; '.join(self._assumption_html(a)
-                            for a in res['assumptions'])
-            display(HTML(f'<div style="color:#888">assumptions: '
-                         f'{asm}</div>'))
+            # alternative case hypotheses are listed apart: they hold one
+            # at a time, never together
+            import primitives
+            split = {i for pair in primitives.exclusive_hypotheses(
+                res['assumptions']) for i in pair}
+            for label, wanted in (('assumptions', False),
+                                  ('alternative cases', True)):
+                shown = [a for i, a in enumerate(res['assumptions'])
+                         if (i in split) is wanted]
+                if not shown:
+                    continue
+                asm = '; '.join(self._assumption_html(a) for a in shown)
+                display(HTML(f'<div style="color:#888">{label}: '
+                             f'{asm}</div>'))
         open_prov = res.get('final_provenance') or {}
         if not res.get('final_result') and open_prov.get('source') == 'open':
             # run-level open outcome: no certified result exists, and no

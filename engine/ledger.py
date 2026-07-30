@@ -20,6 +20,20 @@ from tactics import core as core_tactics
 
 LEDGER_VERSION = 2
 
+
+def _display_latex(latex):
+    """Derived rich-view spelling; persisted ledger text stays untouched."""
+    import primitives
+    return primitives.display_latex(latex)
+
+
+def _display_math_spans(text):
+    """Apply formula cleanup only inside the $...$ spans of mixed prose."""
+    parts = text.split('$')
+    return ''.join(f'${_display_latex(part)}$' if i % 2 else part
+                   for i, part in enumerate(parts))
+
+
 def _step_hash(op, input_latex, result_latex):
     h = hashlib.sha1(f'{op}|{input_latex}|{result_latex}'.encode('utf-8'))
     return h.hexdigest()[:7]
@@ -60,8 +74,8 @@ def assumption_markdown(assumption):
     historical whole-line math wrapping."""
     display = assumption.get('display')
     if display is not None:
-        return display
-    return f"${assumption['text']}$"
+        return _display_math_spans(display)
+    return f"${_display_latex(assumption['text'])}$"
 
 
 def _markdown_prose(text):
@@ -136,6 +150,51 @@ def _chain_links(prev_result, cur_input):
         return False
 
 
+def _chain_assumptions(ordered_steps):
+    """Deduped assumption records of an ordered chain, minus the case
+    hypotheses a later ``cases_assemble`` step discharged.
+
+    An assembled union was checked unconditionally across all its cases,
+    so the stated hypotheses stop conditioning anything downstream of the
+    assembly: they remain visible on their own steps, but they are no
+    longer assumptions of the chain's endpoint. Without this, a completed
+    case analysis would end conditioned on mutually exclusive cases —
+    the exact shape conclusions are elsewhere refused for. Only the
+    hypotheses the assembly recorded are discharged, and only for steps
+    that precede it: a later unrelated `assuming` keeps its record."""
+    import primitives
+    assemblies = []
+    for position, step in enumerate(ordered_steps):
+        if (step.get('op') == 'cases_assemble'
+                and step.get('result') is not None):
+            hypotheses = (step.get('args') or {}).get('hypotheses') or []
+            if hypotheses:
+                assemblies.append((position, hypotheses))
+
+    def _discharged(position, assumption):
+        constraint = assumption.get('constraint')
+        if not constraint:
+            return False
+        for assembled_at, hypotheses in assemblies:
+            if assembled_at <= position:
+                continue
+            for hypothesis in hypotheses:
+                if (constraint == hypothesis
+                        or primitives.same_expression(constraint,
+                                                      hypothesis)):
+                    return True
+        return False
+
+    out = []
+    for position, step in enumerate(ordered_steps):
+        for assumption in step.get('assumptions', []):
+            if _discharged(position, assumption):
+                continue
+            if assumption not in out:
+                out.append(assumption)
+    return out
+
+
 def _relation_parts(statement):
     """Return (lhs, rhs, relation) for a parsed relation, else None.
     Parses with allow_ellipsis: this only splits a statement into sides
@@ -162,6 +221,57 @@ def _relation_holds(statement):
         return _eq_yes(lhs, rhs)
     rec = core_tactics.evaluate(statement)
     return rec.get('ok') and rec.get('holds') is True
+
+
+def _all_bracket_normal_form_equal(left, right):
+    """Structural sameness used only to dedupe presentation lists."""
+    import primitives
+    try:
+        return (primitives._all_bracket_normal_form(left)
+                == primitives._all_bracket_normal_form(right))
+    except Exception:
+        return False
+
+
+def _recorded_parts(step):
+    """Values a step recorded as named parts of its own result.
+
+    Linearity-style steps split one object into pieces and persist them as
+    `terms`; a later step working on a piece continued from recorded work
+    even though no whole result equals its input.
+    """
+    parts = []
+    for term in step.get('terms') or []:
+        if isinstance(term, str):
+            parts.append(term)
+        elif isinstance(term, dict):
+            parts.extend(value for key, value in term.items()
+                         if key != 'sign' and isinstance(value, str))
+    return parts
+
+
+def _is_derived(step, earlier):
+    """True when a step's input came from recorded work, not from typing.
+
+    Everything else is a PREMISE: an input this ledger never produced. That
+    is not an error — a derivation has to start somewhere, and a stated
+    given is legitimate — but it is the boundary of what the session
+    checked, so presentation must be able to name it.
+    """
+    current = step.get('input')
+    if current is None:
+        return True
+    if step.get('continues') is True:
+        return True
+    for previous in earlier:
+        result = previous.get('result')
+        if result is not None and (result == current
+                                   or _chain_links(result, current)):
+            return True
+        for part in _recorded_parts(previous):
+            if part == current or _chain_links(part, current):
+                return True
+    return False
 
 
 def _source_ids(step):
@@ -368,12 +478,30 @@ class Ledger(object):
             step['sources'] = result['sources']
         if result.get('solutions') is not None:
             step['solutions'] = list(result['solutions'])
+        if result.get('unknowns') is not None:
+            step['unknowns'] = result['unknowns']
         if goal is not None:
             step['goal'] = goal
         if pending_branch is not None:
             # Presentation metadata only.  Mathematical authority still
             # comes exclusively from this step's registered tactic/check.
             step['exploration'] = self._branch_edge(pending_branch, step)
+        # Admission mirrors replay: a step replay would reject must never
+        # be recorded, or the session silently stops being a replayable
+        # artifact.
+        if step['check'].get('status') == 'disagree':
+            raise ValueError(
+                'the independent check disagrees with this result; a '
+                'disagreeing step is not recorded — correct the arguments '
+                'or take a different route')
+        import tactic_registry
+        provenance_error = tactic_registry.validate_provenance(
+            step, {s['id']: s for s in self.steps})
+        if provenance_error:
+            raise ValueError(
+                f'{provenance_error}; a step that would fail replay is '
+                'not recorded — resolve the cited sources from recorded '
+                'steps, or run without a session for an unrecorded check')
         self.steps.append(step)
         for a in step['assumptions']:
             if a not in self.assumptions:
@@ -500,6 +628,7 @@ class Ledger(object):
         first, last = selected[0], selected[-1]
         endpoint = last['result']
         closure = None
+        premise = None
         if (_eq_yes(endpoint, claim['statement'])
                 and _relation_holds(endpoint)):
             closure = 'true-relation-endpoint'
@@ -513,24 +642,53 @@ class Ledger(object):
                 elif (_eq_yes(first.get('input'), rhs)
                         and _eq_yes(endpoint, lhs)):
                     closure = 'right-to-left'
+        if closure is None and _eq_yes(endpoint, claim['statement']):
+            # An answer-shaped claim ("A = 1/2") states what an unknown IS,
+            # so _relation_holds can never decide it: asking whether A
+            # equals 1/2 IS the open question. What the checked chain does
+            # establish is one-directional — from its own first input the
+            # endpoint follows — so the claim closes CONDITIONAL on that
+            # premise, which travels with the verdict.
+            candidate = first.get('input')
+            # deriving the claim from itself establishes nothing
+            if (candidate and _relation_parts(candidate) is not None
+                    and not _eq_yes(candidate, endpoint)):
+                decided = core_tactics.evaluate(candidate)
+                if decided.get('ok') and decided.get('holds') is False:
+                    raise ValueError(
+                        f'the chain starts from {candidate!r}, which is '
+                        'false; a claim derived from it holds vacuously')
+                closure, premise = 'derived-from-premise', candidate
         if closure is None:
             raise ValueError(
                 f'chain endpoint {endpoint!r} does not close claim '
                 f'{claim["statement"]!r}')
 
-        assumptions = []
-        for step in selected:
-            for assumption in step.get('assumptions', []):
-                if assumption not in assumptions:
-                    assumptions.append(assumption)
-        verdict = 'conditional' if assumptions else 'established'
-        return {
+        assumptions = _chain_assumptions(selected)
+        # a chain that borrows from two alternative cases proves nothing:
+        # its stated condition could never hold — unless a union assembly
+        # discharged the cases, which _chain_assumptions already honoured
+        import primitives
+        exclusive = primitives.exclusive_hypotheses(assumptions)
+        if exclusive:
+            first, second = exclusive[0]
+            raise ValueError(
+                f'the chain rests on mutually exclusive hypotheses '
+                f'{assumptions[first]["text"]!r} and '
+                f'{assumptions[second]["text"]!r}; close each case as its '
+                f'own claim')
+        verdict = ('conditional' if assumptions or premise is not None
+                   else 'established')
+        conclusion = {
             'steps': list(step_ids),
             'endpoint': endpoint,
             'assumptions': assumptions,
             'closure': closure,
             'verdict': verdict,
         }
+        if premise is not None:
+            conclusion['premise'] = premise
+        return conclusion
 
     def conclude(self, claim_id, step_ids):
         """Mechanically close a claim from goal-owned, checked steps."""
@@ -880,6 +1038,31 @@ class Ledger(object):
             edges.append(edge)
         return edges
 
+    def premises(self, step_ids=None):
+        """Inputs this session never derived, in ledger order.
+
+        A derivation must start somewhere, so a premise is not a fault — but
+        it is exactly where the checking stops, and a reader who cannot see
+        the premises cannot tell a derivation from a restatement. Returns
+        `[{step, input}]`, deduplicated by expression: the same given used
+        twice was stated once.
+        """
+        wanted = None if step_ids is None else set(step_ids)
+        premises = []
+        for index, step in enumerate(self.steps):
+            if wanted is not None and step['id'] not in wanted:
+                continue
+            if step.get('result') is None or _is_derived(step,
+                                                         self.steps[:index]):
+                continue
+            current = step['input']
+            if any(seen['input'] == current
+                   or _all_bracket_normal_form_equal(seen['input'], current)
+                   for seen in premises):
+                continue
+            premises.append({'step': step['id'], 'input': current})
+        return premises
+
     def presentation_topology(self, final_provenance=None, marker_ids=None):
         """Derive the selected spine and annotation-only abandoned paths.
 
@@ -1026,12 +1209,10 @@ class Ledger(object):
 
         off_spine = [s['id'] for s in transforms if s['id'] not in spine]
         unclassified = [sid for sid in off_spine if sid not in assigned]
-        spine_assumptions = []
-        for sid in spine_ids:
-            for assumption in by_id[sid].get('assumptions', []):
-                if assumption not in spine_assumptions:
-                    spine_assumptions.append(assumption)
+        spine_assumptions = _chain_assumptions(
+            [by_id[sid] for sid in spine_ids])
         return {
+            'spine_premises': self.premises(spine_ids or None),
             'selection': selection.get('id') if selection else None,
             'selected_goal': selected_goal,
             'edges': edges,
@@ -1063,11 +1244,18 @@ class Ledger(object):
                 detail = f' ({count} steps, {assumptions} assumptions)'
             lines.append(
                 f'**CLAIM {claim["id"]} — {verdict}{detail}:** '
-                f'${claim["statement"]}$')
+                f'${_display_latex(claim["statement"])}$')
             if verdict == 'OPEN':
                 lines.append('')
                 lines.append('*No mechanically checked closing chain has '
                              'been recorded.*')
+            elif conclusion.get('premise'):
+                # the premise is the whole content of a conditional answer
+                # claim: it must never be one click away from the verdict
+                lines.append('')
+                lines.append(
+                    '*Derived from the stated premise '
+                    f'${_display_latex(conclusion["premise"])}$.*')
             lines.append('')
         ended_open = bool(self.selections and (self.selections[-1].get(
             'provenance') or {}).get('source') == 'open')
@@ -1088,18 +1276,48 @@ class Ledger(object):
                 lines.append(
                     f'**Selected final result `{selected["id"]}`'
                     f'{source_note} — {status}:** '
-                    f'${selected["result"]}$')
+                    f'${_display_latex(selected["result"])}$')
                 lines.append('')
+
+        final_premises = (topology['spine_premises'] if topology['spine']
+                          else self.premises())
+        if final_premises:
+            # where the checking starts. A reader who cannot see this cannot
+            # tell a derivation from a restatement of its own answer.
+            stated = ', '.join(f'${_display_latex(p["input"])}$'
+                               for p in final_premises)
+            lines.append(
+                f'*Rests on {len(final_premises)} stated premise'
+                f'{"s" if len(final_premises) != 1 else ""}, not derived '
+                f'here: {stated}.*')
+            lines.append('')
 
         final_assumptions = (topology['spine_assumptions']
                              if topology['spine'] else self.assumptions)
         if final_assumptions:
-            label = ('**Selected spine is valid under the assumptions:** '
-                     if topology['spine'] else
-                     '**Valid under the assumptions:** ')
-            lines.append(label + ', '.join(
-                assumption_markdown(a) for a in final_assumptions))
-            lines.append('')
+            # hypotheses from alternative cases must never read as one
+            # conjunction: nothing holds under `x > 0` AND `x < 0`
+            import primitives
+            split = {i for pair in primitives.exclusive_hypotheses(
+                final_assumptions) for i in pair}
+            shared = [a for i, a in enumerate(final_assumptions)
+                      if i not in split]
+            alternatives = [a for i, a in enumerate(final_assumptions)
+                            if i in split]
+            if shared:
+                label = ('**Selected spine is valid under the assumptions:** '
+                         if topology['spine'] else
+                         '**Valid under the assumptions:** ')
+                lines.append(label + ', '.join(
+                    assumption_markdown(a) for a in shared))
+                lines.append('')
+            if alternatives:
+                lines.append(
+                    '**Alternative case hypotheses** (each step holds under '
+                    'the one it records, not under all of them): '
+                    + ' | '.join(assumption_markdown(a)
+                                 for a in alternatives))
+                lines.append('')
 
         def render_step(step):
             out = []
@@ -1140,10 +1358,12 @@ class Ledger(object):
                 arg_note = f" — `{a['op']} {a['arg']}` on both sides"
             elif step['op'] == 'substitute':
                 a = step['args']
-                arg_note = f" — ${a['var']} := {a['value']}$"
+                arg_note = (f" — ${_display_latex(a['var'])} := "
+                            f"{_display_latex(a['value'])}$")
             elif step['op'] == 'integrate_by_parts':
                 a = step['args']
-                arg_note = f" — $u = {a['u']}$, $dv = {a['dv']}$"
+                arg_note = (f" — $u = {_display_latex(a['u'])}$, "
+                            f"$dv = {_display_latex(a['dv'])}$")
             elif step['op'] == 'integrate_assemble':
                 src = step.get('sources', {})
                 ids = ', '.join(src.get('antiderivatives', []))
@@ -1154,12 +1374,29 @@ class Ledger(object):
                 ids = ', '.join(src.get('values', []))
                 arg_note = (f" — sources `{src.get('linearity', '?')}` "
                             f"→ `{ids}`")
+            elif step['op'] == 'points_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('values', []))
+                # naming the paired function keeps the reader from assuming
+                # it is whatever the chain last mentioned
+                expr = _display_latex(step['args'].get('expr', ''))
+                arg_note = (f" — values of ${expr}$ "
+                            f"from `{src.get('roots', '?')}` → `{ids}`")
+            elif step['op'] == 'system_assemble':
+                src = step.get('sources', {})
+                ids = ', '.join(src.get('assignments', []))
+                unknowns = ', '.join(u['unknown']
+                                     for u in step.get('unknowns') or [])
+                arg_note = (f" — values for ${unknowns}$ from `{ids}`"
+                            if ids else f" — values for ${unknowns}$")
             goal = (f" → `{step['goal']}`" if step.get('goal') else '')
             out.append(f"**{step['id']}**{goal} `{step['op']}`{arg_note} "
                        f"— *{mark}*{branch}")
             out.append('')
-            out.append(f"$${step['input']} \\;\\Longrightarrow\\; "
-                       f"{step['result']}$$")
+            input_latex = _display_latex(step['input'])
+            result_latex = _display_latex(step['result'])
+            out.append(f"$${input_latex} \\;\\Longrightarrow\\; "
+                       f"{result_latex}$$")
             for a in step['assumptions']:
                 out.append(f"- assumes {assumption_markdown(a)}")
             out.append('')
@@ -1216,6 +1453,8 @@ class Ledger(object):
             if verdict != 'OPEN':
                 detail = ('; steps ' + ','.join(conclusion.get('steps', []))
                           + f'; endpoint {conclusion.get("endpoint")}')
+                if conclusion.get('premise'):
+                    detail += f'; given {conclusion["premise"]}'
             lines.append(f"CLAIM {claim['id']}#{claim['hash']} [{verdict}] "
                          f"{claim['statement']}{detail}")
         for step in self.steps:
@@ -1255,8 +1494,26 @@ class Ledger(object):
                     '      sources: linearity '
                     + src.get('linearity', '?') + '; values '
                     + ', '.join(src.get('values', [])))
+            elif step['op'] == 'points_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: roots ' + src.get('roots', '?')
+                    + '; values of ' + step['args'].get('expr', '?')
+                    + ' from ' + ', '.join(src.get('values', [])))
+            elif step['op'] == 'system_assemble':
+                src = step.get('sources', {})
+                lines.append(
+                    '      sources: values for '
+                    + ', '.join(u['unknown']
+                                for u in step.get('unknowns') or [])
+                    + ' from ' + ', '.join(src.get('assignments', [])))
             for a in step['assumptions']:
                 lines.append(f"      assumes {a['text']}")
+        visible_premises = (topology['spine_premises'] if topology['spine']
+                            else self.premises())
+        if visible_premises:
+            lines.append('premises (stated, not derived here): '
+                         + '; '.join(p['input'] for p in visible_premises))
         visible_assumptions = (topology['spine_assumptions']
                                if topology['spine'] else self.assumptions)
         if visible_assumptions:

@@ -47,6 +47,13 @@ def _limit_sample_envs(parsed, var, samples, seed=20260705):
     return [_sample_point(variables, rng) for _ in range(samples)]
 
 
+def _aitken(a, b, c):
+    d = (c - b) - (b - a)
+    if abs(d) < 1e-15 * max(abs(a), abs(b), abs(c), 1e-300):
+        return None
+    return c - (c - b) ** 2 / d
+
+
 def _approach_estimate(body, notation, var, point, point_notation,
                        direction, env):
     """Independent numeric limit estimate plus a convergence-error bound."""
@@ -55,11 +62,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
         # fixed ladders: fall back to shorter/nearer ones only when a point
         # fails (e.g. 2^{10^4} overflows in a decaying denominator, or a
         # root is undefined at the small end)
-        def aitken(a, b, c):
-            d = (c - b) - (b - a)
-            if abs(d) < 1e-15 * max(abs(a), abs(b), abs(c), 1e-300):
-                return None
-            return c - (c - b) ** 2 / d
+        aitken = _aitken
 
         for ladder in ((1e2, 1e3, 1e4, 1e5), (1e3, 1e4, 1e5),
                        (10.0, 1e2, 1e3, 1e4), (10.0, 1e2, 1e3),
@@ -104,13 +107,37 @@ def _approach_estimate(body, notation, var, point, point_notation,
             raise EvalError('matrix-valued limit')
         return v
 
-    if direction == 'two-sided':
-        coarse = (at(h) + at(-h)) / 2
-        fine = (at(h / 2) + at(-h / 2)) / 2
-        return (4 * fine - coarse) / 3, abs(coarse - fine) / 3
-    sign = 1 if direction == 'right' else -1
-    coarse, fine = at(sign * h), at(sign * h / 2)
-    return 2 * fine - coarse, abs(coarse - fine)
+    def value_at(step):
+        if direction == 'two-sided':
+            return (at(step) + at(-step)) / 2
+        sign = 1 if direction == 'right' else -1
+        return at(sign * step)
+
+    def richardson(coarse, fine):
+        if direction == 'two-sided':
+            return (4 * fine - coarse) / 3, abs(coarse - fine) / 3
+        return 2 * fine - coarse, abs(coarse - fine)
+
+    # Geometric h-ladders with Aitken acceleration, mirroring the infinity
+    # branch: the plain Richardson model assumes a smooth truncation term
+    # and honestly skips |x|-kinked bodies whose approach values decay like
+    # c*h^alpha.  Longer ladders fall back when a point fails to evaluate
+    # (e.g. a root over an oscillating argument); the final fallback is the
+    # original two-point estimate.
+    for ladder in ((h, h / 2, h / 4, h / 8), (h, h / 2, h / 4)):
+        try:
+            vals = [value_at(s) for s in ladder]
+        except (OverflowError, ValueError, ZeroDivisionError, EvalError):
+            continue
+        rich, rich_err = richardson(vals[-2], vals[-1])
+        second = _aitken(*vals[-3:])
+        if second is None:
+            return rich, rich_err
+        first = _aitken(*vals[-4:-1]) if len(vals) == 4 else None
+        if first is None:
+            return second, max(abs(second - rich), rich_err)
+        return second, max(abs(second - first), rich_err)
+    return richardson(value_at(h), value_at(h / 2))
 
 
 def _limit_check(body_latex, var, point_latex, direction, expected_latex,
@@ -192,7 +219,7 @@ def _limit_fraction(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.get(sym)
@@ -328,7 +355,7 @@ def limit_linearity(expr):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.getf(sym, Notation.S_LIST)
@@ -700,6 +727,65 @@ def limit_with_body(expr, body_latex):
     parts = _limit_parts(expr)
     return _limit_latex(parts['var'], parts['point_latex'],
                         parts['direction'], body_latex)
+
+
+def limit_with_direction(expr, direction):
+    """The ``\\lim`` expression sharing ``expr``'s body and point with the
+    given approach direction.  Used by callers that must name one side's
+    own limit expression."""
+    parts = _limit_parts(expr)
+    return _limit_latex(parts['var'], parts['point_latex'], direction,
+                        parts['body_latex'])
+
+
+def limit_from_sides(expr, value):
+    """Close a two-sided limit from its two agreeing one-sided limits.
+
+    The left and right limits of the same body — both equal to ``value`` —
+    must already be mechanically established; in do! and the CLI they are
+    resolved from recorded ledger steps and cited as provenance.  The
+    combination itself is exact (a two-sided limit exists iff both
+    one-sided limits exist and agree); the approach oracle additionally
+    spot-checks the two-sided value wherever it can converge."""
+    args = {'expr': expr, 'value': value}
+    if not isinstance(value, str) or not value.strip():
+        return _error('limit_from_sides', args, 'missing value')
+    try:
+        parts = _limit_parts(expr)
+        val_sym, val_n = parse_latex(value)
+    except PrimitiveError as e:
+        return _error('limit_from_sides', args, str(e))
+    if parts['direction'] != 'two-sided':
+        return _error('limit_from_sides', args,
+                      'expected a two-sided limit; the one-sided limits '
+                      'are the premises, not the target')
+    if parts['var'] in free_symbols(val_sym, val_n):
+        return _error('limit_from_sides', args,
+                      'the limit value must not contain the bound variable')
+    whole = _limit_check(parts['body_latex'], parts['var'],
+                         parts['point_latex'], 'two-sided', value)
+    if whole.get('status') == 'disagree':
+        return _error('limit_from_sides', args,
+                      'the approach oracle contradicts the combined value')
+    if whole.get('status') == 'agree':
+        check = dict(whole)
+        check['method'] = ('agreeing one-sided limits; two-sided approach '
+                           'sampling concurs')
+    else:
+        check = {'status': 'exact',
+                 'method': ('a two-sided limit equals its agreeing '
+                            'one-sided limits')}
+    return _result('limit_from_sides', args, expr, value, check=check,
+                   extra={'body': parts['body_latex'], 'var': parts['var'],
+                          'point': parts['point_latex'],
+                          'left': _limit_latex(parts['var'],
+                                               parts['point_latex'],
+                                               'left',
+                                               parts['body_latex']),
+                          'right': _limit_latex(parts['var'],
+                                                parts['point_latex'],
+                                                'right',
+                                                parts['body_latex'])})
 
 
 def _squeeze_bound_check(lower_latex, body_latex, upper_latex, var,

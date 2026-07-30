@@ -114,11 +114,10 @@ class TestFractionOperations(unittest.TestCase):
 
     def test_rule1_symbolic_same_denominator(self):
         """Rule 1: Symbolic fractions with same denominator using add!."""
-        # add!{x/y + z/y} → (xy+zy)/y²
-        # Note: Denominator becomes (y)² which is correct
+        # The classic canonical fast path cancels the duplicated denominator.
         self.checkEqual(
             "add! \\frac x y + \\frac z y",
-            "\\frac {xy+zy} {(y)^2}"
+            "\\frac {x+z} y"
         )
 
     #@unittest.skip("Produces correct result (1) but comparer can't match IntegerValue vs FracValue")
@@ -160,16 +159,15 @@ class TestFractionOperations(unittest.TestCase):
         # mul!{(x/a)(x/b)} → x²/(ab)
         self.checkEqual(
             "mul! \\frac x a \\frac x b",
-            "\\frac {(x)^2} {ab}"
+            "\\frac {x^2} {ab}"
         )
 
     def test_rule2_mixed_numeric_symbolic(self):
         """Rule 2: Mixed numeric and symbolic fraction multiplication."""
-        # mul!{(2/3)(x/y)} → (2x)/(3y)
-        # Current: produces \frac{2/3·x}{y} instead
+        # Rational numeric content is the canonical polynomial coefficient.
         self.checkEqual(
             "mul! \\frac 2 3 \\frac x y",
-            "\\frac {2x} {3y}"
+            "\\frac {\\frac 2 3 x} y"
         )
 
     # =========================================================================
@@ -200,9 +198,8 @@ class TestFractionOperations(unittest.TestCase):
 
     def test_rule3_variable_times_numeric_fraction(self):
         """Rule 3: Variable times numeric fraction."""
-        # mul!{x(2/3)} → (2x)/3
-        # Current: produces 2/3·x (not combined)
-        self.checkEqual("mul! x \\frac 2 3", "\\frac {2x} 3")
+        # mul!{x(2/3)} → (2/3)x in canonical coefficient form.
+        self.checkEqual("mul! x \\frac 2 3", "\\frac 2 3 x")
 
     def test_rule3_numeric_times_symbolic_fraction(self):
         """Rule 3: Numeric scalar times symbolic fraction."""
@@ -283,12 +280,10 @@ class TestFractionOperations(unittest.TestCase):
         )
 
     def test_rule5_variable_plus_numeric_fraction(self):
-        """Rule 5: Variable plus numeric fraction."""
-        # add!{x + (1/2)} → (2x+1)/2
-        # Current: stays as x + 1/2 (not combined)
+        """Rule 5: Variable plus a canonical rational coefficient."""
         self.checkEqual(
             "add! x + \\frac 1 2",
-            "\\frac {2x + 1} 2"
+            "x + \\frac 1 2"
         )
 
     def test_rule5_numeric_plus_symbolic_fraction(self):

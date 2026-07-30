@@ -11,6 +11,13 @@ import os
 import unittest
 from unittest import mock
 
+# A developer may enable production tracing in the repository's .env.  The
+# scripted test suite must still make neither OpenRouter nor Langfuse calls;
+# the dedicated observability test below opts back in with an in-memory
+# exporter and an HTTP-mocked model transport.
+os.environ['TOYMATH_OBSERVABILITY'] = 'off'
+os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
+
 import agent_do
 import observability
 import plot_sandbox
@@ -55,6 +62,10 @@ def tool_call(name, args, cid):
             value = args.get(arg.name, arg.default)
             if value is tactic_registry._MISSING:
                 raise AssertionError(f'missing scripted argument {arg.name}')
+            if value is None:
+                # the model-visible schema is a list of strings: an omitted
+                # optional argument is a shorter list, never a null
+                continue
             if arg.nargs in ('+', '*'):
                 ordered.extend(value)
             else:
@@ -499,6 +510,94 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(replay['status'], 'failed')
         self.assertIn('provenance', replay['reason'])
 
+    OSC_ROOT = '\\lim_{x \\to 0} x \\sqrt{\\cos\\frac{1}{x}}'
+
+    def _one_sided_setup(self, api):
+        right = json.loads(api['limit_substitute']('\\lim_{x \\to 0^+} x'))
+        left = json.loads(api['limit_substitute']('\\lim_{x \\to 0^-} x'))
+        return left['step']['id'], right['step']['id']
+
+    def test_limit_from_sides_uses_recorded_one_sided_limits(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(rec['sources'],
+                         {'left': left_id, 'right': right_id})
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_from_sides_closes_oscillating_root(self):
+        # the live-failure workflow: direction-dependent squeezes close
+        # each side, then the sides combine into the two-sided limit
+        session = DoSession()
+        api = make_api(session)
+        r_low = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^+} (-x)'))
+        r_up = json.loads(api['limit_substitute']('\\lim_{x \\to 0^+} x'))
+        right = json.loads(api['limit_squeeze'](
+            '\\lim_{x \\to 0^+} x \\sqrt{\\cos\\frac{1}{x}}',
+            '(-x)', 'x', r_low['step']['id'], r_up['step']['id']))
+        self.assertTrue(right['ok'], right.get('error'))
+        l_low = json.loads(api['limit_substitute']('\\lim_{x \\to 0^-} x'))
+        l_up = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^-} (-x)'))
+        left = json.loads(api['limit_squeeze'](
+            '\\lim_{x \\to 0^-} x \\sqrt{\\cos\\frac{1}{x}}',
+            'x', '(-x)', l_low['step']['id'], l_up['step']['id']))
+        self.assertTrue(left['ok'], left.get('error'))
+        rec = json.loads(api['limit_from_sides'](
+            self.OSC_ROOT, left['step']['id'], right['step']['id']))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_limit_from_sides_rejects_mismatched_side_step(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, _ = self._one_sided_setup(api)
+        other = json.loads(api['limit_substitute'](
+            '\\lim_{x \\to 0^+} (-x)'))
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, other['step']['id']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not record', rec['error'])
+
+    def test_limit_from_sides_rejects_unequal_side_values(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        for step in session.ledger.steps:
+            if step['id'] == left_id:
+                step['result'] = '1'
+        rec = json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        self.assertFalse(rec['ok'])
+        self.assertIn('not the same value', rec['error'])
+
+    def test_replay_rejects_tampered_from_sides_provenance(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        session.ledger.steps[-1]['sources']['left'] = right_id
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance', replay['reason'])
+
+    def test_replay_rejects_sourceless_from_sides_step(self):
+        session = DoSession()
+        api = make_api(session)
+        left_id, right_id = self._one_sided_setup(api)
+        json.loads(api['limit_from_sides'](
+            '\\lim_{x \\to 0} x', left_id, right_id))
+        del session.ledger.steps[-1]['sources']
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+
     def test_integrate_assemble_rejects_wrong_source_order(self):
         session = DoSession()
         api = make_api(session)
@@ -521,6 +620,253 @@ class TestDoSessionApi(unittest.TestCase):
         rec = json.loads(api['integrate_assemble'](step, [step]))
         self.assertFalse(rec['ok'])
         self.assertIn('not integrate_linearity', rec['error'])
+
+    def _stationary_session(self):
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['diff']('x^3-3x', 'x'))
+        roots = json.loads(api['quadratic_roots']('3x^{2}-3', 'x'))
+        values = []
+        for root, substituted in (('-1', '(-1)^{3}-3(-1)'),
+                                  ('1', '(1)^{3}-3(1)')):
+            json.loads(api['substitute']('x^3-3x', 'x', root))
+            values.append(json.loads(
+                api['evaluate'](substituted))['step']['id'])
+        return session, api, roots['step']['id'], values
+
+    def test_points_assemble_completes_the_stationary_point_answer(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, values))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(rec['sources'],
+                         {'roots': 's2', 'values': ['s4', 's6']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        # every checked step stays on the presented spine, and both
+        # renderings name the function the values were paired from
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine'],
+                         [s['id'] for s in session.ledger.steps])
+        self.assertIn('values of x^3-3x from s4, s6',
+                      session.ledger.render())
+        self.assertIn('values of $x^3-3x$ from `s2` → `s4, s6`',
+                      session.ledger.render_markdown())
+
+    ANSATZ = r'\frac{1}{x^2-1} = \frac{A}{x-1}+\frac{B}{x+1}'
+
+    def _coefficient_session(self):
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        values = []
+        for equation, divisor in (('2A = 1', '2'), ('-2B = 1', '-2')):
+            applied = json.loads(api['apply'](equation, '/', divisor))
+            values.append(json.loads(
+                api['expand'](applied['result']))['step']['id'])
+        return session, api, values
+
+    def test_system_assemble_states_the_several_part_answer(self):
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertTrue(agent_do.primitives.same_expression(
+            rec['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
+        self.assertEqual(rec['sources'], {'assignments': values})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        self.assertIn('values for A, B from s2, s4', session.ledger.render())
+        self.assertIn('values for $A, B$ from `s2, s4`',
+                      session.ledger.render_markdown())
+
+    def test_system_assemble_refuses_a_value_that_fails_the_target(self):
+        # every cited step is itself checked; what this tactic adds is that
+        # the values TOGETHER satisfy the stated target
+        session, api, values = self._coefficient_session()
+        applied = json.loads(api['apply']('2B = 1', '/', '2'))
+        wrong = json.loads(api['expand'](applied['result']))['step']['id']
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ, values[0], wrong]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('do not satisfy', rec['error'])
+        self.assertEqual(len(session.ledger.steps), 6)
+
+    def test_assignment_order_never_stands_in_for_the_association(self):
+        # unlike a point list, each assignment names its own unknown, so
+        # citing the steps in the other order is a reordering, not a swap
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + list(reversed(values))))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertTrue(agent_do.primitives.same_expression(
+            rec['result'], r'B=-\frac{1}{2},A=\frac{1}{2}'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_system_assemble_needs_recorded_value_steps(self):
+        session, api, values = self._coefficient_session()
+        rec = json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ, values[0], 's99']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_replay_rejects_tampered_assignment_provenance(self):
+        session, api, values = self._coefficient_session()
+        json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        session.ledger.steps[-1]['sources']['assignments'][1] = values[0]
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_replay_rejects_a_retyped_assignment_association(self):
+        session, api, values = self._coefficient_session()
+        json.loads(api['run_tactic'](
+            'system_assemble', [self.ANSATZ] + values))
+        session.ledger.steps[-1]['unknowns'][0]['value'] = '0'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('association mismatch', replay['reason'])
+
+    def test_an_unknowns_claim_closes_conditional_on_its_premise(self):
+        session = DoSession()
+        api = make_api(session)
+        claim = json.loads(api['claim'](r'A = \frac{1}{2}'))
+        applied = json.loads(api['apply']('2A = 1', '/', '2'))
+        expanded = json.loads(api['expand'](applied['result']))
+        closed = json.loads(api['conclude'](
+            claim['id'], [applied['step']['id'], expanded['step']['id']]))
+        self.assertTrue(closed['ok'], closed.get('error'))
+        self.assertEqual(closed['claim']['verdict'], 'conditional')
+        self.assertEqual(closed['claim']['conclusion']['premise'], '2A = 1')
+        self.assertEqual(closed['claim']['conclusion']['closure'],
+                         'derived-from-premise')
+        selected = json.loads(api['set_result'](expanded['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+        self.assertIn('given 2A = 1', session.ledger.render())
+
+    INEQUALITY = r'\frac{1}{x} \lt 2'
+    UNION = r'x \gt \frac{1}{2} \lor x \lt 0'
+
+    def _case_session(self):
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        endpoints = []
+        for hypothesis in (r'x \gt 0', r'x \lt 0'):
+            applied = json.loads(api['apply'](
+                self.INEQUALITY, '*', 'x', hypothesis))
+            cleared = json.loads(api['expand'](applied['result']))
+            halved = json.loads(api['apply'](cleared['result'], '/', '2'))
+            endpoint = json.loads(api['expand'](halved['result']))
+            endpoints.append(endpoint['step']['id'])
+        return session, api, endpoints
+
+    def test_cases_assemble_states_the_union_of_cases(self):
+        session, api, endpoints = self._case_session()
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {'cases': endpoints})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_cases_assemble_discharges_the_case_hypotheses(self):
+        # the union was checked unconditionally across all cases, so the
+        # mutually exclusive hypotheses stop conditioning the endpoint;
+        # a run that stops INSIDE one case still shows that case's own
+        session, api, endpoints = self._case_session()
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        json.loads(api['set_result'](rec['result']))
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine_assumptions'], [])
+        inside = session.ledger.presentation_topology(
+            final_provenance={'status': 'verified', 'source': 'ledger',
+                              'step': endpoints[0],
+                              'method': 'exact-result'})
+        self.assertEqual([a.get('constraint')
+                          for a in inside['spine_assumptions']],
+                         [r'x \gt 0'])
+
+    def test_cases_assemble_needs_a_recorded_hypothesis(self):
+        session, api, endpoints = self._case_session()
+        moved = json.loads(api['apply'](self.INEQUALITY, '-', '2'))
+        bare = json.loads(api['expand'](moved['result']))
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION,
+                               endpoints[0], bare['step']['id']]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('no case hypothesis', rec['error'])
+
+    def test_cases_assemble_requires_the_equations_skill(self):
+        session = DoSession()
+        api = make_api(session)
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION, 's1', 's2']))
+        self.assertFalse(rec['ok'])
+        self.assertIn("unloaded skill 'equations'", rec['error'])
+
+    def test_replay_rejects_tampered_case_provenance(self):
+        session, api, endpoints = self._case_session()
+        json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        session.ledger.steps[-1]['sources']['cases'][1] = endpoints[0]
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_replay_rejects_a_forged_case_hypothesis(self):
+        session, api, endpoints = self._case_session()
+        json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        session.ledger.steps[-1]['args']['hypotheses'][0] = r'x \gt 5'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('hypothesis provenance mismatch', replay['reason'])
+
+    def test_points_assemble_refuses_swapped_value_steps(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, list(reversed(values))))
+        self.assertFalse(rec['ok'])
+        self.assertIn('is not the value of', rec['error'])
+        self.assertEqual(len(session.ledger.steps), 6)
+
+    def test_points_assemble_needs_recorded_value_steps(self):
+        session, api, roots_id, values = self._stationary_session()
+        rec = json.loads(api['points_assemble'](
+            'x^3-3x', 'x', roots_id, ['s4', 's99']))
+        self.assertFalse(rec['ok'])
+        self.assertIn('unknown transforming step', rec['error'])
+
+    def test_replay_rejects_tampered_point_provenance(self):
+        session, api, roots_id, values = self._stationary_session()
+        json.loads(api['points_assemble']('x^3-3x', 'x', roots_id, values))
+        session.ledger.steps[-1]['sources']['values'][1] = 's4'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_typed_result_is_selectable_after_harmless_respelling(self):
+        session, api, roots_id, values = self._stationary_session()
+        json.loads(api['points_assemble']('x^3-3x', 'x', roots_id, values))
+        selected = json.loads(api['set_result'](r'\{ (-1, 2), (1, -2) \}'))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['method'], 'same-expression')
+        reordered = json.loads(api['set_result'](r'\{(1,-2),(-1,2)\}'))
+        self.assertFalse(reordered['ok'])
 
     def test_replay_rejects_tampered_assembly_provenance(self):
         session = DoSession()
@@ -629,6 +975,46 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(shown, ['stationary points'])
         self.assertEqual(ledger.replay()['status'], 'verified')
 
+    def test_stationary_points_finish_as_one_assembled_collection(self):
+        script = [
+            [tool_call('load_skill', {'skill': 'differentiation'}, 'sk1')],
+            [tool_call('diff', {'expr': 'x^3-3x', 'var': 'x'}, 'd1')],
+            [tool_call('load_skill', {'skill': 'equations'}, 'sk2')],
+            [tool_call('quadratic_roots', {
+                'expr': '3x^{2}-3', 'var': 'x'}, 'r1')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '-1'}, 'p1')],
+            [tool_call('evaluate', {'expr': '(-1)^{3}-3(-1)'}, 'p2')],
+            [tool_call('substitute', {
+                'expr': 'x^3-3x', 'var': 'x', 'value': '1'}, 'p3')],
+            [tool_call('evaluate', {'expr': '(1)^{3}-3(1)'}, 'p4')],
+            [tool_call('points_assemble', {
+                'expr': 'x^3-3x', 'var': 'x', 'roots_step': 's2',
+                'value_steps': ['s4', 's6']}, 'a1')],
+            [tool_call('set_result', {
+                'expr': r'\{(-1,2),(1,-2)\}'}, 'done')],
+            [message('Assembled the checked stationary points.')],
+        ]
+        ledger = Ledger()
+        res = run_instruction(
+            'find the stationary points of x^3-3x',
+            model=ScriptedModel(script), ledger=ledger)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(res['final_result'], r'\{(-1,2),(1,-2)\}')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        self.assertEqual(res['final_provenance']['step'], 's7')
+        self.assertEqual(res['steps'][-1]['op'], 'points_assemble')
+        self.assertEqual(res['steps'][-1]['check']['status'], 'agree')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_points_assemble_needs_its_subject_skill(self):
+        session = DoSession()
+        api = make_api(session)
+        refusal = json.loads(api['run_tactic'](
+            'points_assemble', ['x^3-3x', 'x', 's1', 's2']))
+        self.assertFalse(refusal['ok'])
+        self.assertIn("load_skill('equations')", refusal['error'])
+
     def test_ellipsis_series_limit_closes_via_sum_tactics(self):
         res = run_instruction('evaluate ' + LIM_SUM_EXPR,
                               model=ScriptedModel(LIM_SUM_SCRIPT))
@@ -672,6 +1058,61 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual(res['final_result'], '(x - 3)(x - 2)')
         self.assertEqual(res['final_provenance']['step'], 's1')
         self.assertEqual(len(res['steps']), 2)
+
+    def test_a_run_reports_the_premises_it_stated(self):
+        # the live int1 failure: typed coefficients laundered into green
+        # steps by multiplying by 1. Every step is honestly checked; what
+        # was missing is that the answer rests on nothing but assertions.
+        script = [
+            [tool_call('apply', {'equation': 'A = \\frac{1}{2}',
+                                 'op': '*', 'arg': '1'}, 'c1')],
+            [tool_call('expand', {
+                'expr': 'A \\cdot \\left(1\\right) = '
+                        '\\frac {1} {2} \\cdot \\left(1\\right)'}, 'c2')],
+            [message('A determined')],
+        ]
+        res = run_instruction('find A', model=ScriptedModel(script))
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual([p['input'] for p in res['premises']],
+                         ['A = \\frac{1}{2}'])
+
+    def test_premises_are_scoped_to_the_run_not_the_shared_ledger(self):
+        ledger = Ledger()
+        run_instruction('expand it', ledger=ledger, model=ScriptedModel(
+            [[tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+             [message('done')]]))
+        second = run_instruction('expand another', ledger=ledger,
+                                 model=ScriptedModel(
+            [[tool_call('expand', {'expr': '(y+1)^2'}, 'c2')],
+             [message('done')]]))
+        # the earlier cell's given belongs to that cell
+        self.assertEqual([p['input'] for p in second['premises']],
+                         ['(y+1)^2'])
+
+    def test_set_result_admission_mirrors_chain_goal(self):
+        # admission mirrors the composite closure gate (live: the agent
+        # retyped hand-simplified algebra as its final expand input, the
+        # chain severed silently, and int! refused only after the run had
+        # ended). With a chain_goal, set_result must refuse a verified but
+        # DISCONNECTED value while the agent can still repair.
+        script = [
+            [tool_call('expand', {'expr': '(y+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'y^{2}+2y+1'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('expand it', model=ScriptedModel(list(script)),
+                              chain_goal='(x+1)^2')
+        # the designation was refused: the run falls back to the honest
+        # last-transform record instead of a selection
+        self.assertEqual(res['final_provenance']['method'], 'last-step')
+        # control 1: the same selection with a matching goal is admitted
+        res = run_instruction('expand it', model=ScriptedModel(list(script)),
+                              chain_goal='(y+1)^2')
+        self.assertEqual(res['final_result'], 'y^{2}+2y+1')
+        self.assertNotEqual(res['final_provenance']['method'], 'last-step')
+        # control 2: plain do! runs carry no chain goal and stay permissive
+        res = run_instruction('expand it', model=ScriptedModel(list(script)))
+        self.assertNotEqual(res['final_provenance']['method'], 'last-step')
 
     def test_set_open_suppresses_last_step_fallback(self):
         # the conv! pseudo-answer: a run that certified nothing used to
@@ -800,7 +1241,99 @@ class TestScriptedAgent(unittest.TestCase):
                               max_turns=2)
         self.assertFalse(res['ok'])
         self.assertIn('turns', res['error'])
+        self.assertTrue(res['turn_limit_reached'])
         self.assertEqual(len(res['steps']), 2)  # partial work is kept
+
+    def test_empty_model_response_is_retried_not_accepted(self):
+        # gen 61: a live int1 run died at turn 5 when the provider returned a
+        # zero-token empty message (trace 4c93d48b01599905e10933c7d0e55d3d).
+        # The SDK reads that as the final answer, so the run ended holding an
+        # unfinished integral. Ask again instead.
+        empty = ResponseOutputMessage(
+            id='m', role='assistant', status='completed', type='message',
+            content=[])
+        calls = {'n': 0}
+
+        class FlakyModel(ScriptedModel):
+            async def get_response(self, *args, **kwargs):
+                calls['n'] += 1
+                if calls['n'] == 2:      # one empty blip mid-derivation
+                    return ModelResponse(output=[empty], usage=Usage(),
+                                         response_id=None)
+                return await ScriptedModel.get_response(self, *args, **kwargs)
+
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'x^{2}+2x+1'}, 'c2')],
+            [message('done')],
+        ]
+        model = agent_do._retrying_model(FlakyModel)(script)
+        res = run_instruction('expand it', model=model)
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(calls['n'], 4)  # 3 scripted turns + 1 retried blip
+
+    def test_persistently_empty_model_still_terminates(self):
+        empty = ResponseOutputMessage(
+            id='m', role='assistant', status='completed', type='message',
+            content=[])
+
+        class MuteModel(ScriptedModel):
+            def __init__(self):
+                ScriptedModel.__init__(self, [])
+                self.calls = 0
+
+            async def get_response(self, *args, **kwargs):
+                self.calls += 1
+                return ModelResponse(output=[empty], usage=Usage(),
+                                     response_id=None)
+
+        model = agent_do._retrying_model(MuteModel)()
+        res = run_instruction('anything', model=model)
+        self.assertTrue(res['ok'])          # ends, does not hang or raise
+        self.assertEqual(model.calls, agent_do.EMPTY_RESPONSE_RETRIES + 1)
+
+    def test_a_real_response_is_never_retried(self):
+        calls = {'n': 0}
+
+        class CountingModel(ScriptedModel):
+            async def get_response(self, *args, **kwargs):
+                calls['n'] += 1
+                return await ScriptedModel.get_response(self, *args, **kwargs)
+
+        script = [[tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+                  [message('done')]]
+        model = agent_do._retrying_model(CountingModel)(script)
+        res = run_instruction('expand it', model=model)
+        self.assertTrue(res['ok'])
+        self.assertEqual(calls['n'], 2)
+
+    def test_result_committed_on_the_last_turn_is_not_a_failure(self):
+        # gen 61: a live int! run committed a verified result with its 64th
+        # of 64 turns and was reported as "Max turns exceeded", discarding a
+        # correct answer. Only the closing prose was actually lost.
+        script = [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'x^{2}+2x+1'}, 'c2')],
+            [message('done')],
+        ]
+        res = run_instruction('expand it', model=ScriptedModel(script),
+                              max_turns=2)
+        self.assertTrue(res['ok'])
+        self.assertIsNone(res.get('error'))
+        self.assertTrue(res['turn_limit_reached'])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+
+    def test_unverified_designation_at_the_limit_still_fails(self):
+        # the last-step fallback is not a designation; nothing says that
+        # value answers the instruction, so exhaustion stays a failure
+        script = [[tool_call('expand', {'expr': f'x + {i}x'}, f'c{i}')]
+                  for i in range(10)]
+        res = run_instruction('loop', model=ScriptedModel(script),
+                              max_turns=3)
+        self.assertFalse(res['ok'])
+        self.assertIn('turns', res['error'])
 
     def test_prove_mode_closes_root_claim(self):
         script = [
@@ -1086,16 +1619,76 @@ class TestObservability(unittest.TestCase):
         })
 
     def test_active_run_emits_one_nested_langfuse_trace(self):
-        from agents import set_tracing_disabled
+        import asyncio
+
+        import httpx
+        from agents import (OpenAIChatCompletionsModel,
+                            set_tracing_disabled)
+        from langfuse import Langfuse
+        from openai import AsyncOpenAI
         from openinference.instrumentation.openai_agents import (
             OpenAIAgentsInstrumentor)
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter)
-        from langfuse import Langfuse
+
+        scripted_responses = []
+        for index, turn in enumerate(SOLVE_SCRIPT):
+            item = turn[0]
+            if isinstance(item, ResponseFunctionToolCall):
+                message_data = {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [{
+                        'id': item.call_id,
+                        'type': 'function',
+                        'function': {
+                            'name': item.name,
+                            'arguments': item.arguments,
+                        },
+                    }],
+                }
+                finish_reason = 'tool_calls'
+            else:
+                message_data = {
+                    'role': 'assistant',
+                    'content': item.content[0].text,
+                }
+                finish_reason = 'stop'
+            scripted_responses.append({
+                'id': f'chatcmpl-test-{index}',
+                'object': 'chat.completion',
+                'created': 0,
+                'model': 'test/provider-model',
+                'choices': [{
+                    'index': 0,
+                    'message': message_data,
+                    'finish_reason': finish_reason,
+                }],
+                'usage': {
+                    'prompt_tokens': 7,
+                    'completion_tokens': 3,
+                    'total_tokens': 10,
+                },
+            })
+
+        requests = []
+
+        def handle_request(request):
+            requests.append(request)
+            if not scripted_responses:
+                raise AssertionError('unexpected extra model request')
+            return httpx.Response(200, json=scripted_responses.pop(0))
 
         exporter = InMemorySpanExporter()
         lf = Langfuse(public_key='pk-lf-test', secret_key='sk-lf-test',
                       tracing_enabled=True, span_exporter=exporter)
+        http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle_request))
+        openai_client = AsyncOpenAI(
+            api_key='sk-test', base_url='https://mock.openrouter.test/v1',
+            http_client=http_client)
+        model = OpenAIChatCompletionsModel(
+            model='test/provider-model', openai_client=openai_client)
         set_tracing_disabled(False)
         observability._reset_for_tests()
 
@@ -1103,6 +1696,7 @@ class TestObservability(unittest.TestCase):
             OpenAIAgentsInstrumentor().uninstrument()
             observability._reset_for_tests()
             set_tracing_disabled(True)  # leave the process quiet again
+            asyncio.run(openai_client.close())
             lf.shutdown()
         self.addCleanup(cleanup)
 
@@ -1112,9 +1706,10 @@ class TestObservability(unittest.TestCase):
         ledger = Ledger()
         res = run_instruction(
             'solve 2x + 3 = 7 for x',
-            model=ScriptedModel([list(t) for t in SOLVE_SCRIPT]),
-            ledger=ledger)
+            model=model, ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(len(requests), 3)
+        self.assertFalse(scripted_responses)
         lf.flush()
 
         spans = exporter.get_finished_spans()
@@ -1132,6 +1727,25 @@ class TestObservability(unittest.TestCase):
         # the trusted-primitive calls appear as nested tool spans
         kinds = {s.attributes.get('openinference.span.kind') for s in spans}
         self.assertIn('TOOL', kinds)
+        llm_spans = [
+            s for s in spans
+            if s.attributes.get('openinference.span.kind') == 'LLM'
+        ]
+        self.assertEqual(len(llm_spans), 3)
+        for llm_span in llm_spans:
+            llm_attrs = dict(llm_span.attributes)
+            self.assertEqual(llm_attrs.get('llm.model_name'),
+                             'test/provider-model')
+            self.assertTrue(llm_attrs.get('input.value'))
+            self.assertTrue(llm_attrs.get('output.value'))
+            self.assertEqual(llm_attrs.get('llm.token_count.prompt'), 7)
+            self.assertEqual(llm_attrs.get('llm.token_count.completion'), 3)
+        self.assertIn('solve 2x + 3 = 7 for x',
+                      llm_spans[0].attributes['input.value'])
+        self.assertIn('run_tactic',
+                      llm_spans[0].attributes['output.value'])
+        self.assertIn('Subtracted 3 from both sides.',
+                      llm_spans[-1].attributes['output.value'])
         # tracing is observability only: the ledger is exactly what it would
         # be without it
         self.assertEqual([s['op'] for s in res['steps']],
@@ -1652,6 +2266,24 @@ class TestMathShellDo(unittest.TestCase):
         # check-status colors: agree green, skipped grey
         self.assertIn('#176b2c', html)
         self.assertIn('#888', html)
+
+    def test_rich_ledger_views_prettify_formula_stars(self):
+        step = self._chain_step('s1', 'expand', 'x*y')
+        step['input'] = '2*x'
+        streamed = self.shell.render_do_step(step)
+        chain = self.shell.render_do_chain([
+            step, self._chain_step('s2', 'expand', '2*x')])
+        claim = self.shell.render_do_claim({
+            'id': 'c1', 'statement': 'x*y=2*x', 'verdict': 'open'})
+        assumption = self.shell._assumption_html({'text': 'x*y \\ne 0'})
+        for rendered in (streamed, chain, claim, assumption):
+            self.assertIn('\\cdot', rendered)
+            self.assertNotIn('*', rendered)
+        mixed = self.shell._assumption_html({
+            'text': 'unused',
+            'display': 'literal * prose, then $x*y$'})
+        self.assertIn('literal * prose', mixed)
+        self.assertIn('$x \\cdot y$', mixed)
 
     def test_chain_table_skips_comments_and_short_runs(self):
         comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
@@ -2420,6 +3052,20 @@ class TestChainsToGoal(unittest.TestCase):
         self.assertTrue(ec._chains_to_goal(
             steps, 's3',
             '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+
+    def test_cdot_respelling_hop_accepted(self):
+        # live int! \int dx/(2\sin x - \cos x + 5): the agent rewrote a
+        # bare constant integrand as \frac{\sqrt{5}}{5} \cdot 1, and the
+        # explicit-\cdot presentation marking severed the verified chain
+        # at the \int-boundary hop — every step green, closure refused.
+        # The marking is display-only; linkage must be blind to it.
+        from ledger import _chain_links
+        self.assertTrue(_chain_links(
+            '\\int \\frac{\\sqrt{5}}{5} \\cdot 1 \\, d v',
+            '\\frac{\\sqrt{5}}{5} \\cdot 1'))
+        self.assertTrue(_chain_links('a \\cdot b', 'a b'))
+        # blindness covers the dot marking only, never structure
+        self.assertFalse(_chain_links('a \\cdot b', 'a + b'))
 
 
 class TestDirectCommands(unittest.TestCase):

@@ -17,8 +17,13 @@ chain that lets the cell accept your final value.
 1. Try `integrate_power_rule` for powers with integer or rational
    literal exponents (`x^{1/2}` works directly; a fractional exponent
    records `x > 0`), or `integrate_table` for basic functions of the
-   bare variable (sin, cos, e^x, sinh, cosh), constant multiples, and
-   `1/x` (gives `\ln x`, records `x > 0`).
+   bare variable (sin, cos, e^x, sinh, cosh), constant multiples, fully
+   constant integrands, `1/x` (gives `\ln x`, records `x > 0`), and the
+   arctan family `1/(a x^2 + b)` with positive literals `a`, `b` — a
+   constant numerator (even an irrational one like `\sqrt{5}`, in the
+   numerator or as a denominator factor) is handled with it. A quadratic
+   denominator with a linear term is one completing-the-square
+   `integrate_rewrite` plus shift substitution away from this rule.
 2. Use `integrate_substitute` when you can propose `u`, a new variable, and
    the rewritten integrand. ToyMath checks `f(u(x))u'(x)` against the
    original. The new integrand is an expression in the new variable ONLY -
@@ -27,8 +32,14 @@ chain that lets the cell accept your final value.
    (u := the expression in x).
 3. Use `integrate_by_parts` for one proposed `u·dv` split. Continue from its
    `remaining_integral` handle.
-4. For algebraic massage or partial fractions, propose the new integrand with
-   `integrate_rewrite`; core equality must confirm it.
+4. For algebraic massage, propose the new integrand with
+   `integrate_rewrite`; core equality must confirm it. For PARTIAL
+   FRACTIONS, do not propose the finished decomposition — a rejected guess
+   records nothing, and guessing the coefficients one sign at a time is how
+   a run exhausts its turns. Load the `equations` skill and derive them:
+   clear the denominators, `match_coefficients` in the variable, solve the
+   small system, then propose the decomposition once with
+   `integrate_rewrite` knowing it will pass.
 5. Split a top-level sum with `integrate_linearity`, solve every returned
    integral independently, pin per-piece constants to zero with core
    `substitute` (C := 0), then call `integrate_assemble` citing the PINNED
@@ -49,6 +60,19 @@ multiple of the exponent denominators. Worked shape (mixed roots):
   substituting `v = u+1` into the table's `1/v` rule; pin constants,
   assemble, then `substitute` u := `x^{1/6}` back. Core `expand` folds the
   resulting fractional powers (records `x > 0`).
+
+## Rational functions of sin and cos
+
+The Weierstrass substitution closes `\int \frac{dx}{a \sin x + b \cos x + c}`
+end to end. Worked shape:
+
+- `\int \frac{dx}{2\sin x - \cos x + 5}`: substitute `t = \tan(\frac{x}{2})`
+  proposing the rational integrand (`\frac{1}{3t^2+2t+2}` here); complete
+  the square with `integrate_rewrite`; `integrate_substitute` the shifted
+  variable (`u = t + \frac{1}{3}`); the table's arctan rule closes
+  `\frac{1}{3u^2+\frac{5}{3}}` in one step; back-substitute with core
+  `substitute` in reverse order. Do NOT hand-simplify the arctan argument
+  between steps — feed each recorded result forward exactly.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly

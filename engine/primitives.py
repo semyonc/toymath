@@ -46,6 +46,7 @@ _ELLIPSIS_NAMES = frozenset({
     '\\ldots', '\\cdots', '\\dots', '\\vdots', '\\ddots', '\\hdots',
     '\\dotsb', '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'})
 _ELLIPSIS_RE = re.compile(r'\\(?:[lcvdh])?dots[bcimo]?(?![A-Za-z])')
+_DISPLAY_STAR_RE = re.compile(r'(?<!\\)[ \t]*\*[ \t]*')
 
 
 def parse_latex(latex, allow_ellipsis=False, command_names=None):
@@ -180,6 +181,17 @@ class _GroupStripper(Replicator):
                 self.mapsym(sym), Func(Notation.SLASH, args))
         return super(_GroupStripper, self).enter_oper(sym, f)
 
+    def enter_plist(self, sym, f):
+        # explicit-\cdot marking is presentation only (the structural
+        # comparer ignores it); the comparison normal form must too, or
+        # linkage refuses honest respellings of one product
+        if 'cdot' in f.props:
+            args = self.build_list(f, self.enter_expr)
+            props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, args, **props))
+        return super(_GroupStripper, self).enter_plist(sym, f)
+
 
 def _normal_form(latex, allow_ellipsis=False):
     """Parse and print with {}-groups stripped: two strings with equal
@@ -202,6 +214,42 @@ def same_expression(latex1, latex2):
                 == _normal_form(latex2, allow_ellipsis=True))
     except PrimitiveError:
         return False
+
+
+def display_latex(latex):
+    """Presentation-only cleanup for a recorded LaTeX string.
+
+    Agents commonly use the keyboard product separator ``*``. Keep that
+    exact spelling in tactic records for hashing/replay, but show it as the
+    conventional ``\\cdot`` in MathJax-facing views. This is deliberately
+    not a parse/write canonicalization: re-emitting ``2*3`` or ``\\sin x*y``
+    can lose the explicit boundary the agent wrote.
+
+    Both spellings must parse to the same notation shape in both directions.
+    ``same_expression`` is intentionally unsuitable here because it preserves
+    the P_LIST ``cdot`` presentation prop; the structural comparer ignores
+    that prop without doing algebra or consulting the numeric oracle. On any
+    parse or shape mismatch, retain the source verbatim.
+    """
+    if not isinstance(latex, str) or '*' not in latex:
+        return latex
+    candidate = _DISPLAY_STAR_RE.sub(r' \\cdot ', latex)
+    if candidate == latex:
+        return latex
+    try:
+        source_sym, source_notation = parse_latex(
+            latex, allow_ellipsis=True)
+        display_sym, display_notation = parse_latex(
+            candidate, allow_ellipsis=True)
+        from comparer import s_equal
+        if (s_equal(source_sym, source_notation,
+                    display_sym, display_notation)
+                and s_equal(display_sym, display_notation,
+                            source_sym, source_notation)):
+            return candidate
+    except (PrimitiveError, ValueError):
+        pass
+    return latex
 
 
 def _operator_body_latex(latex):
@@ -270,7 +318,7 @@ def _integral_parts_latex(latex):
     elif len(tail) == 1:
         body = tail[0]
         g = notation.vgetf(body, [Notation.GROUP, Notation.V_GROUP])
-        if g is not None and g.props.get('br') != '||':
+        if g is not None and not Notation.is_semantic_bracket(g):
             body = g.args[0]
         fr = notation.get(body)
         if fr is not None and (fr.sym == Notation.SLASH
@@ -382,7 +430,7 @@ def _transparent_inner(sym, notation):
     """Remove ordinary grouping around binder metadata."""
     while isinstance(sym, Symbol):
         f = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
-        if f is None or f.props.get('br') == '||':
+        if f is None or Notation.is_semantic_bracket(f):
             break
         sym = f.args[0]
     return sym
@@ -771,13 +819,19 @@ def numeric_eval(sym, notation, env):
     op = f.sym
     if op in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
               Notation.PLUS):
-        if f.props.get('br') == '||':
-            # absolute value bars — the oracle computes real |·|, sharing
-            # nothing with the symbolic atom path.
+        if Notation.is_semantic_bracket(f):
+            # bracket operators — the oracle computes the real |·|, floor
+            # and ceiling, sharing nothing with the symbolic atom path.
+            br = f.props['br']
             v = numeric_eval(f.args[0], notation, env)
             if isinstance(v, list):
-                raise EvalError('absolute value of a matrix')
-            return abs(v)
+                raise EvalError(
+                    f'{Notation.BRACKET_NAMES[br]} of a matrix')
+            if br == Notation.ABS_BR:
+                return abs(v)
+            if br == Notation.FLOOR_BR:
+                return float(math.floor(v))
+            return float(math.ceil(v))
         return numeric_eval(f.args[0], notation, env)
     if op in (Notation.PAIR, Notation.COLLECTION):
         raise EvalError(f'{op.name} is a typed result, not a scalar value')
@@ -1033,6 +1087,171 @@ def _eval_kind(sym, notation, env):
         return 'oracle', None
 
 
+# ---------------------------------------------------------------------------
+# assumption constraints: the oracle samples only inside the assumed region
+# ---------------------------------------------------------------------------
+
+# Relations the oracle can test at a sample point. The tactics accept only
+# strict hypotheses (see `_CONSTRAINT_REL` in tactics/core.py); the rest are
+# evaluated honestly here anyway, and a region with no interior simply
+# leaves the check 'skipped' instead of silently unguarded.
+_ORACLE_REL = {'=', '\\ne', '\\neq', '<', '\\lt', '>', '\\gt',
+               '\\le', '\\leq', '\\ge', '\\geq'}
+# distance from the boundary a sample point must keep. Points nearer than
+# this prove nothing about a strict relation, so they are rejected rather
+# than decided.
+_STRICT_MARGIN = 1e-6
+_DISTINCT_MARGIN = 1e-4
+
+
+def _relation_parts(latex):
+    """(lhs, rhs, rel, notation) for a relation, else None. The oracle
+    re-derives relation structure itself and never routes through the
+    symbolic tactic helpers — the two legs must stay independent."""
+    sym, notation = parse_latex(latex)
+    comp = notation.getf(sym, Notation.COMP)
+    if comp is None:
+        return None
+    rel = comp.sym.props.get('op')
+    if rel not in _ORACLE_REL:
+        return None
+    return comp.args[0], comp.args[1], rel, notation
+
+
+def hypothesis_parts(assumption):
+    """(lhs, rhs, direction) for an assumption that states a strict
+    hypothesis, else None. direction is -1 for '<' and +1 for '>'."""
+    relation = (assumption or {}).get('constraint')
+    if not relation:
+        return None
+    try:
+        parts = _relation_parts(relation)
+    except PrimitiveError:
+        return None
+    if parts is None:
+        return None
+    lhs, rhs, rel, notation = parts
+    if rel in ('<', '\\lt'):
+        direction = -1
+    elif rel in ('>', '\\gt'):
+        direction = 1
+    else:
+        return None
+    return write_latex(lhs, notation), write_latex(rhs, notation), direction
+
+
+def exclusive_hypotheses(assumptions):
+    """Index pairs of recorded hypotheses that cannot hold together: the
+    same two sides compared in opposite strict directions (`x > 0` with
+    `x < 0`, or `x > 0` with `0 > x`).
+
+    Structural only, and deliberately incomplete: a general contradiction
+    test would be a prover, which this layer is not. It recognises exactly
+    the shape a sign case-split produces, so alternative cases are never
+    presented as one conjunction."""
+    parsed = [hypothesis_parts(a) for a in (assumptions or [])]
+    pairs = []
+    for i, first in enumerate(parsed):
+        if first is None:
+            continue
+        for j in range(i + 1, len(parsed)):
+            second = parsed[j]
+            if second is None:
+                continue
+            l1, r1, d1 = first
+            l2, r2, d2 = second
+            same = same_expression(l1, l2) and same_expression(r1, r2)
+            crossed = same_expression(l1, r2) and same_expression(r1, l2)
+            if (same and d1 == -d2) or (crossed and d1 == d2):
+                pairs.append((i, j))
+    return pairs
+
+
+def _relation_truth(v1, v2, rel, tol):
+    """True/False for a relation between two sampled values; None when the
+    point is too close to the boundary (or not comparable) to decide."""
+    if isinstance(v1, list) or isinstance(v2, list):
+        return None
+    if rel in ('=', '\\ne', '\\neq'):
+        agree = _num_agree(v1, v2, tol)
+        if agree is None:
+            return None
+        return agree if rel == '=' else not agree
+    scale = max(1.0, abs(v1), abs(v2))
+    d = (v1 - v2) / scale
+    if abs(d) < _STRICT_MARGIN:
+        return None
+    if rel in ('<', '\\lt', '\\le', '\\leq'):
+        return d < 0
+    return d > 0
+
+
+def _sample_guards(assumptions):
+    """(nonzero_guards, constraint_guards) parsed out of assumption records.
+    `nonzero` keeps its historical meaning; `constraint` carries a whole
+    relation the sample point must satisfy."""
+    nonzero = []
+    constraints = []
+    for a in (assumptions or []):
+        expr = a.get('nonzero')
+        if expr:
+            try:
+                nonzero.append(parse_latex(expr))
+            except PrimitiveError:
+                pass
+        relation = a.get('constraint')
+        if relation:
+            try:
+                parts = _relation_parts(relation)
+            except PrimitiveError:
+                parts = None
+            if parts is not None:
+                constraints.append(parts)
+    return nonzero, constraints
+
+
+def _admissible_point(guards, env):
+    """True when the point lies inside every recorded assumption. A point
+    the guards cannot be evaluated at is rejected: an unusable guard must
+    never widen the sampled region."""
+    nonzero, constraints = guards
+    try:
+        for gs, gn in nonzero:
+            if _num_abs(numeric_eval(gs, gn, env)) < _DISTINCT_MARGIN:
+                return False
+        for lhs, rhs, rel, gn in constraints:
+            v1 = numeric_eval(lhs, gn, env)
+            v2 = numeric_eval(rhs, gn, env)
+            if rel in ('\\ne', '\\neq'):
+                if _num_agree(v1, v2, _DISTINCT_MARGIN) is not False:
+                    return False
+                continue
+            if _relation_truth(v1, v2, rel, _STRICT_MARGIN) is not True:
+                return False
+    except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def _guard_variables(guards):
+    """Free variables the guards need. The assumed region lives in the
+    joint space: a hypothesis about a variable the compared expressions do
+    not mention must still be sampled, or every point is rejected."""
+    nonzero, constraints = guards
+    names = set()
+    for gs, gn in nonzero:
+        names |= free_symbols(gs, gn)
+    for lhs, rhs, _rel, gn in constraints:
+        names |= free_symbols(lhs, gn) | free_symbols(rhs, gn)
+    return names
+
+
+def _sample_budget(samples, guards):
+    # rejection sampling inside a constrained region needs more tries; the
+    # unconstrained budget stays exactly as it was
+    return samples * (24 if guards[1] else 8)
+
+
 def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
                        seed=20260705, tol=1e-6):
     """Independently check latex1 == latex2 at random sample points.
@@ -1048,30 +1267,20 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         s2, n2 = parse_latex(latex2)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
-    variables = free_symbols(s1, n1) | free_symbols(s2, n2)
-    guards = []
-    for a in (assumptions or []):
-        expr = a.get('nonzero')
-        if expr:
-            try:
-                gs, gn = parse_latex(expr)
-                guards.append((gs, gn))
-            except PrimitiveError:
-                pass
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(s1, n1) | free_symbols(s2, n2)
+                 | _guard_variables(guards))
     rng = random.Random(seed)
     agreed = 0
     tried = 0
     undefined_both = 0
     mismatches = 0
     mismatch = None
-    while agreed < samples and tried < samples * 8:
+    budget = _sample_budget(samples, guards)
+    while agreed < samples and tried < budget:
         tried += 1
         env = _sample_point(variables, rng)
-        try:
-            if any(_num_abs(numeric_eval(gs, gn, env)) < 1e-4
-                   for gs, gn in guards):
-                continue
-        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        if not _admissible_point(guards, env):
             continue
         k1, v1 = _eval_kind(s1, n1, env)
         k2, v2 = _eval_kind(s2, n2, env)
@@ -1103,6 +1312,148 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     if undefined_both:
         result['undefined_points'] = undefined_both
     return result
+
+
+def numeric_relation_check(latex1, latex2, assumptions=None, samples=12,
+                           seed=20260727, tol=1e-6):
+    """Independently check that two relations hold at exactly the same
+    sample points inside the assumed region.
+
+    Per-side value checks see the algebra but not the DIRECTION: they pass
+    just as happily on `a < b` turned into `-a < -b`. This is the oracle
+    leg for a step whose claim is that the relation is preserved."""
+    try:
+        parts1 = _relation_parts(latex1)
+        parts2 = _relation_parts(latex2)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if parts1 is None or parts2 is None:
+        return {'status': 'skipped', 'reason': 'not a supported relation'}
+    l1, r1, rel1, n1 = parts1
+    l2, r2, rel2, n2 = parts2
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(l1, n1) | free_symbols(r1, n1)
+                 | free_symbols(l2, n2) | free_symbols(r2, n2)
+                 | _guard_variables(guards))
+    rng = random.Random(seed)
+    agreed = 0
+    satisfied = 0
+    tried = 0
+    budget = _sample_budget(samples, guards)
+    while agreed < samples and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng)
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            t1 = _relation_truth(numeric_eval(l1, n1, env),
+                                 numeric_eval(r1, n1, env), rel1, tol)
+            t2 = _relation_truth(numeric_eval(l2, n2, env),
+                                 numeric_eval(r2, n2, env), rel2, tol)
+        except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+            continue
+        if t1 is None or t2 is None:
+            continue
+        if t1 != t2:
+            return {'status': 'disagree', 'point': env,
+                    'holds': {latex1: t1, latex2: t2}}
+        agreed += 1
+        if t1:
+            satisfied += 1
+    if agreed == 0:
+        return {'status': 'skipped',
+                'reason': 'no sample points inside the assumed region'}
+    # a region where the relation is never true agrees vacuously; report
+    # how much of the sample actually exercised the direction
+    return {'status': 'agree', 'samples': agreed, 'holding_points': satisfied}
+
+
+def _union_truths_at(env, tparts, dparts, tol):
+    """(target_truth, union_truth) at one point, or None when any side is
+    unevaluable or boundary-blurred. Every disjunct must be evaluable — a
+    disjunct silently dropping out of the OR would let a junk case ride
+    along unchecked."""
+    tl, tr, trel, tn = tparts
+    try:
+        t = _relation_truth(numeric_eval(tl, tn, env),
+                            numeric_eval(tr, tn, env), trel, tol)
+        truths = [_relation_truth(numeric_eval(dl, dn, env),
+                                  numeric_eval(dr, dn, env), drel, tol)
+                  for dl, dr, drel, dn in dparts]
+    except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        return None
+    if t is None or any(d is None for d in truths):
+        return None
+    return t, any(truths)
+
+
+def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
+                        tol=1e-6):
+    """Independently check that a disjunction of relations holds exactly
+    where the target relation holds.
+
+    An assembled union claims a biconditional: some disjunct is true at a
+    point if and only if the target is. The mismatch region of a wrong
+    union is typically a bounded interval between roots, which a handful
+    of random points can miss entirely — so the one-variable case also
+    walks a fine deterministic sweep (uniform steps plus pole-clustered
+    reciprocal points). Agreement must exercise both truth sides: a
+    sample that never saw the relation hold, or never saw it fail, is
+    one-sided evidence and reports `skipped`, not `agree`."""
+    try:
+        tparts = _relation_parts(target)
+        dparts = [_relation_parts(d) for d in disjuncts]
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if tparts is None or not dparts or any(p is None for p in dparts):
+        return {'status': 'skipped', 'reason': 'not a supported relation'}
+    tl, tr, trel, tn = tparts
+    variables = free_symbols(tl, tn) | free_symbols(tr, tn)
+    for dl, dr, _drel, dn in dparts:
+        variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
+    agreed = 0
+    holding = 0
+    if len(variables) == 1:
+        var = next(iter(variables))
+        sweep = [k / 20.0 for k in range(-240, 241)]
+        sweep += [sign / k for sign in (1.0, -1.0) for k in range(2, 61)]
+        for x in sweep:
+            pair = _union_truths_at({var: x}, tparts, dparts, tol)
+            if pair is None:
+                continue
+            t, union = pair
+            if t != union:
+                return {'status': 'disagree', 'point': {var: x},
+                        'holds': {'target': t, 'union': union}}
+            agreed += 1
+            if t:
+                holding += 1
+    rng = random.Random(seed)
+    tried = 0
+    wanted = agreed + samples
+    budget = _sample_budget(samples, ([], []))
+    while agreed < wanted and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng)
+        pair = _union_truths_at(env, tparts, dparts, tol)
+        if pair is None:
+            continue
+        t, union = pair
+        if t != union:
+            return {'status': 'disagree', 'point': env,
+                    'holds': {'target': t, 'union': union}}
+        agreed += 1
+        if t:
+            holding += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    if holding == 0 or holding == agreed:
+        side = 'hold' if holding == 0 else 'fail'
+        return {'status': 'skipped',
+                'reason': f'one-sided sample: the target was never seen to '
+                          f'{side}, so coverage of the union was not '
+                          f'exercised in both directions'}
+    return {'status': 'agree', 'samples': agreed, 'holding_points': holding}
 
 
 # ---------------------------------------------------------------------------
@@ -1142,6 +1493,14 @@ class Substitutor(Replicator):
         value_sym, value_notation = entry
         copied = Replicator(value_notation, self.output_notation)(value_sym)
         if isinstance(copied, Symbol) and self.output_notation.get(copied) is None:
+            return copied
+        g = self.output_notation.getf(copied, Notation.GROUP)
+        if g is not None and g.props.get('br') == '()':
+            # already self-delimited: a second () layer is what made
+            # substitute('a^2+1','a','(x+1)') read ((x+1))^{2}+1, and it
+            # survives wherever the relax pass cannot reach (an INDEX base,
+            # a product factor). The wrapper exists to delimit, so a node
+            # that is already delimited needs no other.
             return copied
         return self.output_notation.setf(Notation.GROUP, (copied,), br='()')
 
@@ -1236,11 +1595,21 @@ def _strip_limit(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             break
         sym = g.args[0]
     f = notation.getf(sym, Notation.P_LIST)
     if f is None:
+        s = notation.getf(sym, Notation.S_LIST)
+        if s is not None and s.args:
+            head = _peel_groups(s.args[0], notation)
+            hp = notation.getf(head, Notation.P_LIST)
+            first = hp.args[0] if hp is not None else head
+            if _big_operator_name(first, notation) == '\\lim':
+                raise PrimitiveError(
+                    'a leading sign splits the limit body into a sum; '
+                    'parenthesize the signed body, as in '
+                    '\\lim_{x \\to 0} (-x)')
         raise PrimitiveError('expected a limit expression')
     raw = list(f.args)
     significant = [a for a in raw if not (isinstance(a, Symbol)
@@ -1302,7 +1671,7 @@ def _peel_groups(sym, notation):
     while True:
         g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP,
                                  Notation.S_GROUP])
-        if g is None or g.props.get('br') == '||':
+        if g is None or Notation.is_semantic_bracket(g):
             return sym
         sym = g.args[0]
 
@@ -1334,7 +1703,7 @@ def _split_trailing_differential(num, notation, var):
     position is indistinguishable from the differential - the human
     reading wins."""
     g = notation.vgetf(num, [Notation.GROUP, Notation.V_GROUP])
-    if g is not None and g.props.get('br') != '||':
+    if g is not None and not Notation.is_semantic_bracket(g):
         num = g.args[0]
     f = notation.getf(num, Notation.P_LIST)
     if f is None:
@@ -1381,7 +1750,7 @@ def _strip_integral(sym, notation, var):
         # textbook form: the differential lives in the fraction numerator
         inner = core[0]
         g = notation.vgetf(inner, [Notation.GROUP, Notation.V_GROUP])
-        if g is not None and g.props.get('br') != '||':
+        if g is not None and not Notation.is_semantic_bracket(g):
             inner = g.args[0]
         fr = notation.get(inner)
         if fr is not None and (fr.sym == Notation.SLASH

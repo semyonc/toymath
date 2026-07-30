@@ -20,6 +20,22 @@ from replicator import Replicator
 from helpers import trace_notation
 from frac_utils import is_frac, get_numerator, get_denominator, normalize_frac
 from frac_utils import FRAC_SYMBOL_NAMES, normalize_frac
+from classic_canonical import DEFAULT_CLASSIC_MAX_TERMS
+
+
+DEFAULT_MAX_FIXED_POINT_ITERATIONS = 256
+
+
+class FixedPointError(RuntimeError):
+    """Base class for deterministic classic fixed-point failures."""
+
+
+class FixedPointCycleError(FixedPointError):
+    """The classic rewrite engine revisited an earlier non-final state."""
+
+
+class FixedPointLimitError(FixedPointError):
+    """The classic rewrite engine did not converge within its pass limit."""
  
 
 def iterate(x):
@@ -35,6 +51,12 @@ def get_value(sym, notation):
         return sym
     f = notation.getf(sym, Notation.GROUP)
     if f is not None:
+        if Notation.is_semantic_bracket(f):
+            # |-3| and \lfloor 2.7 \rfloor are bracket operators, not
+            # grouping: reading the payload straight through would report
+            # -3 and 2.7. There is no oracle in this path, so the guard
+            # refuses a value rather than computing one.
+            return None
         return get_value(f.args[0], notation)
     f = notation.getf(sym, Notation.MINUS)
     if f is not None:
@@ -123,10 +145,12 @@ class Calculator(Replacer):
     abbreviated_minus = comparer.pattern("(+x)", ["x"])
     abbreviated_plus = comparer.pattern("(-x)", ["x"])
 
-    def __init__(self, notation, output_notation, actions=None, model=None):
+    def __init__(self, notation, output_notation, actions=None, model=None,
+                 max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS):
         super(Calculator, self).__init__(notation, output_notation)
         self.actions = actions
         self.prologModel = model
+        self.max_expansion_terms = max_expansion_terms
 
     def enter_command(self, sym, f):
         action_name = f.sym.name[:-1]
@@ -141,7 +165,7 @@ class Calculator(Replacer):
 
     def get_factor(self, sym):
         f = self.output_notation.vgetf(sym, [Notation.PLUS, Notation.GROUP])
-        if f is not None:
+        if f is not None and not Notation.is_semantic_bracket(f):
             return self.get_factor(f.args[0])
         f = self.output_notation.getf(sym, Notation.MINUS)
         if f is not None:
@@ -158,6 +182,8 @@ class Calculator(Replacer):
 
     def get_expr(self, sym):
         f = self.output_notation.getf(sym, Notation.GROUP)
+        if f is not None and Notation.is_semantic_bracket(f):
+            return [sym]
         if f is not None:
             if self.output_notation.getf(f.args[0], Notation.P_LIST) is not None:
                 sym = f.args[0]
@@ -213,18 +239,21 @@ class Calculator(Replacer):
     def make_degree(self, sym, deg):
         f = self.output_notation.getf(sym, Notation.INDEX)
         if f is not None:
-            return self.output_notation.repf(
-                sym,
-                Func(
-                    Notation.INDEX,
+            # A notation DAG may share this INDEX across several terms.  In
+            # particular, mul! repeats the same factor node when expanding a
+            # power.  Replacing ``sym`` here would retroactively change every
+            # earlier term that references it (x^2, x^4, and x^6 would all
+            # become whichever degree was written last).  Power collection
+            # is a transformation, so give its result a fresh node.
+            return self.output_notation.setf(
+                Notation.INDEX,
+                (
+                    f.args[0],
                     (
-                        f.args[0],
-                        (
-                            f.args[1][0],
-                            f.args[1][1],
-                            self.subst(None, deg, Notation.INDEX),
-                            f.args[1][3],
-                        ),
+                        f.args[1][0],
+                        f.args[1][1],
+                        self.subst(None, deg, Notation.INDEX),
+                        f.args[1][3],
                     ),
                 ),
             )
@@ -372,6 +401,14 @@ class Calculator(Replacer):
                 self.mapsym(sym), Func(f.sym, (expr,), **f.props)
             )
         outs = self.enter_formula(f.args[0])
+        if Notation.is_semantic_bracket(f):
+            # a bracket operator keeps its node whatever the payload reduces
+            # to: |-3| is not -3, and \lfloor 2.7 \rfloor is not 2.7. This
+            # path has no oracle, so the guard preserves the operator rather
+            # than evaluating it.
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(f.sym, (outs,), **f.props)
+            )
         if isinstance(outs, Value):
             return outs
         if f.props["br"] == "()":
@@ -546,7 +583,10 @@ class Calculator(Replacer):
                 else:
                     sym = f.args[0]
             f = self.output_notation.getf(sym, Notation.GROUP)
-            if f is None or "quoted" in f.props:
+            if f is None or "quoted" in f.props \
+                    or Notation.is_semantic_bracket(f):
+                # a bracket operator is not a removable parenthesis:
+                # splicing |x+1| into the enclosing sum turns it into x+1
                 output_args.append(arg)
                 continue
             f = self.output_notation.getf(f.args[0], Notation.S_LIST)
@@ -618,10 +658,19 @@ class Calculator(Replacer):
 class MathProcessor(object):
     """MathProcessor"""
 
-    def __init__(self, model=None, **kwargs):
+    def __init__(self, model=None,
+                 max_iterations=DEFAULT_MAX_FIXED_POINT_ITERATIONS,
+                 max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS,
+                 **kwargs):
+        if max_iterations <= 0:
+            raise ValueError('fixed-point iteration limit must be positive')
+        if max_expansion_terms <= 0:
+            raise ValueError('classic expansion term budget must be positive')
         self.trace = None
         self.actions = register_actions()
         self.prologModel = model
+        self.max_iterations = max_iterations
+        self.max_expansion_terms = max_expansion_terms
 
     # create True in Notation
     @staticmethod
@@ -643,16 +692,32 @@ class MathProcessor(object):
             if parse_res is not None:
                 return parse_res, notation
         index = 1
+        seen_states = [(sym, notation)]
         while True:
             calculator = Calculator(
-                notation, output_notation, self.actions, self.prologModel
+                notation, output_notation, self.actions, self.prologModel,
+                max_expansion_terms=self.max_expansion_terms,
             )
             #trace_notation(notation, sym, tag="before")
             outs = calculator(sym)
             if comparer.s_equal(outs, output_notation, sym, notation):
                 break
+            for seen_index, (seen_sym, seen_notation) in enumerate(seen_states):
+                if comparer.s_equal(
+                    outs, output_notation, seen_sym, seen_notation
+                ):
+                    raise FixedPointCycleError(
+                        'classic fixed-point cycle detected '
+                        f'(pass {index}, repeats state {seen_index})'
+                    )
+            if index >= self.max_iterations:
+                raise FixedPointLimitError(
+                    'classic fixed-point iteration limit exceeded '
+                    f'({self.max_iterations} passes)'
+                )
             notation = output_notation
             sym = outs
+            seen_states.append((sym, notation))
             if self.trace is not None:
                 self.trace(sym, notation, index)
             output_notation = Notation()
