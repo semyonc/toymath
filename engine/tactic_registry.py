@@ -278,6 +278,112 @@ def _system_assemble_from_steps(context, args):
     return result
 
 
+def _case_chain_hypotheses(steps, endpoint_id, target):
+    """(hypotheses, error) walking the recorded chain backward from a case
+    endpoint step to the stated target, collecting `assuming` constraints.
+
+    The hypothesis of a case is usually recorded on an earlier step of its
+    chain (the `apply --assuming` move), not on the endpoint the agent
+    names — so the case is the whole chain segment rooted at the target,
+    and the walk reuses the ledger's own chaining comparator so linkage
+    can never disagree with topology or replay."""
+    from ledger import _chain_links
+    by_id = {step['id']: step for step in steps}
+    order = {step['id']: position for position, step in enumerate(steps)}
+    current = by_id.get(endpoint_id)
+    if current is None or current.get('result') is None:
+        return None, f'unknown transforming step {endpoint_id!r}'
+    constraints = []
+    visited = set()
+    while True:
+        if current['id'] in visited:
+            return None, f'circular chain at {current["id"]}'
+        visited.add(current['id'])
+        for assumption in current.get('assumptions') or []:
+            constraint = assumption.get('constraint')
+            if constraint:
+                constraints.append(constraint)
+        cur_input = current.get('input') or ''
+        if (primitives.same_expression(cur_input, target)
+                or _chain_links(target, cur_input)):
+            distinct = []
+            for constraint in constraints:
+                if not any(equations._same_relation(constraint, kept)
+                           for kept in distinct):
+                    distinct.append(constraint)
+            if not distinct:
+                return None, (
+                    f'no case hypothesis is recorded on the chain of '
+                    f'{endpoint_id}; a case is stated with assuming')
+            if len(distinct) > 1:
+                return None, (
+                    f'the chain of {endpoint_id} mixes several distinct '
+                    f'hypotheses ({", ".join(repr(c) for c in distinct)}); '
+                    'assemble one case per stated hypothesis')
+            return distinct[0], None
+        producer = None
+        for step in steps[:order[current['id']]]:
+            if step.get('result') is None:
+                continue
+            if (step['result'] == cur_input
+                    or _chain_links(step['result'], cur_input)):
+                producer = step
+        if producer is None:
+            return None, (
+                f'step {current["id"]} does not chain back to the stated '
+                f'target {target!r}; every case must derive from it')
+        current = producer
+
+
+def _cases_assemble_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('cases_assemble',
+                      'cases_assemble requires a session')
+    by_id = {step['id']: step for step in steps}
+    endpoints = []
+    hypotheses = []
+    for source_id in args['case_steps']:
+        source = by_id.get(source_id)
+        if source is None or source.get('result') is None:
+            return _error('cases_assemble',
+                          f'unknown transforming step {source_id!r}')
+        hypothesis, walk_error = _case_chain_hypotheses(
+            steps, source_id, args['target'])
+        if walk_error:
+            return _error('cases_assemble', walk_error)
+        endpoints.append(source['result'])
+        hypotheses.append(hypothesis)
+    result = equations.cases_assemble(
+        args['target'], args['union'], endpoints, hypotheses)
+    if result.get('ok'):
+        result['sources'] = {'cases': list(args['case_steps'])}
+    return result
+
+
+def _validate_cases_assemble(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    source_ids = sources.get('cases') or []
+    endpoints = args.get('endpoints') or []
+    hypotheses = args.get('hypotheses') or []
+    if not (len(source_ids) == len(endpoints) == len(hypotheses)):
+        return 'case provenance mismatch'
+    steps = list(seen.values())
+    for source_id, endpoint, hypothesis in zip(source_ids, endpoints,
+                                               hypotheses):
+        source = seen.get(source_id)
+        if source is None or source.get('result') != endpoint:
+            return f'case endpoint provenance mismatch at {source_id}'
+        walked, walk_error = _case_chain_hypotheses(
+            steps, source_id, args.get('target', ''))
+        if walk_error:
+            return f'case chain invalid at {source_id}: {walk_error}'
+        if not equations._same_relation(walked, hypothesis):
+            return f'case hypothesis provenance mismatch at {source_id}'
+    return None
+
+
 def _validate_limit_from_sides(step, seen):
     sources = step.get('sources') or {}
     args = step.get('args', {})
@@ -530,6 +636,46 @@ TACTICS = (
                  '"unknown = value"', nargs='+')),
         cli_handler=_system_assemble_from_steps,
         provenance_validator=_validate_system_assemble),
+    TacticSpec(
+        'cases_assemble', 'cases_assemble', 'equations',
+        'assemble recorded case endpoints under their stated hypotheses '
+        'into the checked union of solutions for a stated relation',
+        equations.cases_assemble,
+        (_arg('target', 'TARGET',
+              'relation the cases solve — the problem, never the answer'),
+         _arg('union', 'UNION',
+              'proposed \\lor disjunction; each disjunct restates its '
+              "case's recorded endpoint or stated hypothesis, in order"),
+         _arg('endpoints', 'ENDPOINT',
+              'recorded case endpoint relations, one per disjunct',
+              nargs='+'),
+         _arg('hypotheses', 'HYPOTHESIS',
+              'stated case hypotheses, one per disjunct', nargs='+')),
+        agent_arguments=(
+            _arg('target', 'TARGET',
+                 'relation the cases solve — the problem, never the '
+                 'answer'),
+            _arg('union', 'UNION',
+                 'proposed \\lor disjunction; each disjunct restates its '
+                 "case's recorded endpoint or stated hypothesis, in order"),
+            _arg('case_steps', 'STEP',
+                 'ledger step ids of the case endpoints, one per '
+                 'disjunct, in the order the union writes them',
+                 nargs='+')),
+        agent_handler=_cases_assemble_from_steps,
+        cli_arguments=(
+            _arg('target', 'TARGET',
+                 'relation the cases solve — the problem, never the '
+                 'answer'),
+            _arg('union', 'UNION',
+                 'proposed \\lor disjunction; each disjunct restates its '
+                 "case's recorded endpoint or stated hypothesis, in order"),
+            _arg('case_steps', 'STEP',
+                 'ledger step ids of the case endpoints, one per '
+                 'disjunct, in the order the union writes them',
+                 nargs='+')),
+        cli_handler=_cases_assemble_from_steps,
+        provenance_validator=_validate_cases_assemble),
 
     TacticSpec('integrate_power_rule', 'integrate_power_rule',
                'integration', 'apply the termwise power rule',

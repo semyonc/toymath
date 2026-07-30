@@ -1368,6 +1368,94 @@ def numeric_relation_check(latex1, latex2, assumptions=None, samples=12,
     return {'status': 'agree', 'samples': agreed, 'holding_points': satisfied}
 
 
+def _union_truths_at(env, tparts, dparts, tol):
+    """(target_truth, union_truth) at one point, or None when any side is
+    unevaluable or boundary-blurred. Every disjunct must be evaluable — a
+    disjunct silently dropping out of the OR would let a junk case ride
+    along unchecked."""
+    tl, tr, trel, tn = tparts
+    try:
+        t = _relation_truth(numeric_eval(tl, tn, env),
+                            numeric_eval(tr, tn, env), trel, tol)
+        truths = [_relation_truth(numeric_eval(dl, dn, env),
+                                  numeric_eval(dr, dn, env), drel, tol)
+                  for dl, dr, drel, dn in dparts]
+    except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+        return None
+    if t is None or any(d is None for d in truths):
+        return None
+    return t, any(truths)
+
+
+def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
+                        tol=1e-6):
+    """Independently check that a disjunction of relations holds exactly
+    where the target relation holds.
+
+    An assembled union claims a biconditional: some disjunct is true at a
+    point if and only if the target is. The mismatch region of a wrong
+    union is typically a bounded interval between roots, which a handful
+    of random points can miss entirely — so the one-variable case also
+    walks a fine deterministic sweep (uniform steps plus pole-clustered
+    reciprocal points). Agreement must exercise both truth sides: a
+    sample that never saw the relation hold, or never saw it fail, is
+    one-sided evidence and reports `skipped`, not `agree`."""
+    try:
+        tparts = _relation_parts(target)
+        dparts = [_relation_parts(d) for d in disjuncts]
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if tparts is None or not dparts or any(p is None for p in dparts):
+        return {'status': 'skipped', 'reason': 'not a supported relation'}
+    tl, tr, trel, tn = tparts
+    variables = free_symbols(tl, tn) | free_symbols(tr, tn)
+    for dl, dr, _drel, dn in dparts:
+        variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
+    agreed = 0
+    holding = 0
+    if len(variables) == 1:
+        var = next(iter(variables))
+        sweep = [k / 20.0 for k in range(-240, 241)]
+        sweep += [sign / k for sign in (1.0, -1.0) for k in range(2, 61)]
+        for x in sweep:
+            pair = _union_truths_at({var: x}, tparts, dparts, tol)
+            if pair is None:
+                continue
+            t, union = pair
+            if t != union:
+                return {'status': 'disagree', 'point': {var: x},
+                        'holds': {'target': t, 'union': union}}
+            agreed += 1
+            if t:
+                holding += 1
+    rng = random.Random(seed)
+    tried = 0
+    wanted = agreed + samples
+    budget = _sample_budget(samples, ([], []))
+    while agreed < wanted and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng)
+        pair = _union_truths_at(env, tparts, dparts, tol)
+        if pair is None:
+            continue
+        t, union = pair
+        if t != union:
+            return {'status': 'disagree', 'point': env,
+                    'holds': {'target': t, 'union': union}}
+        agreed += 1
+        if t:
+            holding += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    if holding == 0 or holding == agreed:
+        side = 'hold' if holding == 0 else 'fail'
+        return {'status': 'skipped',
+                'reason': f'one-sided sample: the target was never seen to '
+                          f'{side}, so coverage of the union was not '
+                          f'exercised in both directions'}
+    return {'status': 'agree', 'samples': agreed, 'holding_points': holding}
+
+
 # ---------------------------------------------------------------------------
 # substitution machinery (also used by rewrite)
 # ---------------------------------------------------------------------------

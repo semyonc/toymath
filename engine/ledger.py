@@ -150,6 +150,51 @@ def _chain_links(prev_result, cur_input):
         return False
 
 
+def _chain_assumptions(ordered_steps):
+    """Deduped assumption records of an ordered chain, minus the case
+    hypotheses a later ``cases_assemble`` step discharged.
+
+    An assembled union was checked unconditionally across all its cases,
+    so the stated hypotheses stop conditioning anything downstream of the
+    assembly: they remain visible on their own steps, but they are no
+    longer assumptions of the chain's endpoint. Without this, a completed
+    case analysis would end conditioned on mutually exclusive cases —
+    the exact shape conclusions are elsewhere refused for. Only the
+    hypotheses the assembly recorded are discharged, and only for steps
+    that precede it: a later unrelated `assuming` keeps its record."""
+    import primitives
+    assemblies = []
+    for position, step in enumerate(ordered_steps):
+        if (step.get('op') == 'cases_assemble'
+                and step.get('result') is not None):
+            hypotheses = (step.get('args') or {}).get('hypotheses') or []
+            if hypotheses:
+                assemblies.append((position, hypotheses))
+
+    def _discharged(position, assumption):
+        constraint = assumption.get('constraint')
+        if not constraint:
+            return False
+        for assembled_at, hypotheses in assemblies:
+            if assembled_at <= position:
+                continue
+            for hypothesis in hypotheses:
+                if (constraint == hypothesis
+                        or primitives.same_expression(constraint,
+                                                      hypothesis)):
+                    return True
+        return False
+
+    out = []
+    for position, step in enumerate(ordered_steps):
+        for assumption in step.get('assumptions', []):
+            if _discharged(position, assumption):
+                continue
+            if assumption not in out:
+                out.append(assumption)
+    return out
+
+
 def _relation_parts(statement):
     """Return (lhs, rhs, relation) for a parsed relation, else None.
     Parses with allow_ellipsis: this only splits a statement into sides
@@ -619,13 +664,10 @@ class Ledger(object):
                 f'chain endpoint {endpoint!r} does not close claim '
                 f'{claim["statement"]!r}')
 
-        assumptions = []
-        for step in selected:
-            for assumption in step.get('assumptions', []):
-                if assumption not in assumptions:
-                    assumptions.append(assumption)
+        assumptions = _chain_assumptions(selected)
         # a chain that borrows from two alternative cases proves nothing:
-        # its stated condition could never hold
+        # its stated condition could never hold — unless a union assembly
+        # discharged the cases, which _chain_assumptions already honoured
         import primitives
         exclusive = primitives.exclusive_hypotheses(assumptions)
         if exclusive:
@@ -1167,11 +1209,8 @@ class Ledger(object):
 
         off_spine = [s['id'] for s in transforms if s['id'] not in spine]
         unclassified = [sid for sid in off_spine if sid not in assigned]
-        spine_assumptions = []
-        for sid in spine_ids:
-            for assumption in by_id[sid].get('assumptions', []):
-                if assumption not in spine_assumptions:
-                    spine_assumptions.append(assumption)
+        spine_assumptions = _chain_assumptions(
+            [by_id[sid] for sid in spine_ids])
         return {
             'spine_premises': self.premises(spine_ids or None),
             'selection': selection.get('id') if selection else None,

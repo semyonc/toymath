@@ -1524,6 +1524,149 @@ class TestSystemAssemble(unittest.TestCase):
             Equations.assignment_pairs([])
 
 
+class TestNumericUnionCheck(unittest.TestCase):
+    TARGET = r'\frac{1}{x} \lt 2'
+
+    def test_true_union_agrees_with_both_sides_exercised(self):
+        check = P.numeric_union_check(self.TARGET,
+                                      [r'x \lt 0', r'x \gt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+    def test_raw_endpoint_trap_disagrees_inside_the_gap(self):
+        # the case x<0 derived the endpoint x<1/2 under its hypothesis;
+        # assembling that raw endpoint claims (0, 1/2) as solutions
+        check = P.numeric_union_check(
+            self.TARGET, [r'x \gt \frac{1}{2}', r'x \lt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'disagree')
+        witness = check['point']['x']
+        self.assertGreater(witness, 0)
+        self.assertLess(witness, 0.5)
+        self.assertEqual(check['holds'],
+                         {'target': False, 'union': True})
+
+    def test_too_narrow_union_disagrees(self):
+        check = P.numeric_union_check(self.TARGET, [r'x \gt \frac{1}{2}'])
+        self.assertEqual(check['status'], 'disagree')
+        self.assertEqual(check['holds'],
+                         {'target': True, 'union': False})
+
+    def test_one_sided_sample_is_skipped_not_agreed(self):
+        # a tautological target never fails, so coverage of the union is
+        # never exercised in the failing direction
+        check = P.numeric_union_check(r'x^2 \gt -1',
+                                      [r'x \lt 1', r'x \gt 0'])
+        self.assertEqual(check['status'], 'skipped')
+        self.assertIn('one-sided', check['reason'])
+
+    def test_non_relation_disjunct_is_skipped(self):
+        check = P.numeric_union_check(self.TARGET, [r'x^2'])
+        self.assertEqual(check['status'], 'skipped')
+
+    def test_multi_variable_union_uses_random_sampling(self):
+        check = P.numeric_union_check(r'x - y \gt 0',
+                                      [r'x \gt y', r'x - y \gt 5'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+
+class TestCasesAssemble(unittest.TestCase):
+    TARGET = r'\frac{1}{x} \lt 2'
+    ENDPOINTS = [r'\frac{1}{2} \lt x', r'\frac{1}{2} \gt x']
+    HYPOTHESES = [r'x \gt 0', r'x \lt 0']
+
+    def test_assembles_the_union_of_cases(self):
+        # disjunct 1 restates its endpoint mirrored; disjunct 2 restates
+        # its hypothesis, because the endpoint x<1/2 outgrew the case
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['input'], self.TARGET)
+        self.assertEqual(r['check']['status'], 'agree')
+        sym, notation = P.parse_latex(r['result'])
+        head = notation.get(sym)
+        self.assertEqual(head.sym.name, Notation.O_LIST.name)
+        for item in head.args:
+            self.assertIsNotNone(notation.getf(item, Notation.COMP))
+
+    def test_raw_endpoints_are_refused_with_a_witness(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt \frac{1}{2}',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('does not hold at exactly the points', r['error'])
+        self.assertIn('hypothesis instead', r['error'])
+
+    def test_invented_disjunct_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt -1',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('neither the recorded endpoint', r['error'])
+
+    def test_non_strict_hypothesis_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, [r'x \gt 0', r'x \le 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('not a strict relation', r['error'])
+
+    def test_mirror_spelled_duplicate_disjuncts_are_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \lt 0 \lor 0 \gt x',
+            [r'\frac{1}{2} \gt x', r'\frac{1}{2} \gt x'],
+            [r'x \lt 0', r'x \lt 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('same relation', r['error'])
+
+    def test_foreign_variable_is_refused(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor y \lt 0',
+            [r'\frac{1}{2} \lt x', r'y \lt 0'],
+            [r'x \gt 0', r'y \lt 0'])
+        self.assertFalse(r['ok'])
+        self.assertIn('names y', r['error'])
+
+    def test_single_disjunct_needs_no_assembly(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2}',
+            [self.ENDPOINTS[0]], [self.HYPOTHESES[0]])
+        self.assertFalse(r['ok'])
+        self.assertIn('needs no assembly', r['error'])
+
+    def test_case_count_must_match_the_disjuncts(self):
+        r = Equations.cases_assemble(
+            self.TARGET, r'x \gt \frac{1}{2} \lor x \lt 0',
+            [self.ENDPOINTS[0]], [self.HYPOTHESES[0]])
+        self.assertFalse(r['ok'])
+        self.assertIn('one recorded case per disjunct', r['error'])
+
+    def test_target_must_be_a_relation(self):
+        r = Equations.cases_assemble(
+            r'\frac{1}{x}', r'x \gt \frac{1}{2} \lor x \lt 0',
+            self.ENDPOINTS, self.HYPOTHESES)
+        self.assertFalse(r['ok'])
+        self.assertIn('stated relation', r['error'])
+
+    def test_sign_split_of_a_quadratic_inequality(self):
+        r = Equations.cases_assemble(
+            r'x^2 \gt 1', r'x \gt 1 \lor x \lt -1',
+            [r'x \gt 1', r'x \lt -1'], [r'x \gt 0', r'x \lt 0'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_same_relation_tolerates_only_true_mirrors(self):
+        self.assertTrue(Equations._same_relation(
+            r'x \gt \frac{1}{2}', r'\frac{1}{2} \lt x'))
+        self.assertTrue(Equations._same_relation(r'x \lt 0', r'0 \gt x'))
+        self.assertFalse(Equations._same_relation(
+            r'x \gt \frac{1}{2}', r'\frac{1}{2} \gt x'))
+        self.assertFalse(Equations._same_relation(r'x \lt 0', r'x \gt 0'))
+
+
 class TestLedgerPremises(unittest.TestCase):
     """Inputs a session states rather than derives — where checking stops."""
 

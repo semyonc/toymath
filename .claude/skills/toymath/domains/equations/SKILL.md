@@ -104,8 +104,19 @@ Record every case, each as its own step from the same starting relation, and
 keep them apart afterwards. Nothing holds under two opposite hypotheses at
 once: a claim whose chain mixes them is refused, and the ledger lists such
 hypotheses as alternatives rather than as one condition. When the cases end in
-different answers and no single relation states their union, close the run with
-the open outcome rather than passing one case off as the result.
+different answers, finish with `cases_assemble`: propose their union as a
+`\lor` disjunction and pass the endpoint step of each case, in the order the
+union writes them. Each disjunct must restate what its case recorded — the
+endpoint when it stayed inside its hypothesis, or the hypothesis itself when
+the endpoint outgrew it (deriving `x \lt \frac{1}{2}` under `x \lt 0` solves
+that case as `x \lt 0`; assembling the raw endpoint there is a coverage error
+the check reports with a witness point). The union is checked to hold at
+exactly the points the stated relation does, and a successful assembly
+discharges the case hypotheses: the union is unconditional, and it is the
+step to designate with `set_result`. Only when no union can be recorded (a
+case whose solution needs two relations at once, such as `-1 \lt x \lt 1`)
+close the run with the open outcome rather than passing one case off as the
+result.
 
 Feed `quadratic_roots` the established quadratic expression verbatim; a plain
 expression means `expr = 0`. It also accepts an equality and moves its sides

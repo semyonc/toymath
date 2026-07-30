@@ -115,6 +115,7 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('points_assemble EXPR VAR ROOTS_STEP STEP...',
                       equations)
         self.assertIn('system_assemble TARGET STEP...', equations)
+        self.assertIn('cases_assemble TARGET UNION STEP...', equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
     def test_existing_cli_shapes_are_preserved(self):
@@ -194,6 +195,47 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(rec['sources'], {'assignments': ['s1', 's2']})
         self.assertEqual(rec['check']['status'], 'agree')
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_cases_assemble_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'cases.json')
+        ledger = Ledger(path)
+        target = r'\frac{1}{x} \lt 2'
+        for hypothesis in (r'x \gt 0', r'x \lt 0'):
+            applied = core.apply_both_sides(target, '*', 'x',
+                                            assuming=hypothesis)
+            ledger.record(applied)
+            cleared = core.expand(applied['result'])
+            ledger.record(cleared)
+            halved = core.apply_both_sides(cleared['result'], '/', '2')
+            ledger.record(halved)
+            ledger.record(core.expand(halved['result']))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'cases_assemble', target,
+                r'x \gt \frac{1}{2} \lor x \lt 0', 's4', 's8',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {'cases': ['s4', 's8']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_cases_assemble_without_session_refuses(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'cases_assemble', r'\frac{1}{x} \lt 2',
+                r'x \gt \frac{1}{2} \lor x \lt 0', 's4', 's8'])
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('session', rec['error'])
+        self.assertNotEqual(code, 0)
 
     def test_cli_system_assemble_without_session_refuses(self):
         output = io.StringIO()

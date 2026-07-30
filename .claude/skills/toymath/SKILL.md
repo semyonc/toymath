@@ -36,8 +36,8 @@ Subject workflows live under `domains/*/SKILL.md`. Read only the relevant one.
 - Moving an inequality by a symbolic factor needs that factor's sign: state the
   case as `assuming` ("a > 0", strict only), then record the opposite case as
   its own step. Each step is checked only where its own hypothesis holds: when
-  the cases end differently and no recorded relation states their union, finish
-  with the open outcome instead of selecting one case as the answer.
+  the cases end differently, load the equations skill and assemble their union
+  with cases_assemble; use the open outcome only when no union can be recorded.
 - `equal` takes `assuming` too: after a domain-mismatch `no`, ask again on the
   restricted domain. A verdict that needed the restriction carries it and is
   not an unconditional yes.

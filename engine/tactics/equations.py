@@ -14,8 +14,8 @@ from notation import Notation, Symbol
 from polyrat import NotInFragment, Poly, to_ratfunc, poly_to_notation
 from primitives import (
     PrimitiveError, EvalError, parse_latex, write_latex, numeric_eval,
-    free_symbols, same_expression, _num_agree, _sample_point,
-    _result, _error,
+    free_symbols, same_expression, numeric_union_check, _num_agree,
+    _sample_point, _result, _error,
 )
 from tactics.core import equal_exprs, substitute, _comp_split
 
@@ -467,6 +467,156 @@ def system_assemble(target, assignments):
                   extra={'unknowns': pairs})
     rec['check'] = _system_check(relations, pairs)
     return rec
+
+
+_STRICT_OPS = ('\\lt', '\\gt', '<', '>')
+
+_MIRRORED_OP = {'\\lt': '\\gt', '\\gt': '\\lt', '<': '>', '>': '<',
+                '\\le': '\\ge', '\\ge': '\\le', '\\leq': '\\geq',
+                '\\geq': '\\leq', '=': '=', '\\ne': '\\ne',
+                '\\neq': '\\neq'}
+
+
+def _relation_spelling(latex):
+    sym, notation = parse_latex(latex)
+    comp = notation.getf(sym, Notation.COMP)
+    if comp is None:
+        return None
+    return (write_latex(comp.args[0], notation),
+            write_latex(comp.args[1], notation),
+            comp.sym.props.get('op'))
+
+
+def _same_relation(left, right):
+    """One relation stated twice, tolerating side order: a < b IS b > a.
+
+    Structural comparison alone refuses the mirror spelling, and recorded
+    case endpoints routinely come out constant-first (`\\frac{1}{2} \\lt x`)
+    while an agent naturally writes the disjunct variable-first."""
+    try:
+        lparts = _relation_spelling(left)
+        rparts = _relation_spelling(right)
+    except PrimitiveError:
+        return False
+    if lparts is None or rparts is None:
+        return same_expression(left, right)
+    ll, lr, lop = lparts
+    rl, rr, rop = rparts
+    if lop == rop and same_expression(ll, rl) and same_expression(lr, rr):
+        return True
+    return (_MIRRORED_OP.get(lop) == rop
+            and same_expression(ll, rr) and same_expression(lr, rl))
+
+
+def cases_assemble(target, union, endpoints, hypotheses):
+    """Assemble recorded case endpoints under stated hypotheses into the
+    union of solutions for one stated relation.
+
+    This is not a solver: each disjunct of the proposed union must be, in
+    order, either the recorded endpoint of its case or the case's stated
+    hypothesis — the two relations a finished case actually recorded —
+    and the whole union is then independently spot-checked to hold at
+    exactly the points where the target does. Which of the two a case
+    contributes is the agent's judgment (the endpoint when it lies inside
+    its hypothesis, the hypothesis when the endpoint outgrew it); a wrong
+    choice is a coverage error the oracle reports with a witness point.
+    The record says the union covers the target's solutions where it was
+    sampled — never that a tighter description does not exist.
+    """
+    args = {'target': target, 'union': union,
+            'endpoints': list(endpoints)
+            if isinstance(endpoints, (list, tuple)) else endpoints,
+            'hypotheses': list(hypotheses)
+            if isinstance(hypotheses, (list, tuple)) else hypotheses}
+    if not isinstance(endpoints, (list, tuple)) \
+            or not isinstance(hypotheses, (list, tuple)):
+        return _error('cases_assemble', args,
+                      'endpoints and hypotheses must be ordered lists')
+    try:
+        tsym, tnotation = parse_latex(target)
+    except PrimitiveError as exc:
+        return _error('cases_assemble', args, str(exc))
+    tcomp = tnotation.getf(tsym, Notation.COMP)
+    if tcomp is None:
+        return _error('cases_assemble', args,
+                      'the target must be the stated relation the cases '
+                      'solve — the problem, never the answer')
+    try:
+        usym, unotation = parse_latex(union)
+    except PrimitiveError as exc:
+        return _error('cases_assemble', args, str(exc))
+    head = unotation.getf(usym, Notation.O_LIST)
+    if head is None:
+        return _error(
+            'cases_assemble', args,
+            'the union must be a \\lor disjunction of at least two '
+            'relations, such as x \\lt 0 \\lor x \\gt \\frac{1}{2}; a '
+            'single-case answer needs no assembly')
+    disjuncts = []
+    for item in head.args:
+        comp = unotation.getf(item, Notation.COMP)
+        if comp is None:
+            return _error(
+                'cases_assemble', args,
+                f'{write_latex(item, unotation)!r} is not a relation; '
+                'every disjunct must be one')
+        disjuncts.append(write_latex(item, unotation))
+    if not (len(disjuncts) == len(endpoints) == len(hypotheses)):
+        return _error(
+            'cases_assemble', args,
+            f'the union has {len(disjuncts)} disjunct(s) but '
+            f'{len(endpoints)} recorded case(s) were supplied; give one '
+            'recorded case per disjunct, in the order they are written')
+    target_vars = free_symbols(tsym, tnotation)
+    for index, disjunct in enumerate(disjuncts):
+        for seen in disjuncts[:index]:
+            if _same_relation(disjunct, seen):
+                return _error(
+                    'cases_assemble', args,
+                    f'disjuncts {seen!r} and {disjunct!r} are the same '
+                    'relation; list each case once')
+        hypothesis = hypotheses[index]
+        try:
+            hsym, hnotation = parse_latex(hypothesis)
+        except PrimitiveError as exc:
+            return _error('cases_assemble', args,
+                          f'unreadable case hypothesis {hypothesis!r}: '
+                          f'{exc}')
+        hcomp = hnotation.getf(hsym, Notation.COMP)
+        if hcomp is None or hcomp.sym.props.get('op') not in _STRICT_OPS:
+            return _error(
+                'cases_assemble', args,
+                f'case hypothesis {hypothesis!r} is not a strict '
+                'relation; cases are stated with assuming, which only '
+                'accepts strict hypotheses')
+        if not (_same_relation(disjunct, endpoints[index])
+                or _same_relation(disjunct, hypothesis)):
+            return _error(
+                'cases_assemble', args,
+                f'disjunct {disjunct!r} is neither the recorded endpoint '
+                f'{endpoints[index]!r} nor the stated hypothesis '
+                f'{hypothesis!r} of its case; the union may only restate '
+                'what the cases recorded')
+        dsym, dnotation = parse_latex(disjunct)
+        foreign = free_symbols(dsym, dnotation) - target_vars
+        if foreign:
+            return _error(
+                'cases_assemble', args,
+                f'disjunct {disjunct!r} names {", ".join(sorted(foreign))} '
+                'which the target does not; the union must describe the '
+                "target's own variables")
+    check = numeric_union_check(target, disjuncts)
+    if check.get('status') == 'disagree':
+        return _error(
+            'cases_assemble', args,
+            f'the union does not hold at exactly the points the target '
+            f'does: at {check.get("point")!r} the target is '
+            f'{check["holds"]["target"]} but the union is '
+            f'{check["holds"]["union"]}; a disjunct that outgrew its '
+            'hypothesis must contribute the hypothesis instead (or the '
+            'endpoint, in the opposite direction)')
+    result = write_latex(usym, unotation)
+    return _result('cases_assemble', args, target, result, check=check)
 
 
 def _root_values(roots, var_name):

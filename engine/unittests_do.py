@@ -753,6 +753,89 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(session.ledger.replay()['status'], 'verified')
         self.assertIn('given 2A = 1', session.ledger.render())
 
+    INEQUALITY = r'\frac{1}{x} \lt 2'
+    UNION = r'x \gt \frac{1}{2} \lor x \lt 0'
+
+    def _case_session(self):
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        endpoints = []
+        for hypothesis in (r'x \gt 0', r'x \lt 0'):
+            applied = json.loads(api['apply'](
+                self.INEQUALITY, '*', 'x', hypothesis))
+            cleared = json.loads(api['expand'](applied['result']))
+            halved = json.loads(api['apply'](cleared['result'], '/', '2'))
+            endpoint = json.loads(api['expand'](halved['result']))
+            endpoints.append(endpoint['step']['id'])
+        return session, api, endpoints
+
+    def test_cases_assemble_states_the_union_of_cases(self):
+        session, api, endpoints = self._case_session()
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {'cases': endpoints})
+        self.assertEqual(rec['check']['status'], 'agree')
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_cases_assemble_discharges_the_case_hypotheses(self):
+        # the union was checked unconditionally across all cases, so the
+        # mutually exclusive hypotheses stop conditioning the endpoint;
+        # a run that stops INSIDE one case still shows that case's own
+        session, api, endpoints = self._case_session()
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        json.loads(api['set_result'](rec['result']))
+        topology = session.ledger.presentation_topology()
+        self.assertEqual(topology['spine_assumptions'], [])
+        inside = session.ledger.presentation_topology(
+            final_provenance={'status': 'verified', 'source': 'ledger',
+                              'step': endpoints[0],
+                              'method': 'exact-result'})
+        self.assertEqual([a.get('constraint')
+                          for a in inside['spine_assumptions']],
+                         [r'x \gt 0'])
+
+    def test_cases_assemble_needs_a_recorded_hypothesis(self):
+        session, api, endpoints = self._case_session()
+        moved = json.loads(api['apply'](self.INEQUALITY, '-', '2'))
+        bare = json.loads(api['expand'](moved['result']))
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION,
+                               endpoints[0], bare['step']['id']]))
+        self.assertFalse(rec['ok'])
+        self.assertIn('no case hypothesis', rec['error'])
+
+    def test_cases_assemble_requires_the_equations_skill(self):
+        session = DoSession()
+        api = make_api(session)
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION, 's1', 's2']))
+        self.assertFalse(rec['ok'])
+        self.assertIn("unloaded skill 'equations'", rec['error'])
+
+    def test_replay_rejects_tampered_case_provenance(self):
+        session, api, endpoints = self._case_session()
+        json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        session.ledger.steps[-1]['sources']['cases'][1] = endpoints[0]
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('provenance mismatch', replay['reason'])
+
+    def test_replay_rejects_a_forged_case_hypothesis(self):
+        session, api, endpoints = self._case_session()
+        json.loads(api['run_tactic'](
+            'cases_assemble', [self.INEQUALITY, self.UNION] + endpoints))
+        session.ledger.steps[-1]['args']['hypotheses'][0] = r'x \gt 5'
+        replay = session.ledger.replay()
+        self.assertEqual(replay['status'], 'failed')
+        self.assertIn('hypothesis provenance mismatch', replay['reason'])
+
     def test_points_assemble_refuses_swapped_value_steps(self):
         session, api, roots_id, values = self._stationary_session()
         rec = json.loads(api['points_assemble'](
