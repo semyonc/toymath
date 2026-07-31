@@ -121,6 +121,65 @@ def _integrate_assemble_from_steps(context, args):
     return result
 
 
+def _same_spelling(a, b):
+    """Strict spelling identity for provenance: identical modulo bracket
+    respelling only.  Deliberately NOT `covers_goal` — its body hops
+    would let a step about the bare antiderivative stand in for the
+    recorded LIMIT of it, which is the move being certified."""
+    if primitives.same_expression(a, b):
+        return True
+    try:
+        return (primitives._all_bracket_normal_form(a)
+                == primitives._all_bracket_normal_form(b))
+    except Exception:
+        return False
+
+
+def _integrate_definite_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_definite',
+                      'integrate_definite requires a session')
+    by_id = {step['id']: step for step in steps}
+    source_id = args['antiderivative_step']
+    source = by_id.get(source_id)
+    if source is None or source.get('result') is None:
+        return _error('integrate_definite',
+                      f'unknown transforming step {source_id!r}')
+    antiderivative = source['result']
+    parts = primitives.definite_integral_parts(args['expr'], args['var'])
+    limit_values = {}
+    sources = {'antiderivative': source_id}
+    for tag, direction in (('upper', 'left'), ('lower', 'right')):
+        step_id = args.get(f'{tag}_limit_step')
+        if step_id is None:
+            continue
+        if parts is None:
+            return _error('integrate_definite',
+                          'endpoint limits need a definite integral')
+        limit_step = by_id.get(step_id)
+        if limit_step is None or limit_step.get('result') is None:
+            return _error('integrate_definite',
+                          f'unknown transforming step {step_id!r}')
+        bound = parts[3] if tag == 'upper' else parts[2]
+        expected = primitives._limit_latex(args['var'], bound, direction,
+                                           antiderivative)
+        if not _same_spelling(limit_step.get('input') or '', expected):
+            return _error(
+                'integrate_definite',
+                f'{step_id!r} does not record the one-sided limit '
+                f'{expected!r} of the cited antiderivative')
+        limit_values[f'{tag}_limit'] = limit_step['result']
+        sources[f'{tag}_limit'] = step_id
+    result = integration.integrate_definite(
+        args['expr'], args['var'], antiderivative,
+        upper_limit=limit_values.get('upper_limit'),
+        lower_limit=limit_values.get('lower_limit'))
+    if result.get('ok'):
+        result['sources'] = sources
+    return result
+
+
 def _limit_assemble_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -475,6 +534,37 @@ def _validate_integrate_assemble(step, seen):
     return None
 
 
+def _validate_integrate_definite(step, seen):
+    sources = step.get('sources') or {}
+    source = seen.get(sources.get('antiderivative'))
+    if source is None or source.get('result') is None:
+        return 'missing antiderivative provenance'
+    args = step.get('args', {})
+    antiderivative = args.get('antiderivative')
+    if source.get('result') != antiderivative:
+        return 'antiderivative provenance mismatch'
+    parts = primitives.definite_integral_parts(args.get('expr', ''),
+                                               args.get('var', ''))
+    for tag, direction in (('upper', 'left'), ('lower', 'right')):
+        recorded = args.get(f'{tag}_limit')
+        limit_id = sources.get(f'{tag}_limit')
+        if recorded is None and limit_id is None:
+            continue
+        if recorded is None or limit_id is None:
+            return f'{tag} endpoint-limit provenance mismatch'
+        limit_step = seen.get(limit_id)
+        if limit_step is None or limit_step.get('result') != recorded:
+            return f'{tag} endpoint-limit provenance mismatch'
+        if parts is None:
+            return 'endpoint limits need a definite integral'
+        bound = parts[3] if tag == 'upper' else parts[2]
+        expected = primitives._limit_latex(args.get('var', ''), bound,
+                                           direction, antiderivative)
+        if not _same_spelling(limit_step.get('input') or '', expected):
+            return f'{tag} endpoint-limit input mismatch'
+    return None
+
+
 def _validate_limit_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -722,6 +812,42 @@ TACTICS = (
                  'ordered antiderivative step ids', nargs='+')),
         cli_handler=_integrate_assemble_from_steps,
         provenance_validator=_validate_integrate_assemble),
+    TacticSpec(
+        'integrate_definite', 'integrate_definite', 'integration',
+        'evaluate a definite integral from a recorded antiderivative '
+        '(FTC), endpoint limits accepted where substitution is singular',
+        integration.integrate_definite,
+        (E, V, _arg('antiderivative', 'ANTIDERIVATIVE',
+                    'recorded antiderivative value'),
+         _arg('upper_limit', 'UPPER_LIMIT',
+              'recorded one-sided limit value at the upper bound',
+              default=None, option='--upper-limit'),
+         _arg('lower_limit', 'LOWER_LIMIT',
+              'recorded one-sided limit value at the lower bound',
+              default=None, option='--lower-limit')),
+        agent_arguments=(
+            E, V,
+            _arg('antiderivative_step', 'STEP',
+                 'antiderivative ledger step id'),
+            _arg('upper_limit_step', 'STEP',
+                 'limit step id for a singular upper bound',
+                 default=None, option='--upper-limit-step'),
+            _arg('lower_limit_step', 'STEP',
+                 'limit step id for a singular lower bound',
+                 default=None, option='--lower-limit-step')),
+        agent_handler=_integrate_definite_from_steps,
+        cli_arguments=(
+            E, V,
+            _arg('antiderivative_step', 'STEP',
+                 'antiderivative ledger step id'),
+            _arg('upper_limit_step', 'STEP',
+                 'limit step id for a singular upper bound',
+                 default=None, option='--upper-limit-step'),
+            _arg('lower_limit_step', 'STEP',
+                 'limit step id for a singular lower bound',
+                 default=None, option='--lower-limit-step')),
+        cli_handler=_integrate_definite_from_steps,
+        provenance_validator=_validate_integrate_definite),
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',
@@ -736,6 +862,11 @@ TACTICS = (
     TacticSpec('limit_table', 'limit_table', 'limits',
                'apply a named standard limit rule', limits.limit_table,
                (E,)),
+    TacticSpec('limit_evaluate', 'limit_evaluate', 'limits',
+               'certify an agent-proposed limit value by the approach '
+               'oracle',
+               limits.limit_evaluate,
+               (E, _arg('value', 'VALUE', 'proposed limit value'))),
     TacticSpec('limit_lhopital', 'limit_lhopital', 'limits',
                "apply one checked l'Hopital step",
                limits.limit_lhopital, (E,)),

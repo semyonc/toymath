@@ -5323,5 +5323,339 @@ class TestAlternativeCasesInTheLedger(unittest.TestCase):
         self.assertNotIn('Alternative case', out)
 
 
+class TestDefiniteIntegralParts(unittest.TestCase):
+    """Shared structure-reading for the FTC tactic and quadrature leg."""
+
+    def test_canonical_spelling(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_0^1 x^{2} \\, dx', 'x'),
+            ('x', 'x^{2}', '0', '1'))
+
+    def test_reversed_script_order_normalizes(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int^1_0 x^{2} \\, dx', 'x'),
+            ('x', 'x^{2}', '0', '1'))
+
+    def test_textbook_differential_in_numerator(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_1^2 \\frac{dx}{x}', 'x'),
+            ('x', '\\frac {1} {x}', '1', '2'))
+
+    def test_symbolic_bounds_read(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_{a}^{b} x \\, dx', 'x'),
+            ('x', 'x', 'a', 'b'))
+
+    def test_variable_is_discovered_when_unstated(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_1^2 \\frac{dt}{t}'),
+            ('t', '\\frac {1} {t}', '1', '2'))
+
+    def test_indefinite_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int x^{2} \\, dx', 'x'))
+
+    def test_single_bound_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int_0 x^{2} \\, dx', 'x'))
+
+    def test_wrong_variable_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int_0^1 x^{2} \\, dx', 't'))
+
+
+class TestNumericDefiniteCheck(unittest.TestCase):
+    """The quadrature leg re-integrates the integrand and never touches
+    the antiderivative."""
+
+    def test_right_value_agrees(self):
+        check = P.numeric_definite_check('\\int_0^1 x^{2} \\, dx', 'x',
+                                         '\\frac{1}{3}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertEqual(check['method'], 'composite-simpson quadrature')
+
+    def test_wrong_value_disagrees(self):
+        # F(2) alone for \int_1^2 — the exact live wrong-answer shape
+        check = P.numeric_definite_check('\\int_1^2 x^{2} \\, dx', 'x',
+                                         '\\frac{8}{3}')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_interior_pole_refuses(self):
+        # the classic FTC trap: \int_{-1}^{1} x^{-2} "=" -2
+        check = P.numeric_definite_check(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x', '-2')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('improper', check.get('reason', ''))
+
+    def test_parameters_are_sampled(self):
+        check = P.numeric_definite_check('\\int_0^1 c x \\, dx', 'x',
+                                         '\\frac{c}{2}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['samples'], 1)
+
+    def test_symbolic_bounds_are_skipped(self):
+        check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
+                                         '\\frac{b^2-a^2}{2}')
+        self.assertEqual(check['status'], 'skipped')
+
+
+class TestIntegrateDefinite(unittest.TestCase):
+    """FTC part 2 as a narrow move over a recorded antiderivative."""
+
+    def test_evaluates_from_the_recorded_antiderivative(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['lower'], '0')
+        self.assertEqual(rec['upper'], '1')
+        # the riding + C cancels in the follow-up expand
+        expanded = Core.expand(rec['result'])
+        self.assertEqual(
+            Core.equal_exprs(expanded['result'],
+                             '\\frac{1}{3}')['verdict'], 'yes')
+
+    def test_continuity_is_recorded_not_proved(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('continuous on [0, 1]' in t for t in texts))
+
+    def test_refuses_an_indefinite_spelling(self):
+        rec = Integration.integrate_definite(
+            '\\int x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('definite integral', rec['error'])
+
+    def test_refuses_a_non_antiderivative(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', 'x^{2} + C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an antiderivative', rec['error'])
+
+    def test_interior_pole_check_refuses(self):
+        # -1/x IS an antiderivative of 1/x^2 on each side of 0, so the
+        # symbolic leg passes; only the quadrature leg can see that the
+        # bounds straddle the pole. The record must carry that refusal.
+        rec = Integration.integrate_definite(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x',
+            '-\\frac{1}{x} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+        self.assertIn('improper', rec['check'].get('reason', ''))
+
+
+class TestSymbolicConstantPeel(unittest.TestCase):
+    """The rational legs' multivariate refusal must not preempt the
+    structural constant split (live: the a^2 sin^2 + b^2 cos^2 arctangent
+    cell stopped exactly here, in every spelling the agent could reach)."""
+
+    def test_symbolic_factor_in_the_denominator_peels(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b\\left(v^{2}+1\\right)}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\arctan', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_factor_in_product_form_peels(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b}\\frac{1}{v^{2}+1}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\arctan', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_numerator_over_the_literal_arctan_family(self):
+        rec = Integration.integrate_table(
+            '\\frac{c}{3u^{2}+\\frac{5}{3}}', 'u')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_quadratic_coefficients_still_refuse(self):
+        # a^2 u^2 + b^2 is NOT one constant split away from the table —
+        # the (a/b) substitution is a genuine agent move; the table must
+        # not absorb it
+        rec = Integration.integrate_table(
+            '\\frac{1}{a^{2}u^{2}+b^{2}}', 'u')
+        self.assertFalse(rec['ok'])
+        self.assertIn('denominator must be constant', rec['error'])
+
+    def test_completed_square_steering_survives_the_fallback(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{v^{2}+2v+3}', 'v')
+        self.assertFalse(rec['ok'])
+        self.assertIn('complete the square', rec['error'])
+
+
+class TestApproachDirectionRecovery(unittest.TestCase):
+    """A bare ^-/^+ marker that precedence bound to an inner factor of a
+    compound point must still read as the direction — before this, the
+    oracle sampled the `-` as a free variable and checked a two-sided
+    limit at a corrupted point (live: every natural spelling of
+    x -> pi/2^- misread)."""
+
+    def _parts(self, expr):
+        return Limits._limit_parts(expr)
+
+    def test_slash_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\pi/2^-} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\pi /2', 'left'))
+
+    def test_braced_marker_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\pi/2^{-}} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\pi /2', 'left'))
+
+    def test_frac_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\frac{\\pi}{2}^{-}} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\frac {\\pi} {2}', 'left'))
+
+    def test_negative_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to -1^-} x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('-1', 'left'))
+
+    def test_powered_endpoint_stays_two_sided(self):
+        p = self._parts('\\lim_{x \\to a^2} x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('a^{2}', 'two-sided'))
+
+
+class TestLimitEvaluate(unittest.TestCase):
+    """Agent proposes a limit value; the approach oracle verifies."""
+
+    LIM = ('\\lim_{x \\to \\pi/2^{-}} \\left(\\frac {1} {ab}\\arctan'
+           '\\left (( \\frac {a} {b}( \\tan x)) \\right )+C\\right)')
+
+    def test_certifies_the_endpoint_composite(self):
+        rec = Limits.limit_evaluate(self.LIM, '\\frac{\\pi}{2|ab|}+C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('agent-proposed', rec['check']['method'])
+        self.assertEqual(rec['direction'], 'left')
+
+    def test_refuses_the_sign_wrong_value(self):
+        rec = Limits.limit_evaluate(self.LIM, '\\frac{\\pi}{2ab}+C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_refuses_a_value_containing_the_variable(self):
+        rec = Limits.limit_evaluate('\\lim_{x \\to 0^+} x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bound variable', rec['error'])
+
+    def test_simple_limit_still_certifies(self):
+        rec = Limits.limit_evaluate('\\lim_{x \\to \\infty} \\arctan x',
+                                    '\\frac{\\pi}{2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestIntegrateDefiniteEndpointDoor(unittest.TestCase):
+    """A recorded one-sided limit stands in for substitution at a bound
+    where the antiderivative's spelling is singular."""
+
+    EXPR = ('\\int_{0}^{\\pi/2}\\frac{1}{a^{2}\\sin^{2}x'
+            '+b^{2}\\cos^{2}x}\\,dx')
+    F = ('\\frac {1} {ab}\\arctan\\left (( \\frac {a} {b}( \\tan x)) '
+         '\\right )+C')
+
+    def test_upper_limit_value_replaces_substitution(self):
+        rec = Integration.integrate_definite(
+            self.EXPR, 'x', self.F,
+            upper_limit='\\frac{\\pi}{2|ab|}+C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\frac{\\pi}{2|ab|}+C', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('extends continuously', texts)
+
+    def test_endpoint_value_with_the_variable_refused(self):
+        rec = Integration.integrate_definite(
+            self.EXPR, 'x', self.F, upper_limit='\\tan x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('still contains', rec['error'])
+
+    def test_plain_path_unchanged(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertNotIn('upper_limit', rec['args'])
+
+
+class TestSideConditionSplit(unittest.TestCase):
+    """A trailing bracketed relation in an expr-command argument is a
+    stated side condition, not a factor — as a factor it poisoned goal
+    coverage (live: a perfect derivation failed designation)."""
+
+    def test_the_live_cell_splits(self):
+        import expr_commands as ec
+        core, cond = ec._split_side_condition(
+            '\\int_{0}^{\\pi /{2}}\\frac  {dx} '
+            '{a^{2} \\sin^{2}x+b^{2} \\cos^{2}x}\\ (ab \\ne {0})')
+        self.assertEqual(cond, 'ab \\ne{0}')
+        self.assertTrue(P.covers_goal(
+            '\\int_0^{\\pi/2} \\frac{1}{a^2 \\sin^2 x + b^2 \\cos^2 x}'
+            ' \\, dx', core, establishes=True))
+
+    def test_plain_arguments_do_not_split(self):
+        import expr_commands as ec
+        for arg in ['\\int_0^1 x^2 \\, dx', 'x+2 = 7', '(x+1)(x+2)',
+                    '\\{(-1,2),(1,-2)\\}']:
+            core, cond = ec._split_side_condition(arg)
+            self.assertIsNone(cond, arg)
+            self.assertEqual(core, arg)
+
+    def test_simple_product_with_condition_splits(self):
+        import expr_commands as ec
+        core, cond = ec._split_side_condition('2x\\ (x \\gt 0)')
+        self.assertEqual(cond, 'x \\gt 0')
+        self.assertEqual(core, '2x')
+
+
+class TestEstablishesGoalCoverage(unittest.TestCase):
+    """covers_goal's admission question: a bare body never establishes a
+    value-bearing binder."""
+
+    def test_body_does_not_establish_a_definite_integral(self):
+        goal = '\\int_0^1 x^{2} \\, dx'
+        self.assertTrue(P.covers_goal('x^{2}', goal))
+        self.assertFalse(P.covers_goal('x^{2}', goal, establishes=True))
+
+    def test_body_does_not_establish_a_limit(self):
+        goal = '\\lim_{x \\to 2} \\frac{x^2-4}{x-2}'
+        body = '\\frac{x^2-4}{x-2}'
+        self.assertTrue(P.covers_goal(body, goal))
+        self.assertFalse(P.covers_goal(body, goal, establishes=True))
+
+    def test_integrand_still_establishes_the_indefinite_integral(self):
+        # the honest antiderivative chain roots at its integrand; the
+        # indefinite branches are untouched by the tightening
+        self.assertTrue(P.covers_goal('x^{2}', '\\int x^{2} \\, dx',
+                                      establishes=True))
+
+    def test_identity_still_establishes(self):
+        goal = '\\int_0^1 x^{2} \\, dx'
+        self.assertTrue(P.covers_goal(goal, goal, establishes=True))
+
+    def test_definite_spellings_cover_each_other(self):
+        # the textbook and canonical spellings of ONE definite integral —
+        # an honest FTC chain was refused purely on this respelling
+        textbook = ('\\int_{0}^{\\pi /{2}}\\frac  {dx} '
+                    '{a^{2} \\sin^{2}x+b^{2} \\cos^{2}x}')
+        canonical = ('\\int_0^{\\pi/2} \\frac{1}{a^2 \\sin^2 x '
+                     '+ b^2 \\cos^2 x} \\, dx')
+        self.assertTrue(P.covers_goal(canonical, textbook,
+                                      establishes=True))
+        self.assertTrue(P.covers_goal(textbook, canonical,
+                                      establishes=True))
+
+    def test_different_bounds_do_not_cover(self):
+        self.assertFalse(P.covers_goal(
+            '\\int_0^1 x^{2} \\, dx', '\\int_0^2 x^{2} \\, dx',
+            establishes=True))
+
+
 if __name__ == '__main__':
     unittest.main()

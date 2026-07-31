@@ -37,7 +37,8 @@ Two layers coexist:
 | `engine/agent_backends/` | Provider seam: `base.py` (request/outcome/cancellation/dispatcher), `openrouter.py` (Agents SDK), `codex.py` + `codex_transport.py` (experimental personal Codex) |
 | `engine/agent_config.py` | Notebook-local `AgentRoute`, `backend!` resolution, backend-neutral status |
 | `engine/model_config.py`, `engine/models.yaml` | Notebook-local `model!` selection and configured OpenRouter model/provider endpoints |
-| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup and notebook-local live model title; TypeScript source and committed prebuilt bundle |
+| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup, notebook-local live model title, and rendered cell input; TypeScript source and committed prebuilt bundle |
+| `engine/cell_input.py` | Read-only readings of a cell's raw source: how it splits into statements, and what it renders as in the notebook |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
 | `engine/plot_sandbox.py` | Sandboxed figure backends for `do!`: Python under Pyodide/Deno (`pyodide_runner.mjs`), TeX under node-tikzjax (`tikz_runner.mjs`) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
@@ -268,6 +269,33 @@ if isinstance(n, IntegerValue): ...
 - Use `primitives.display_latex` when rich-rendering an already-recorded LaTeX
   string. It derives display-only `*` → `\cdot` spelling behind a structural
   parse check; never rewrite the persisted ledger input/result or its hash.
+- The rendered cell input (`cell_input.preview` → the `toymath.render` comm →
+  `rendered_input.ts`) is kernel-authoritative on purpose: the frontend never
+  parses. Two guards are load-bearing, not polish. The prose veto must stay
+  *lexical* — the parser accepts `the derivative` as a product of one-letter
+  symbols, so it can reject but never classify. And a rendered fragment must
+  pass `primitives.same_expression` against its source: the writer silently
+  drops what it cannot spell (`track! {goal! …}` comes back without the
+  `track!`), and a view that says something other than what the cell runs is
+  worse than no view. Anything unproven renders as its own source; keep it
+  that way. Rendering swaps the editor through the public
+  `InputArea.renderInput` / `showEditor`, so no
+  `NotebookPanel.IContentFactory` override is involved.
+- The prose scan (`cell_input.prose_segments`) finds the formulas inside an
+  unescaped `do!` prompt, and answers a weaker question than the whole-cell
+  reading: it *guesses fragment boundaries*. Tune it for precision — a
+  formula left as prose is invisible, prose swallowed into a formula is
+  glaring — and keep what a trim gives back visible as prose, so no part of a
+  prompt can vanish from the view. Only commands that hand their argument to
+  the agent are scanned; a plain cell or a rewrite action is one expression.
+  `bare_seeds=False` drops the tier whose evidence is notation rather than a
+  `\macro` (`x³−3x`); that tier finds about as much again as the macro tier
+  and carries the higher risk, which is why it can be switched off alone.
+  LANDMINE: the parser accepts a bare `\begin` (debris from an environment it
+  cannot read) as an opaque symbol and the writer spells it back unchanged,
+  so `same_expression` sees nothing wrong — `_is_debris` is what rejects it.
+  Extend `PROSE_CASES` in `unittests_cell_input.py` when the scan changes; a
+  heuristic without a golden corpus rots.
 - Array-family nodes require matching lexer, grammar, writer, and Replicator
   dispatch. Standard non-alignment environments (`matrix`, `pmatrix`,
   `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, and `cases`)
@@ -355,9 +383,34 @@ if isinstance(n, IntegerValue): ...
   `observability.capture_context()` + `child_span()`. OTel context is
   thread-local and Codex tool callbacks run on transport worker threads, so
   a child span without the captured context starts an orphan trace rather
-  than nesting. The Codex thread also pins `otel.exporter="none"`: the
-  runtime has its own telemetry pipeline, and a ToyMath derivation must not
-  ship anything anywhere by default.
+  than nesting. The Codex thread also pins the runtime's own telemetry
+  pipeline off — a ToyMath derivation must not ship anything anywhere by
+  default. That pipeline is three exporters, not one: `otel.exporter`
+  (logs) and `otel.metrics_exporter` are both pinned to `"none"`, the
+  latter because it defaults to `statsig`, i.e. a baked-in
+  `ab.chatgpt.com` endpoint and API key in a release build; the
+  `analytics.enabled` gate that spares it today is `app-server`'s own
+  default argument, not ToyMath's decision. LANDMINE: do NOT complete the
+  set with `otel.trace_exporter` (or `otel.log_user_prompt`). It already
+  defaults to none, and a `--config` override is SessionFlags, which
+  outranks `$CODEX_HOME/config.toml` — measured, pinning it exports zero
+  spans and reports nothing. That door is open on purpose: with
+  `TOYMATH_OBSERVABILITY` on, `ensure_trace_export` writes an OTLP block
+  into the home's own `config.toml` (atomically, and re-parsed first,
+  because `mcp_overrides` fails closed on that same file) so the Langfuse
+  credential never becomes a process argument. Pinning the key would
+  silently disable it.
+- Two measured landmines in that runtime-tracing path, both silent:
+  (1) the pinned runtime rejects a `traceparent` whose flags it does not
+  recognise instead of ignoring the unknown bit, and this OTel SDK emits
+  `03` — so `observability._plain_flags` reduces flags to `01`/`00`, or the
+  runtime's spans quietly start their own trace instead of joining the run;
+  (2) once its trace exporter is on, the runtime exports EVERY span it
+  raises at any level (`trace_export_filter` takes any span; `RUST_LOG`
+  reaches only its stderr layer), so an idle runtime buries Langfuse in
+  trace-level `auth` spans — `TRACE_SAMPLER_ENV`
+  (`OTEL_TRACES_SAMPLER=parentbased_always_off`) is what keeps the export
+  to spans descending from a traced run.
 - To research a misbehaving do! run from its Langfuse trace, invoke the
   `langfuse-research` skill (`.claude/skills/langfuse-research/SKILL.md`):
   re-run with `TOYMATH_OBSERVABILITY=on`, then pull the trace with the
@@ -379,6 +432,12 @@ if isinstance(n, IntegerValue): ...
   Both spawn with a scrubbed env, so a widened grant still reaches no
   secrets. Figure kinds are `png`/`html`/`svg`; only `html` (plotly) needs
   the network at view time.
+- Figure tools run on provider worker threads, but Jupyter display must not:
+  successful figures are buffered on `DoSession` under the cancellation lock
+  and rendered by `MathShell` only after `run_instruction` returns to the
+  kernel thread. Failed Python/TikZ attempts never publish partial figures;
+  the final failure is shown as a bounded, non-ledger notebook notice. Keep
+  figure bytes out of model replies, traces, the ledger, and replay.
 
 ## Reference Reading
 

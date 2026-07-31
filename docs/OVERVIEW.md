@@ -261,6 +261,42 @@ OpenRouter; with Codex selected, `model!` lists the models that account
 offers and takes no provider argument. With no explicit choice, Codex uses
 the account's own default rather than a model id hard-coded into ToyMath.
 
+### Reading a cell as mathematics
+
+A cell holds LaTeX, and a dense formula is hard to read as source. In
+JupyterLab, a ToyMath cell shows its formula typeset while it is not being
+edited, and its source the moment it is — the bargain a markdown cell makes,
+applied to code cells. Double-click (or <kbd>Enter</kbd>) opens the source;
+leaving the cell renders it again. *Render ToyMath Cell Input* in the command
+palette turns this off for a notebook.
+
+The kernel decides what a cell renders as, because the kernel owns the
+parser: the rendered formula is what the engine understood, not a second
+reading of the source by the frontend. `\int \frac {dx} (x+1)` — the ToyMath
+dialect, taking a parenthesised second operand — renders as the fraction it
+parses to. A `[[n]]` backreference renders as the formula it stands for.
+
+A cell is read as a whole formula first, and only failing that as prose with
+formulas in it. So `int! \int x^2 dx` renders as one formula, while
+
+```text
+do! differentiate x³−3x, find where the derivative is zero
+```
+
+renders as that sentence with `x³−3x` typeset inside it — no `$…$` required,
+since nobody writes them in a prompt. Only a command that hands its argument
+to the agent is read this way; a plain cell and a rewrite action are one
+expression, and describing them as a sentence would misdescribe them.
+
+Every rendered formula parses back to the same expression as the characters
+it replaces, so a cell can never show something other than what it runs. The
+prose scan adds one thing that check cannot cover — it *guesses where a
+formula starts and ends* — so it is tuned for precision: a formula left as
+prose is invisible, whereas prose swallowed into a formula is glaring. What
+the guess gives back stays visible as prose, so no part of a prompt can
+disappear from the view. Fragments the engine cannot read keep their source,
+which makes an unparsable cell visible as one before it is run.
+
 ## Notebook command tiers
 
 Saved notebook commands are Markdown templates in `commands/`:
@@ -323,7 +359,12 @@ remain explicit CLI operations rather than math tactics.
 When Deno is installed, plots run in Pyodide WASM under deny-by-default Deno
 permissions: no environment access, no project-filesystem access, and network
 access only to package CDNs. Images are rendered as unverified illustrations,
-never ledger evidence. Set `TOYMATH_SANDBOX=off` to disable the tool.
+never ledger evidence. A provider tool buffers each successful figure under
+the session's cancellation boundary; the notebook renders that buffer only
+after control returns to the kernel thread, so a worker-thread display cannot
+be lost or attached to the wrong cell. If the final render attempt fails, its
+bounded sandbox error is shown without invalidating any mechanically checked
+math. Set `TOYMATH_SANDBOX=off` to disable the tool.
 
 ## The classic kernel
 
@@ -411,10 +452,23 @@ Tracing is observability only — it never touches the ledger or the numeric
 oracle, and a Langfuse outage is downgraded to a logged warning so the
 derivation still runs.
 
-The Codex runtime has its own OpenTelemetry pipeline
-(`otel.exporter = none | statsig | otlp-http | otlp-grpc`). ToyMath pins it
-to `none` for its threads, so a derivation ships no runtime telemetry
-anywhere unless that is an explicit, separate decision.
+The Codex runtime has its own OpenTelemetry pipeline — three exporters,
+each `none | statsig | otlp-http | otlp-grpc`. ToyMath pins the two that
+would otherwise start on their own (`otel.exporter` for logs, and
+`otel.metrics_exporter`, which defaults to `statsig` and would resolve to a
+built-in endpoint) to `none` for its threads, so a derivation ships no
+runtime telemetry anywhere unless that is an explicit, separate decision.
+`otel.trace_exporter` is left unpinned on purpose, because that separate
+decision is `TOYMATH_OBSERVABILITY` itself: with tracing on, ToyMath writes
+an OTLP block into the home's own `config.toml` pointing that exporter at
+the same Langfuse, and removes the block when tracing is off. It goes in
+the file rather than a `--config` override so the credential never becomes
+a process argument. The runtime's spans then nest inside the `do!` trace
+rather than arriving beside it — each JSON-RPC request carries a W3C
+`traceparent`, which the app-server uses to parent that request's spans.
+A parent-based sampler (`OTEL_TRACES_SAMPLER`) keeps the export to spans
+that descend from a traced run; without it the runtime exports every span
+it raises, at any level.
 
 The normal test suite is offline; live provider and plot probes are opt-in
 and separately gated:
@@ -444,7 +498,7 @@ engine/agent_config.py     notebook-local AgentRoute and backend resolution
 engine/agent_backends/     provider seam: cancellation, OpenRouter, Codex
 engine/model_config.py     model! configuration loading and validation
 engine/models.yaml         selectable OpenRouter models/provider orders
-jupyterlab-extension/      TypeScript source for completion/title integration
+jupyterlab-extension/      TypeScript source for completion/title/rendered input
 labextension/              committed prebuilt JupyterLab extension
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition

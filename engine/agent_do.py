@@ -255,6 +255,11 @@ class DoSession(object):
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
         self.loaded_skills = {'core'}
+        # Figures are cell output, but tool callbacks run on provider worker
+        # threads. Keep an ordered, run-local copy so the notebook can render
+        # them after the provider returns, on the kernel thread. They remain
+        # illustrations only: none of this enters the ledger or replay.
+        self._figure_events = []
         self.closed = False
         self.close_reason = None
         # the SDK executes sync tools on a thread pool, so parallel tool
@@ -278,20 +283,60 @@ class DoSession(object):
             'closed and the steps already recorded are final')
 
     def deliver_figure(self, caption, figures):
-        """Show one figure, or refuse it because the run is over.
+        """Accept one successful figure, or refuse it because the run is over.
 
         A figure is cell output, so it needs the same boundary the ledger
-        has: checking `closed` and then calling the callback would let a
-        cancellation land in between and paint a picture into a cell that
-        has already reported itself stopped. Returns whether it was shown.
+        has. The durable-for-this-run copy is what the notebook renders on
+        its kernel thread; `on_plot` remains an optional best-effort streaming
+        seam for non-notebook callers. Returns whether the figure was accepted.
         """
-        if not figures or self.on_plot is None:
+        figures = [dict(figure) for figure in (figures or [])
+                   if isinstance(figure, dict)]
+        if not figures:
             return False
         with self._lock:
             if self.closed:
                 return False
-            self.on_plot(caption, figures)
+            self._figure_events.append({
+                'status': 'ok', 'kind': 'figure',
+                'caption': str(caption or ''), 'figures': figures})
+            if self.on_plot is not None:
+                try:
+                    self.on_plot(caption, [dict(figure)
+                                           for figure in figures])
+                except Exception:
+                    # Streaming is optional UI only. The buffered copy still
+                    # reaches the caller, so a display-handler fault may not
+                    # turn a successfully rendered plot into a tool failure.
+                    pass
             return True
+
+    def record_figure_failure(self, kind, caption, error):
+        """Keep one failed render attempt for an end-of-run notebook notice.
+
+        The model still receives the error in-band and may repair it. A later
+        successful figure supersedes this notice; a final failed attempt is
+        shown to the user instead of disappearing behind the tool protocol.
+        """
+        with self._lock:
+            if self.closed:
+                return False
+            self._figure_events.append({
+                'status': 'error', 'kind': str(kind or 'figure'),
+                'caption': str(caption or ''), 'error': str(error or '')})
+            return True
+
+    def figure_events(self):
+        """A detached snapshot of this run's local illustration events."""
+        with self._lock:
+            events = []
+            for event in self._figure_events:
+                copy = dict(event)
+                if 'figures' in copy:
+                    copy['figures'] = [dict(figure)
+                                       for figure in copy['figures']]
+                events.append(copy)
+            return events
 
     @contextlib.contextmanager
     def _mutate(self):
@@ -722,13 +767,17 @@ def make_api(session):
         if figures is None:  # a PNG-only backend still satisfies the seam
             figures = [{'kind': 'png', 'data': d}
                        for d in (result.get('images') or [])]
-        session.deliver_figure(caption, figures)
-        reply = {'ok': bool(result.get('ok')) and bool(figures),
-                 'plots': len(figures),
+        ok = bool(result.get('ok')) and bool(figures)
+        error = (result.get('error')
+                 or 'the code produced no figure')[-1200:]
+        accepted = (session.deliver_figure(caption, figures) if ok else
+                    session.record_figure_failure('plot', caption, error))
+        if not accepted and session.closed:
+            return _closed_reply('plot', session)
+        reply = {'ok': ok, 'plots': len(figures) if ok else 0,
                  'stdout': (result.get('stdout') or '')[-800:]}
         if not reply['ok']:
-            reply['error'] = (result.get('error')
-                              or 'the code produced no figure')[-1200:]
+            reply['error'] = error
         return json.dumps(reply, ensure_ascii=False)
 
     def tikz(code: str, caption: str) -> str:
@@ -747,12 +796,18 @@ def make_api(session):
         result = session.tikz_backend.render(code)
         svg = result.get('svg') if result.get('ok') else None
         if svg:
-            session.deliver_figure(caption, [{'kind': 'svg', 'data': svg}])
+            accepted = session.deliver_figure(
+                caption, [{'kind': 'svg', 'data': svg}])
+        else:
+            error = (result.get('error')
+                     or 'the source produced no figure')[-1200:]
+            accepted = session.record_figure_failure('tikz', caption, error)
+        if not accepted and session.closed:
+            return _closed_reply('tikz', session)
         reply = {'ok': bool(svg), 'plots': 1 if svg else 0}
         if not reply['ok']:
             # keep the tail: that is where the TeX log's `!` lines are
-            reply['error'] = (result.get('error')
-                              or 'the source produced no figure')[-1200:]
+            reply['error'] = error
         return json.dumps(reply, ensure_ascii=False)
 
     api = {
@@ -942,16 +997,19 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     """Run one do! instruction through the agent.
 
     Returns {ok, status, steps, assumptions, premises, final_result,
-    final_provenance, branch_topology, abandoned_paths, summary[, error]}.
+    final_provenance, branch_topology, abandoned_paths, figures,
+    figure_error, summary[, error]}.
     `premises` are the inputs this run stated rather than derived — the
     boundary of what it checked.
     `steps` are the ledger steps this run added; `final_result` is the
-    cell's chainable value. Figures reach
-    `on_plot(caption, [{kind, data, height?}, ...])` where kind is
-    png/html/svg; when a backend argument is None the configured one is
-    auto-detected (TOYMATH_SANDBOX). The agent loop runs in a private
-    thread with its own asyncio loop, so this is safe to call from the
-    Jupyter kernel's event-loop thread.
+    cell's chainable value. Successful figures are returned as run-local
+    illustration records and also reach the optional
+    `on_plot(caption, [{kind, data, height?}, ...])` streaming callback, where
+    kind is png/html/svg. A final failed figure attempt is returned in
+    `figure_error`. When a backend argument is None the configured one is
+    auto-detected (TOYMATH_SANDBOX). The agent loop runs in a private thread
+    with its own asyncio loop, so notebook display must happen after this
+    function returns to the Jupyter kernel's event-loop thread.
 
     Jupyter Stop (KeyboardInterrupt) cancels the provider run and closes
     the session within a bounded grace period. A cancelled run keeps every
@@ -1088,6 +1146,14 @@ def finalize_session(session, outcome, max_turns=None):
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
     final_premises = session.ledger.premises(spine or run_ids or None)
+    figure_events = session.figure_events()
+    figures = [{'caption': event['caption'],
+                'figures': event['figures']}
+               for event in figure_events if event['status'] == 'ok']
+    last_figure = figure_events[-1] if figure_events else None
+    figure_error = (dict(last_figure)
+                    if last_figure and last_figure['status'] == 'error'
+                    else None)
     out = {'ok': outcome.status == agent_base.COMPLETED,
            'status': outcome.status,
            # provider-side facts about the run (backend, model, turn ids,
@@ -1100,6 +1166,8 @@ def finalize_session(session, outcome, max_turns=None):
            'final_result': final, 'final_provenance': provenance,
            'branch_topology': topology,
            'abandoned_paths': topology['abandoned_paths'],
+           # Run-local UI artifacts only; never ledger evidence or replay.
+           'figures': figures, 'figure_error': figure_error,
            'summary': None}
     if outcome.cancelled:
         return _finalize_cancelled(out, outcome, final, provenance)

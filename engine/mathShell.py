@@ -12,8 +12,10 @@ from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
 import agent_config
+import cell_input
 import model_config
 import prompt_commands
+from cell_input import split_lines
 
 from IPython.display import HTML, Javascript
 from engine import display
@@ -83,25 +85,6 @@ def _notify_route(handler, route):
         handler(route)
 
 
-def split_lines(self, code):
-    bracket = 0
-    buffer = ''
-    for codePoint in code:
-        if codePoint == '{':
-            bracket += 1
-        elif codePoint == '}':
-            bracket -= 1
-        elif codePoint == '\n' and bracket == 0:
-            yield buffer
-            buffer = ''
-            continue
-        elif codePoint == '\r':
-            continue
-        buffer += codePoint
-    if buffer != '':
-        yield buffer
-
-
 class MathShell(object):
 
     def __init__(self):
@@ -139,6 +122,30 @@ class MathShell(object):
         return (set(self.processor.actions) | set(self.commands)
                 | set(prompt_commands.RESERVED))
 
+    def preview_cell(self, code):
+        """Rendered segments for a cell's input, or None to keep it raw.
+
+        Read-only: the frontend calls this while the user edits, so it must
+        never touch the history, the ledger, or the live notation graph.
+
+        A `[[n]]` backreference renders as the formula it stands for — the
+        expression the cell will actually run on. A fresh kernel has no
+        history yet, so until that result exists the reference renders as
+        itself and the cell still reads as the command it is.
+        """
+        names = self._command_names()
+        # only a command that hands its argument to the agent may carry prose
+        prose = set(self.commands) | {'do'}
+        if BACKREF_RE.search(code):
+            try:
+                resolved = cell_input.preview(self.resolve_backrefs(code),
+                                              names, prose)
+            except Exception:
+                resolved = None
+            if resolved:
+                return resolved
+        return cell_input.preview(code, names, prose)
+
     def trace_step(self, sym, notation, index):
         if self.trace:
             writer = LaTexWriter(notation)
@@ -171,7 +178,7 @@ class MathShell(object):
         if self.has_expr_command(stripped):
             self.exec_composite(stripped, execution_count, add_to_history)
             return
-        lines = [line for line in split_lines(self, code)]
+        lines = [line for line in split_lines(code)]
         for index, line in enumerate(lines):
             last = index == len(lines) - 1
             self.exec_stmt(line, execution_count, add_to_history and last, last)
@@ -753,6 +760,84 @@ class MathShell(object):
                 f'style="max-width:640px"/></div>')
 
     @staticmethod
+    def _show_run_narrative(res):
+        if not res.get('summary'):
+            return
+        label = ('<strong>agent narrative — unverified:</strong> '
+                 if res.get('summary_unverified') else '')
+        display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
+                     f'{_html.escape(res["summary"])}</em></div>'))
+
+    @classmethod
+    def _show_run_figures(cls, res):
+        """Render run-local illustrations after returning to the kernel thread.
+
+        Provider tools execute on worker threads. Publishing Jupyter output
+        there is best-effort and can lose or mis-parent the message, so the
+        session buffers successful figures and the final failed attempt for
+        this deterministic render pass.
+        """
+        for illustration in res.get('figures') or []:
+            try:
+                parts = [cls._figure_html(figure)
+                         for figure in illustration.get('figures') or []]
+                parts.append(f'<div style="color:#888"><em>'
+                             f'{_html.escape(illustration.get("caption", ""))}'
+                             f'</em> &mdash; illustration, not machine-checked'
+                             f'</div>')
+                display(HTML(''.join(parts)))
+            except Exception as exc:
+                cls._do_error('figure could not be displayed: ' + str(exc))
+
+        failure = res.get('figure_error')
+        if failure:
+            kind = ('TikZ figure' if failure.get('kind') == 'tikz'
+                    else 'plot')
+            caption = failure.get('caption') or 'uncaptioned illustration'
+            error = failure.get('error') or 'the renderer returned no figure'
+            display(HTML(
+                f'<div style="color:#b65c00"><strong>{kind} failed:</strong> '
+                f'<em>{_html.escape(caption)}</em> &mdash; the mechanically '
+                f'checked mathematics is unaffected.'
+                f'<pre style="white-space:pre-wrap;margin:.4em 0">'
+                f'{_html.escape(error)}</pre></div>'))
+
+    @staticmethod
+    def _show_run_premises(res):
+        # where this run's checking starts: inputs it stated rather than
+        # derived. Without them a laundered assertion is indistinguishable
+        # from a derivation.
+        if not res.get('premises'):
+            return
+        import primitives
+        stated = ', '.join(
+            f'\\({primitives.display_latex(p["input"])}\\)'
+            for p in res['premises'])
+        count = len(res['premises'])
+        display(HTML(
+            f'<div style="color:#888">rests on {count} stated '
+            f'premise{"s" if count != 1 else ""}, not derived here: '
+            f'{stated}</div>'))
+
+    def _show_assumptions(self, assumptions):
+        # alternative case hypotheses are listed apart: they hold one
+        # at a time, never together
+        if not assumptions:
+            return
+        import primitives
+        split = {i for pair in primitives.exclusive_hypotheses(
+            assumptions) for i in pair}
+        for label, wanted in (('assumptions', False),
+                              ('alternative cases', True)):
+            shown = [a for i, a in enumerate(assumptions)
+                     if (i in split) is wanted]
+            if not shown:
+                continue
+            asm = '; '.join(self._assumption_html(a) for a in shown)
+            display(HTML(f'<div style="color:#888">{label}: '
+                         f'{asm}</div>'))
+
+    @staticmethod
     def _assumption_html(assumption):
         """One assumption as HTML: with a `display` field, prose stays
         prose (escaped) and only the inline $...$ spans reach MathJax;
@@ -842,21 +927,9 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail the derivation step
 
-        def on_plot(caption, figures):
-            try:
-                parts = [self._figure_html(f) for f in figures]
-                parts.append(f'<div style="color:#888"><em>'
-                             f'{_html.escape(caption)}</em> '
-                             f'&mdash; illustration, not machine-checked'
-                             f'</div>')
-                display(HTML(''.join(parts)))
-            except Exception:
-                pass  # rendering must never fail the plot call
-
         try:
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
-                                           on_plot=on_plot,
                                            proof_goal=proof_goal,
                                            route=self.route)
         except agent_do.DoAgentError as e:
@@ -885,39 +958,10 @@ class MathShell(object):
             all_steps=self.ledger.steps)
         if chain:
             display(HTML(chain))
-        if res.get('summary'):
-            label = ('<strong>agent narrative — unverified:</strong> '
-                     if res.get('summary_unverified') else '')
-            display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
-                         f'{_html.escape(res["summary"])}</em></div>'))
-        if res.get('premises'):
-            # where this run's checking starts: inputs it stated rather than
-            # derived. Without them a laundered assertion is indistinguishable
-            # from a derivation.
-            import primitives
-            stated = ', '.join(
-                f'\\({primitives.display_latex(p["input"])}\\)'
-                for p in res['premises'])
-            count = len(res['premises'])
-            display(HTML(
-                f'<div style="color:#888">rests on {count} stated '
-                f'premise{"s" if count != 1 else ""}, not derived here: '
-                f'{stated}</div>'))
-        if res['assumptions']:
-            # alternative case hypotheses are listed apart: they hold one
-            # at a time, never together
-            import primitives
-            split = {i for pair in primitives.exclusive_hypotheses(
-                res['assumptions']) for i in pair}
-            for label, wanted in (('assumptions', False),
-                                  ('alternative cases', True)):
-                shown = [a for i, a in enumerate(res['assumptions'])
-                         if (i in split) is wanted]
-                if not shown:
-                    continue
-                asm = '; '.join(self._assumption_html(a) for a in shown)
-                display(HTML(f'<div style="color:#888">{label}: '
-                             f'{asm}</div>'))
+        self._show_run_figures(res)
+        self._show_run_narrative(res)
+        self._show_run_premises(res)
+        self._show_assumptions(res['assumptions'])
         if res.get('cancelled'):
             self._do_partial_result(res)
             return          # no output history, no [[n]] backreference
@@ -990,9 +1034,19 @@ class MathShell(object):
             return
 
         composite = primitives.write_latex(root, resolver.output_notation)
-        # verified glue: the numeric oracle proves the composition
-        from tactics import core as core_tactics
-        rec = core_tactics.expand(composite)
+        # The cell's ledger evidence is rendered HERE, on the kernel
+        # thread, from the records themselves: the per-step streaming
+        # above is best-effort (a backend may dispatch tool callbacks off
+        # the kernel thread and lose the displays), and a cell whose only
+        # visible artifact is its final value reads as an assertion.
+        for run in resolver.subruns:
+            chain = self.render_do_chain(run.get('steps') or [],
+                                         run.get('branch_topology'),
+                                         all_steps=self.ledger.steps)
+            if chain:
+                display(HTML(chain))
+            self._show_run_narrative(run)
+            self._show_run_premises(run)
         assumptions = []
         for run in resolver.subruns:
             for a in run.get('assumptions', []):
@@ -1002,22 +1056,35 @@ class MathShell(object):
             for a in drec.get('assumptions', []):
                 if a not in assumptions:
                     assumptions.append(a)
-        if rec.get('ok'):
-            step = self.ledger.record(rec)
-            on_step(step)
-            for a in rec.get('assumptions', []):
-                if a not in assumptions:
-                    assumptions.append(a)
-            final = rec['result']
+        from tactic_registry import _same_spelling
+        singles = ([r.get('final_result') for r in resolver.subruns]
+                   + [r.get('result') for r in resolver.direct_records])
+        if (len(singles) == 1 and singles[0]
+                and _same_spelling(composite, singles[0])):
+            # the whole cell IS one command: identity composition needs no
+            # oracle-checked glue, and the designated result keeps its own
+            # spelling instead of being re-expanded (live: expand respelled
+            # \frac{\pi}{2|ab|} into a stacked fraction)
+            final = singles[0]
         else:
-            # expand could not combine (rare) - show the resolved composite,
-            # but be honest that the glue was not oracle-checked
-            self._do_error('composition not verified: '
-                           + rec.get('error', 'expand failed'))
-            final = composite
-        if assumptions:
-            asm = '; '.join(f'${a["text"]}$' for a in assumptions)
-            display(HTML(f'<div style="color:#888">assumptions: {asm}</div>'))
+            # verified glue: the numeric oracle proves the composition
+            from tactics import core as core_tactics
+            rec = core_tactics.expand(composite)
+            if rec.get('ok'):
+                step = self.ledger.record(rec)
+                on_step(step)
+                for a in rec.get('assumptions', []):
+                    if a not in assumptions:
+                        assumptions.append(a)
+                final = rec['result']
+            else:
+                # expand could not combine (rare) - show the resolved
+                # composite, but be honest that the glue was not
+                # oracle-checked
+                self._do_error('composition not verified: '
+                               + rec.get('error', 'expand failed'))
+                final = composite
+        self._show_assumptions(assumptions)
         if final:
             try:
                 outsym = self.parser.parse(final)

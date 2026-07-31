@@ -286,6 +286,64 @@ def _operator_body_latex(latex):
     return write_latex(_peel_groups(body, notation), notation)
 
 
+def definite_integral_parts(latex, var=None):
+    """(var, integrand_latex, lower_latex, upper_latex) for a top-level
+    definite integral ``\\int_a^b f \\, d<var>``, else None.  With
+    ``var=None`` the variable is discovered from the differential itself,
+    so the canonical and textbook spellings of one definite integral can
+    be compared parts-to-parts (the same discipline
+    `_integral_parts_latex` gives indefinite integrals).
+
+    Reads the notation directly: the parser normalizes both bound orders
+    onto the INDEX head's (power, sup_r) slots as (upper, lower).  The
+    integrand is read by re-heading the product with a bare ``\\int`` and
+    reusing the indefinite readers.  Shared structure-reading only — the
+    FTC tactic's symbolic leg and the quadrature check leg both read
+    bounds through here, but neither leg's *computation* is shared."""
+    try:
+        sym, notation = parse_latex(latex)
+    except PrimitiveError:
+        return None
+    inner = _peel_groups(sym, notation)
+    f = notation.getf(inner, Notation.P_LIST)
+    if f is None:
+        return None
+    args = list(f.args)
+    if not args:
+        return None
+    idx = notation.getf(args[0], Notation.INDEX)
+    if idx is None:
+        return None
+    base = idx.args[0]
+    if not (isinstance(base, Symbol) and notation.get(base) is None
+            and base.name == '\\int'):
+        return None
+    sub, sup_l, power, sup_r = idx.args[1]
+    upper, lower = power, sup_r
+    if (upper is None or lower is None
+            or sub is not None or sup_l is not None):
+        return None
+    bare = notation.setf(Notation.P_LIST,
+                         (Symbol('\\int'),) + tuple(args[1:]))
+    if var is None:
+        parts = _integral_parts_latex(write_latex(bare, notation))
+        if parts is None:
+            return None
+        var, integrand_latex = parts
+    else:
+        try:
+            integrand = _strip_integral(bare, notation, var)
+        except PrimitiveError:
+            return None
+        if integrand is None:
+            return None
+        integrand_latex = write_latex(_peel_groups(integrand, notation),
+                                      notation)
+    return (var, integrand_latex,
+            write_latex(_peel_groups(lower, notation), notation),
+            write_latex(_peel_groups(upper, notation), notation))
+
+
 def _integral_parts_latex(latex):
     """(var, integrand_latex) for a top-level indefinite ``\\int`` in
     either canonical (``\\int f \\, dx``) or textbook differential-in-
@@ -340,7 +398,7 @@ def _integral_parts_latex(latex):
     return var, write_latex(_peel_groups(integrand, notation), notation)
 
 
-def covers_goal(input_latex, goal_latex):
+def covers_goal(input_latex, goal_latex, establishes=False):
     """Whether a step input structurally restates the goal: identical
     modulo grouping, one is a big-operator wrapper whose body is the
     other (agents legitimately wrap a bare integrand/body goal in its
@@ -350,6 +408,17 @@ def covers_goal(input_latex, goal_latex):
     textbook ``\\int \\frac{dx}{g}``, the canonical
     ``\\int \\frac{1}{g} \\, dx``, and the bare integrand
     ``\\frac{1}{g}`` all restate one another).
+
+    ``establishes=True`` asks the stricter admission question: does a
+    chain rooted at this input *establish* the goal's value?  A bare body
+    never establishes a value-bearing binder — the binder's own data
+    (integration bounds, a limit's approach point, summation bounds) was
+    then consumed by no checked step, so a chain rooted at the body can
+    reach any number the body's algebra allows (live: a definite
+    integral's cell value was F(upper) alone, green because the lower
+    bound happened to contribute 0).  The indefinite-integral hops keep
+    passing: an antiderivative chain honestly roots at its integrand,
+    and the integrating step itself is derivative-checked.
 
     Integrand comparisons use the all-bracket-stripped discipline (`||`
     and other semantic brackets are preserved): the textbook spelling
@@ -371,6 +440,21 @@ def covers_goal(input_latex, goal_latex):
             and in_parts[0] == goal_parts[0]
             and stripped_eq(in_parts[1], goal_parts[1])):
         return True
+    # one DEFINITE integral restates another: same variable, and
+    # integrand plus both bounds equal modulo spelling (the textbook
+    # \int_a^b dx/g and canonical \int_a^b 1/g dx forms of one
+    # integral must cover each other exactly as the indefinite branch
+    # above provides — live: an honest FTC chain was refused purely
+    # because the goal was textbook-spelled). No body hop is involved,
+    # so this holds in establishes mode too.
+    in_def = definite_integral_parts(input_latex)
+    goal_def = definite_integral_parts(goal_latex)
+    if (in_def is not None and goal_def is not None
+            and in_def[0] == goal_def[0]
+            and stripped_eq(in_def[1], goal_def[1])
+            and stripped_eq(in_def[2], goal_def[2])
+            and stripped_eq(in_def[3], goal_def[3])):
+        return True
     if (in_parts is not None and goal_parts is None
             and stripped_eq(in_parts[1], goal_latex)):
         return True
@@ -380,9 +464,11 @@ def covers_goal(input_latex, goal_latex):
     body = _operator_body_latex(input_latex)
     if body is not None and same_expression(body, goal_latex):
         return True
-    goal_body = _operator_body_latex(goal_latex)
-    if goal_body is not None and same_expression(input_latex, goal_body):
-        return True
+    if not establishes:
+        goal_body = _operator_body_latex(goal_latex)
+        if goal_body is not None and same_expression(input_latex,
+                                                     goal_body):
+            return True
     return False
 
 
@@ -457,15 +543,59 @@ def _plain_symbol_name(sym, notation):
     return None
 
 
+def _split_trailing_direction(sym, notation):
+    """(replacement, direction) when the RIGHTMOST leaf of an approach
+    expression carries the bare ``^+``/``^-`` marker that ordinary
+    precedence bound to an inner factor — ``\\pi/2^-`` parses as
+    ``\\pi/(2^-)`` and ``\\frac{\\pi}{2}^-`` hangs the marker on the
+    denominator, so a top-level INDEX check alone reads them as
+    TWO-SIDED limits at a corrupted point whose ``-`` the oracle then
+    samples as a free variable.  A bare sign is never legitimate
+    arithmetic (the grammar keeps it only as a direction marker), so
+    stripping it structurally is sound; ``(sym, None)`` otherwise."""
+    f = notation.get(sym)
+    if f is None:
+        return sym, None
+    if f.sym == Notation.INDEX:
+        sub_l, sup_l, power, sub_r = f.args[1]
+        if (sub_l is None and sup_l is None and sub_r is None
+                and isinstance(power, Symbol)
+                and notation.get(power) is None
+                and power.name in ('+', '-')):
+            return (f.args[0],
+                    'right' if power.name == '+' else 'left')
+        return sym, None
+    if f.sym.name in FRAC_NAMES:
+        inner, direction = _split_trailing_direction(f.args[1], notation)
+        if direction is None:
+            return sym, None
+        return notation.setf(f.sym, (f.args[0], inner)), direction
+    if f.sym in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
+                 Notation.MINUS, Notation.PLUS, Notation.P_LIST,
+                 Notation.S_LIST, Notation.SLASH):
+        args = list(f.args)
+        inner, direction = _split_trailing_direction(args[-1], notation)
+        if direction is None:
+            return sym, None
+        args[-1] = inner
+        return notation.setf(f.sym, tuple(args)), direction
+    return sym, None
+
+
 def _approach_point(sym, notation):
     """Return ``(point, direction)`` for a limit endpoint.
 
     The parser represents ``a^+`` / ``a^-`` as INDEX(a, power='+/-').
     Ordinary powered endpoints (``a^2``) remain untouched.  Direction is
-    ``right`` / ``left`` / ``two-sided``.
+    ``right`` / ``left`` / ``two-sided``.  A marker that precedence
+    bound to an inner factor of a compound point (``\\pi/2^-``) is
+    recovered by the trailing walk.
     """
     f = notation.getf(sym, Notation.INDEX)
     if f is None:
+        stripped, direction = _split_trailing_direction(sym, notation)
+        if direction is not None:
+            return stripped, direction
         return sym, 'two-sided'
     sub_l, sup_l, power, sub_r = f.args[1]
     if sub_l is not None or sup_l is not None or sub_r is not None:
@@ -1385,6 +1515,118 @@ def _union_truths_at(env, tparts, dparts, tol):
     if t is None or any(d is None for d in truths):
         return None
     return t, any(truths)
+
+
+def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
+                           panels=64, tol=1e-4):
+    """Quadrature leg for a definite-integral evaluation: composite
+    Simpson over the integrand vs the numeric value of ``result``.
+
+    Never touches the antiderivative — the symbolic leg substitutes
+    bounds into F, this leg re-integrates f itself, so the two legs stay
+    independent.  Free symbols other than the integration variable are
+    sampled as parameters, each sample comparing quadrature against the
+    result under the same environment.
+
+    The integrand must be evaluable at every quadrature node: a node
+    where it leaves its domain while its neighbours evaluate is an
+    x-dependent domain break inside [a,b] — the Fundamental Theorem's
+    own hypothesis fails there, and F(b)-F(a) is exactly the classic
+    wrong answer (``\\int_{-1}^{1} x^{-2} = -2``) — so that point is
+    reported as a refusal, never sampled around.  A sample whose every
+    node fails is a bad parameter draw and is skipped.  Convergence is
+    estimated from two grids; a non-converged estimate is oracle
+    ignorance, never a counterexample."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    _var, integrand, lower, upper = parts
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if free_symbols(ls, ln) | free_symbols(us, un):
+        return {'status': 'skipped',
+                'reason': 'symbolic bounds are outside this check'}
+    try:
+        a = numeric_eval(ls, ln, {})
+        b = numeric_eval(us, un, {})
+    except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+        return {'status': 'skipped', 'reason': 'bounds are not evaluable'}
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return {'status': 'skipped', 'reason': 'bounds are not finite'}
+    params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
+
+    def simpson(env, n):
+        # returns (value, bad_node); bad_node is the first x where the
+        # integrand leaves its domain while other nodes evaluate
+        h = (b - a) / n
+        total = 0.0
+        evaluated = 0
+        domain_break = None
+        unknown = False
+        for i in range(n + 1):
+            x = a + i * h
+            node_env = dict(env)
+            node_env[var] = x
+            kind, value = _eval_kind(fs, fn, node_env)
+            if kind is None and (isinstance(value, list)
+                                 or not math.isfinite(value)):
+                kind = 'oracle'
+            if kind == 'domain':
+                if domain_break is None:
+                    domain_break = x
+                continue
+            if kind is not None:
+                unknown = True     # oracle ignorance, not a witness
+                continue
+            evaluated += 1
+            weight = 1 if i in (0, n) else (4 if i % 2 else 2)
+            total += weight * value
+        if domain_break is not None:
+            # every node failing is a bad parameter draw, not a witness
+            return None, (domain_break if evaluated else None)
+        if unknown:
+            return None, None
+        return total * h / 3.0, None
+
+    rng = random.Random(seed)
+    rounds = samples if params else 1
+    agreed = 0
+    tried = 0
+    while agreed < rounds and tried < rounds * 6:
+        tried += 1
+        env = _sample_point(params, rng) if params else {}
+        try:
+            expected = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if isinstance(expected, list) or not math.isfinite(expected):
+            continue
+        coarse, bad = simpson(env, panels)
+        if bad is not None:
+            return {'status': 'disagree', 'point': {var: bad},
+                    'reason': f'integrand is not evaluable at '
+                              f'{var} = {bad:.6g} inside the bounds; '
+                              'the integral is improper there'}
+        fine, bad = simpson(env, panels * 2)
+        if coarse is None or fine is None:
+            continue
+        err_est = abs(fine - coarse) / 15.0   # Simpson is O(h^4)
+        scale = max(1.0, abs(fine), abs(expected))
+        if abs(fine - expected) / scale > tol:
+            if abs(fine - expected) <= 16 * err_est:
+                continue   # quadrature has not converged: skip sample
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': expected, 'numeric': fine}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'composite-simpson quadrature'}
 
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,

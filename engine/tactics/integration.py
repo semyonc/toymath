@@ -12,6 +12,7 @@ from polyrat import (Poly, NotInFragment, to_ratfunc, poly_to_notation,
 from primitives import (
     FRAC_NAMES, PrimitiveError, parse_latex, write_latex, free_symbols,
     _result, _error, _peel_groups, _strip_integral, _paren, _is_sum_str,
+    definite_integral_parts, numeric_definite_check,
 )
 from tactics.core import (
     equal_exprs, substitute, _merge_checks,
@@ -183,7 +184,8 @@ def _steer_completed_square(rf, var):
 def _table_integrate(sym, notation, var, assumptions):
     """Mechanical antiderivative (no constant): power rule + logarithm +
     arctan family + basic functions of the bare variable, closed under sums
-    and constant factors (fully constant integrands integrate to c·var).
+    and constant factors — symbolic var-free factors included (fully
+    constant integrands integrate to c·var).
     Raises PrimitiveError with an honest reason otherwise."""
     rf = None
     try:
@@ -192,16 +194,38 @@ def _table_integrate(sym, notation, var, assumptions):
         pass
     except ZeroDivisionError:
         raise PrimitiveError('integrand contains division by zero')
+    rational_error = None
     if rf is not None:
         try:
             return _power_integrate_ratfunc(rf, var, assumptions,
                                             allow_log=True)
-        except PrimitiveError:
+        except PrimitiveError as e:
             alt = _arctan_integrate_ratfunc(rf, var)
             if alt is not None:
                 return alt
+            # Do NOT raise yet: the structural branches below can peel
+            # var-free SYMBOLIC factors the rational legs refuse
+            # (1/(ab(v^2+1)) is multivariate to polyrat but one constant
+            # split away from the arctan rule — live: the
+            # a^2 sin^2 + b^2 cos^2 arctangent cell). If they cannot
+            # close it either, the rational refusal below is the honest
+            # message, with the completed-square steering preserved.
+            rational_error = e
+    try:
+        return _table_structural(sym, notation, var, assumptions)
+    except PrimitiveError:
+        if rational_error is not None:
             _steer_completed_square(rf, var)
-            raise
+            raise rational_error
+        raise
+
+
+def _table_structural(sym, notation, var, assumptions):
+    """The spelling-structural half of the table: unwraps groups and
+    signs, splits sums, peels var-free (possibly symbolic) constant
+    factors from products and denominators, and applies the basic
+    function/power rules. Sub-terms re-enter `_table_integrate`, so a
+    peeled core gets the rational legs again."""
     if var not in free_symbols(sym, notation):
         # var-free integrand outside the rational fragment (\sqrt{5}/5,
         # 1+\sqrt{2}, ...): a constant integrates to c·var regardless of
@@ -884,4 +908,113 @@ def integrate_assemble(expr, var, antiderivatives):
     if rec['check'].get('status') == 'agree':
         rec['check']['method'] = (
             'per-piece derivatives + signed linearity')
+    return rec
+
+
+def integrate_definite(expr, var, antiderivative, upper_limit=None,
+                       lower_limit=None):
+    """Evaluate a definite integral from a RECORDED antiderivative
+    (Fundamental Theorem of Calculus, part 2).
+
+    ``expr`` is the definite integral ``\\int_a^b f \\, d<var>`` itself;
+    ``antiderivative`` is the result of an earlier recorded integration
+    step (the do! tool supplies it from a ledger step id rather than
+    letting the agent retype it).  This primitive independently
+    re-differentiates the antiderivative against the integrand, then
+    builds ``F(b) - F(a)`` by substitution — any fresh ``+ C`` riding on
+    the recorded antiderivative cancels in the following expand.
+
+    When the antiderivative's SPELLING is singular at a bound (the
+    classic ``\\arctan(c \\tan x)`` at ``\\pi/2``), substitution is the
+    wrong move: the honest endpoint value is the one-sided limit of the
+    antiderivative from inside the interval.  ``upper_limit`` /
+    ``lower_limit`` carry that RECORDED limit value (the do! tool
+    supplies each from a limit step id whose input is checked to be
+    exactly ``\\lim_{var \\to bound^∓} <antiderivative>``); the endpoint
+    then uses the recorded value and an assumption states the continuous
+    extension.  The check leg re-integrates the integrand by quadrature
+    and never touches F, so a lying endpoint value is refused
+    regardless of its provenance.  Continuity of the integrand on [a,b]
+    is recorded as an assumption, not proved — though the quadrature leg
+    refuses outright when it lands on an interior domain break, which is
+    exactly the case where F(b) - F(a) is the classic wrong answer."""
+    args = {'expr': expr, 'var': var, 'antiderivative': antiderivative}
+    if upper_limit is not None:
+        args['upper_limit'] = upper_limit
+    if lower_limit is not None:
+        args['lower_limit'] = lower_limit
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return _error(
+            'integrate_definite', args,
+            'expr must be a definite integral \\int_a^b f \\, d<var> '
+            'with both bounds present (for indefinite integrals use the '
+            'other integration tactics)')
+    _var, integrand, lower, upper = parts
+    if not isinstance(antiderivative, str) or not antiderivative.strip():
+        return _error('integrate_definite', args,
+                      'antiderivative must be a recorded result')
+    try:
+        parse_latex(antiderivative)
+    except PrimitiveError as e:
+        return _error('integrate_definite', args,
+                      f'antiderivative is malformed: {e}')
+    derivative = differentiate(antiderivative, var)
+    if not derivative.get('ok'):
+        return _error('integrate_definite', args,
+                      'cannot differentiate the antiderivative: '
+                      + derivative.get('error', 'unknown error'))
+    equality = equal_exprs(derivative['result'], integrand)
+    if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+        return _error(
+            'integrate_definite', args,
+            f'the recorded value is not an antiderivative of '
+            f'{integrand!r} (verdict: '
+            f'{equality.get("verdict", "error")})')
+    assumptions = [{
+        'text': f'{integrand} is continuous on '
+                f'[{lower}, {upper}]',
+        'display': f'${integrand}$ is continuous on '
+                   f'$[{lower}, {upper}]$'}]
+    endpoint_values = []
+    for tag, bound, endpoint_limit in (('upper', upper, upper_limit),
+                                       ('lower', lower, lower_limit)):
+        if endpoint_limit is not None:
+            try:
+                ls, ln = parse_latex(endpoint_limit)
+            except PrimitiveError as e:
+                return _error('integrate_definite', args,
+                              f'{tag} endpoint limit is malformed: {e}')
+            if var in free_symbols(ls, ln):
+                return _error('integrate_definite', args,
+                              f'{tag} endpoint limit still contains '
+                              f'{var}')
+            endpoint_values.append(endpoint_limit)
+            side = 'below' if tag == 'upper' else 'above'
+            assumptions.append({
+                'text': (f'the antiderivative extends continuously to '
+                         f'{var} = {bound} (one-sided limit from '
+                         f'{side} recorded)'),
+                'display': (f'the antiderivative extends continuously '
+                            f'to ${var} = {bound}$ (one-sided limit '
+                            f'from {side} recorded)')})
+            continue
+        at_bound = substitute(antiderivative, var, bound)
+        if not at_bound.get('ok'):
+            return _error('integrate_definite', args,
+                          f'cannot substitute the {tag} bound: '
+                          + at_bound.get('error', 'unknown error'))
+        endpoint_values.append(at_bound['result'])
+    result = (f'{_paren(endpoint_values[0])} - '
+              f'{_paren(endpoint_values[1])}')
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_definite', args,
+                      f'internal: unparseable evaluation: {e}')
+    rec = _result(
+        'integrate_definite', args, expr, result,
+        assumptions=assumptions,
+        extra={'integrand': integrand, 'lower': lower, 'upper': upper})
+    rec['check'] = numeric_definite_check(expr, var, result)
     return rec

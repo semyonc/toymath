@@ -36,6 +36,7 @@ Design notes (hard-won, see the module tests):
   Langfuse client registers its TracerProvider as the global OTEL provider,
   which the instrumentor then binds its tracer to.
 """
+import base64
 import contextlib
 import logging
 import os
@@ -176,6 +177,84 @@ def trace_run(instruction, metadata=None, session_id=None, tags=None,
         except Exception:
             log.debug('trace_run could not close its observation',
                       exc_info=True)
+
+
+def otlp_trace_target():
+    """Langfuse's OTLP/HTTP trace endpoint and auth header, or None.
+
+    For a subprocess that owns its own OTel pipeline (the Codex runtime)
+    and must be told where to ship. Deliberately a pure reading of the
+    environment rather than of `_state`: the target has to be resolvable
+    before `setup()` has run, and in a process where it never will.
+
+    Returns `(endpoint, {header: value})`. The header carries a
+    credential - keep it out of anything that reaches a command line, a
+    log, or a trace.
+    """
+    if not is_enabled():
+        return None
+    if [v for v in _CRED_VARS if not os.environ.get(v)]:
+        return None
+    base = (os.environ.get('LANGFUSE_BASE_URL')
+            or os.environ.get('LANGFUSE_HOST') or 'https://cloud.langfuse.com')
+    base = base.strip().strip('"').strip("'").rstrip('/')
+    if '://' not in base:
+        base = 'https://' + base
+    token = base64.b64encode(
+        (f"{os.environ['LANGFUSE_PUBLIC_KEY']}:"
+         f"{os.environ['LANGFUSE_SECRET_KEY']}").encode('utf-8')).decode()
+    return base + '/api/public/otel/v1/traces', {
+        'Authorization': 'Basic ' + token}
+
+
+def traceparent():
+    """A W3C trace-context carrier for this thread's current span, or None.
+
+    The counterpart to `capture_context` for a subprocess rather than a
+    thread: handed to a runtime that speaks W3C trace context, it makes
+    that runtime's own spans children of this run instead of a separate
+    trace. Keys are `traceparent` (and `tracestate` when set).
+    """
+    if not _state['active']:
+        return None
+    try:
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator)
+        carrier = {}
+        TraceContextTextMapPropagator().inject(carrier)
+        if not carrier:
+            return None
+        parent = _plain_flags(carrier.get('traceparent'))
+        if parent:
+            carrier['traceparent'] = parent
+        return carrier
+    except Exception:
+        log.debug('could not build a trace carrier', exc_info=True)
+        return None
+
+
+def _plain_flags(traceparent):
+    """`traceparent` with only the sampled bit left in its flags.
+
+    LANDMINE, measured against Codex 0.144.4: this SDK emits flags `03`
+    (sampled + the W3C level-2 random-trace-id hint), and that runtime's
+    carrier parser rejects the whole header rather than ignoring the bit
+    it does not know - silently, so the spans simply start their own
+    trace instead of joining ours. The spec says unknown flags must be
+    ignored; a strict reader is not ours to fix, and the hint is advisory,
+    so it is dropped. Same header with `01` nests correctly.
+    """
+    if not traceparent:
+        return None
+    fields = traceparent.split('-')
+    if len(fields) != 4 or fields[0] != '00':
+        return traceparent           # not a shape we understand; pass through
+    try:
+        flags = int(fields[3], 16)
+    except ValueError:
+        return traceparent
+    fields[3] = '01' if flags & 0x01 else '00'
+    return '-'.join(fields)
 
 
 def capture_context():

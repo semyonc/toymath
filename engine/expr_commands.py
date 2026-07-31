@@ -39,6 +39,49 @@ class ExprCommandError(Exception):
     failed/empty agent sub-run. Surfaced to the cell as a do! error."""
 
 
+def _split_side_condition(arg_latex):
+    """(core_latex, condition_latex or None): a TRAILING bracketed
+    relation in a command argument is a stated side condition, not a
+    factor.
+
+    Textbook statements write ``\\int ... dx \\ (ab \\ne 0)``; the
+    parser reads that as a PRODUCT with the relation as a factor, so the
+    whole product became the sub-run's chain goal and nothing could ever
+    establish it — a perfect derivation still failed designation (live:
+    the a^2 sin^2 + b^2 cos^2 cell, both backends).  The relation is
+    split off, handed to the agent as a stated given, and the goal is
+    the mathematical argument itself."""
+    import primitives
+    try:
+        sym, notation = primitives.parse_latex(arg_latex,
+                                               allow_ellipsis=True)
+    except primitives.PrimitiveError:
+        return arg_latex, None
+    f = notation.getf(sym, Notation.P_LIST)
+    if f is None:
+        return arg_latex, None
+    # `\ ` before the parenthetical arrives as a bare `\\` symbol, which
+    # Notation.styles does not cover — drop it with the style tokens
+    args = [a for a in f.args if not (isinstance(a, Symbol)
+                                      and notation.get(a) is None
+                                      and (a.name in Notation.styles
+                                           or a.name == '\\'))]
+    if len(args) < 2:
+        return arg_latex, None
+    last = args[-1]
+    g = notation.vgetf(last, [Notation.GROUP, Notation.V_GROUP])
+    if g is None or Notation.is_semantic_bracket(g):
+        return arg_latex, None
+    inner = primitives._peel_groups(last, notation)
+    if notation.getf(inner, Notation.COMP) is None:
+        return arg_latex, None
+    core = args[:-1]
+    core_sym = core[0] if len(core) == 1 else \
+        notation.setf(Notation.P_LIST, tuple(core))
+    return (primitives.write_latex(core_sym, notation),
+            primitives.write_latex(inner, notation))
+
+
 def _direct(tactic, needs_var=False):
     """Adapter for one primitive as a direct command. `needs_var` primitives
     take (expr, var); the variable is inferred by the resolver (single plain
@@ -141,10 +184,16 @@ class ExprResolver(Replicator):
                 f'too many command evaluations in one cell (cap {self.max_calls})')
         self.calls += 1
         import prompt_commands
+        goal_latex, condition = _split_side_condition(arg_latex)
         instruction = prompt_commands.render(cmd, arg_latex)
+        if condition is not None:
+            instruction += (
+                f'\n\nThe trailing parenthetical ${condition}$ is a stated '
+                'side condition, not a factor: treat it as a given, and '
+                f'work the mathematical argument ${goal_latex}$ itself.')
         res = self.run_instruction(instruction, ledger=self.ledger,
                                    on_step=self.on_step,
-                                   chain_goal=arg_latex)
+                                   chain_goal=goal_latex)
         self.subruns.append(res)
         if not res.get('ok'):
             raise ExprCommandError(res.get('error', f'{cmd.name}! failed'))
@@ -159,7 +208,7 @@ class ExprResolver(Replicator):
                 'commands must return a result established by a ledger step')
         if (provenance.get('source') != 'claim'
                 and not _chains_to_goal(res.get('steps') or [],
-                                        provenance.get('step'), arg_latex)):
+                                        provenance.get('step'), goal_latex)):
             raise ExprCommandError(self._with_summary(
                 f'{cmd.name}! did not close: its final value comes from a '
                 'verified step that is not connected to the requested '
@@ -290,12 +339,16 @@ def _chains_to_goal(steps, final_id, goal_latex):
     must not have its last intermediate spliced in as the command's value.
     Linkage is structural (no oracle) and inherits the ledger's chaining
     convention (`_chain_links`): an integrand/body-consuming step continues
-    its big-operator-shaped predecessor, exactly as the primitives accept
-    in goal gating — bare value-equality stays too permissive here, and a
-    strict spelling match breaks every honest `\\int`-boundary hop (live:
-    a fully green substitution/assemble chain was refused because the
-    rewrite results are `\\int`-wrapped while the next inputs are their
-    integrands)."""
+    its big-operator-shaped predecessor — bare value-equality stays too
+    permissive here, and a strict spelling match breaks every honest
+    `\\int`-boundary hop (live: a fully green substitution/assemble chain
+    was refused because the rewrite results are `\\int`-wrapped while the
+    next inputs are their integrands).  The root-vs-goal test itself asks
+    the stricter ``establishes`` question: a chain rooted at the bare BODY
+    of a value-bearing binder (definite integral, `\\lim`, bounded sum)
+    does not establish that binder's value — no checked step ever consumed
+    the bounds or approach point (live: a definite integral's cell showed
+    F(upper) alone as its green "verified" value)."""
     import primitives
     from ledger import _chain_links
     transforming = [s for s in steps if s.get('result') is not None]
@@ -307,7 +360,7 @@ def _chains_to_goal(steps, final_id, goal_latex):
     while cur is not None and cur['id'] not in seen:
         seen.add(cur['id'])
         cur_input = cur.get('input') or ''
-        if primitives.covers_goal(cur_input, goal_latex):
+        if primitives.covers_goal(cur_input, goal_latex, establishes=True):
             return True
         prev = None
         for s in transforming:

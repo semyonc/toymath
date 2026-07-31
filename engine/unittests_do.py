@@ -7,6 +7,7 @@ fake Model. Set TOYMATH_LIVE_TESTS=1 to also run one real OpenRouter
 round-trip (requires OPEN_ROUTER in the environment/.env).
 """
 import _thread
+import base64
 import dataclasses
 import json
 import os
@@ -2371,6 +2372,213 @@ class TestCodexHomeAndPolicy(unittest.TestCase):
             codex_backend.mcp_overrides(self.home)
         self.assertIn('could not be read', str(caught.exception))
 
+    # -- telemetry containment ---------------------------------------------
+    def test_every_self_starting_exporter_is_pinned_off(self):
+        # `metrics_exporter` is the one that defaults to a live destination
+        # (statsig -> a baked-in ab.chatgpt.com endpoint in a release
+        # build). The gate that spares it today is `app-server`'s own
+        # default_analytics_enabled=false, which is the binary's argument
+        # and not ToyMath's decision.
+        for key in ('otel.exporter', 'otel.metrics_exporter'):
+            self.assertIn(f'{key}="none"',
+                          codex_backend.CONTAINMENT_OVERRIDES)
+
+    def test_the_trace_exporter_is_left_to_the_home_config(self):
+        # Not an omission: a --config override is SessionFlags, which
+        # outranks $CODEX_HOME/config.toml, so pinning the trace exporter
+        # would silently disable a trace exporter configured in the home's
+        # own config.toml (which is how a credential-bearing exporter stays
+        # out of argv) while buying no containment - it already defaults to
+        # none. Measured: pinned on the CLI, the runtime exports zero spans
+        # and reports nothing.
+        self.assertFalse(
+            [override for override in codex_backend.CONTAINMENT_OVERRIDES
+             if override.startswith(('otel.trace_exporter',
+                                     'otel.log_user_prompt'))])
+
+    # -- the runtime's own trace export ------------------------------------
+    #: the module runs with TOYMATH_OBSERVABILITY=off, so "tracing off" is
+    #: the ambient state and an explicit target is how a test says "on"
+    TARGET = ('http://localhost:3100/api/public/otel/v1/traces',
+              {'Authorization': 'Basic ZmFrZTpmYWtl'})
+
+    def _config_text(self):
+        with open(os.path.join(self.home, codex_backend.CONFIG_FILE),
+                  encoding='utf-8') as handle:
+            return handle.read()
+
+    def _parsed_config(self):
+        import tomllib
+        return tomllib.loads(self._config_text())
+
+    def test_the_trace_block_is_written_where_mcp_can_still_read_it(self):
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        exporter = self._parsed_config()['otel']['trace_exporter']['otlp-http']
+        self.assertEqual(exporter['endpoint'], self.TARGET[0])
+        self.assertEqual(exporter['protocol'], 'json')
+        self.assertEqual(exporter['headers']['Authorization'],
+                         self.TARGET[1]['Authorization'])
+        # the file the containment reader now has to parse on every run
+        self.assertEqual(codex_backend.mcp_overrides(self.home), ())
+
+    def test_tracing_off_removes_the_block_and_the_credential(self):
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        self.assertFalse(codex_backend.ensure_trace_export(self.home))
+        text = self._config_text()
+        self.assertNotIn('otlp-http', text)
+        self.assertNotIn('Basic', text)
+
+    def test_tracing_off_creates_no_file_at_all(self):
+        self.assertFalse(codex_backend.ensure_trace_export(self.home))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.home, codex_backend.CONFIG_FILE)))
+
+    def test_foreign_configuration_survives_both_directions(self):
+        self._write_config('[mcp_servers.alpha]\ncommand = "a"\n')
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        self.assertEqual(codex_backend.mcp_overrides(self.home),
+                         ('mcp_servers.alpha.enabled=false',))
+        codex_backend.ensure_trace_export(self.home)          # off again
+        self.assertIn('mcp_servers.alpha', self._config_text())
+
+    def test_writing_the_same_block_twice_changes_nothing(self):
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        first = self._config_text()
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        self.assertEqual(self._config_text(), first)
+
+    def test_a_config_that_would_not_parse_is_left_alone(self):
+        # tracing is observability only: it may not make the backend worse
+        self._write_config('this is not = = toml\n')
+        with self.assertLogs('toymath.agent.codex', level='WARNING'):
+            self.assertFalse(codex_backend.ensure_trace_export(
+                self.home, target=self.TARGET))
+        self.assertEqual(self._config_text(), 'this is not = = toml\n')
+
+    def test_the_sampler_is_pinned_only_when_the_runtime_traces(self):
+        # without it the runtime exports every span it raises, at any
+        # level; there is no verbosity knob on that pipeline
+        seen = {}
+
+        class Recorder(object):
+            def __init__(self, **kwargs):
+                seen.clear()
+                seen.update(kwargs)
+
+            def start(self):
+                return self
+
+        with mock.patch.object(codex_backend, 'AppServerTransport', Recorder), \
+                mock.patch.object(codex_backend, 'runtime_binary',
+                                  lambda: '/nonexistent/codex'):
+            codex_backend.open_transport(home=self.home)
+            self.assertFalse(seen.get('env'))          # tracing off
+            with mock.patch.object(codex_backend, 'ensure_trace_export',
+                                   lambda home: True):
+                codex_backend.open_transport(home=self.home)
+            self.assertEqual(seen['env'], codex_backend.TRACE_SAMPLER_ENV)
+
+    def test_an_interrupted_write_is_repaired_not_compounded(self):
+        # an opened block with no terminator is our own half-written file
+        self._write_config('model = "x"\n' + codex_backend.TRACE_BLOCK_BEGIN
+                           + '\n[otel.trace_exporter.otlp-h')
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        text = self._config_text()
+        self.assertEqual(text.count(codex_backend.TRACE_BLOCK_BEGIN), 1)
+        self.assertIn('model = "x"', text)
+        self._parsed_config()                       # and it parses
+
+
+class TestCodexRequestTracing(unittest.TestCase):
+    """The runtime parents a request's spans on the `trace` field of the
+    JSON-RPC envelope, so ToyMath's run span can adopt them."""
+
+    TRACEPARENT = '00-' + 'a' * 32 + '-' + 'b' * 16 + '-01'
+
+    def _sent(self, carrier):
+        transport = codex_transport.AppServerTransport(trace_carrier=carrier)
+        sent = []
+        transport._write = sent.append
+        with self.assertRaises(codex_transport.CodexUnavailable):
+            transport.request('turn/start', {'threadId': 't'}, timeout=0.01)
+        return sent[0]
+
+    def test_a_request_carries_the_caller_trace(self):
+        message = self._sent(lambda: {'traceparent': self.TRACEPARENT})
+        # a sibling of params, never inside it
+        self.assertEqual(message['trace'], {'traceparent': self.TRACEPARENT})
+        self.assertEqual(message['params'], {'threadId': 't'})
+
+    def test_no_carrier_leaves_the_envelope_untouched(self):
+        self.assertNotIn('trace', self._sent(None))
+
+    def test_an_untraced_run_adds_no_field(self):
+        # observability.traceparent returns None when tracing is inactive
+        self.assertNotIn('trace', self._sent(lambda: None))
+
+    def test_a_broken_carrier_costs_the_trace_not_the_run(self):
+        def carrier():
+            raise RuntimeError('no tracer')
+        self.assertNotIn('trace', self._sent(carrier))
+
+
+class TestObservabilityExportTarget(unittest.TestCase):
+    """Where a subprocess with its own OTel pipeline is told to ship."""
+
+    CREDS = {'LANGFUSE_PUBLIC_KEY': 'pk-lf-1', 'LANGFUSE_SECRET_KEY': 'sk-lf-2'}
+
+    def test_no_target_while_tracing_is_off(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'off'})):
+            self.assertIsNone(observability.otlp_trace_target())
+
+    def test_no_target_without_credentials(self):
+        env = {observability.ENABLE_VAR: 'on'}
+        with mock.patch.dict(os.environ, env, clear=False):
+            for var in observability._CRED_VARS:
+                os.environ.pop(var, None)
+            self.assertIsNone(observability.otlp_trace_target())
+
+    def test_the_endpoint_and_basic_header(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'on',
+                'LANGFUSE_BASE_URL': 'http://localhost:3100/'})):
+            endpoint, headers = observability.otlp_trace_target()
+        self.assertEqual(endpoint,
+                         'http://localhost:3100/api/public/otel/v1/traces')
+        self.assertEqual(
+            headers['Authorization'],
+            'Basic ' + base64.b64encode(b'pk-lf-1:sk-lf-2').decode())
+
+    def test_the_carrier_keeps_only_flags_codex_accepts(self):
+        # measured against 0.144.4: flags 03 (sampled + the level-2
+        # random-id hint) makes it reject the whole carrier, silently, and
+        # the runtime's spans start their own trace instead of joining ours
+        stem = '00-' + 'a' * 32 + '-' + 'b' * 16
+        self.assertEqual(observability._plain_flags(stem + '-03'),
+                         stem + '-01')
+        self.assertEqual(observability._plain_flags(stem + '-01'),
+                         stem + '-01')
+
+    def test_an_unsampled_parent_is_not_promoted(self):
+        stem = '00-' + 'a' * 32 + '-' + 'b' * 16
+        self.assertEqual(observability._plain_flags(stem + '-02'),
+                         stem + '-00')
+
+    def test_an_unfamiliar_carrier_is_left_alone(self):
+        for value in ('nonsense', '01-a-b-c-d', ''):
+            self.assertEqual(observability._plain_flags(value) or '', value)
+
+    def test_a_bare_host_gets_a_scheme(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'on',
+                'LANGFUSE_BASE_URL': 'cloud.langfuse.com'})):
+            endpoint, _ = observability.otlp_trace_target()
+        self.assertTrue(endpoint.startswith('https://cloud.langfuse.com/'))
+
 
 class TestCodexAuthentication(unittest.TestCase):
     """Managed ChatGPT sign-in: a URL and a status, never a token."""
@@ -3907,6 +4115,10 @@ class TestPlotTool(unittest.TestCase):
         # backend is adapted up into the typed shape
         self.assertEqual(shown[0][0], 'a parabola')
         self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
+        self.assertEqual(session.figure_events(), [{
+            'status': 'ok', 'kind': 'figure', 'caption': 'a parabola',
+            'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
+        }])
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
 
@@ -3934,6 +4146,35 @@ class TestPlotTool(unittest.TestCase):
         reply = json.loads(make_api(session)['plot']('bad', 'cap'))
         self.assertFalse(reply['ok'])
         self.assertIn('NameError', reply['error'])
+        self.assertEqual(session.figure_events()[-1]['status'], 'error')
+        self.assertIn('NameError', session.figure_events()[-1]['error'])
+
+    def test_failed_python_does_not_publish_its_partial_figure(self):
+        shown = []
+        backend = FakePlotBackend({
+            'ok': False, 'figures': [
+                {'kind': 'png', 'data': FAKE_PNG_B64}],
+            'error': 'RuntimeError: failed after drawing'})
+        session = DoSession(plot_backend=backend,
+                            on_plot=lambda *args: shown.append(args))
+        reply = json.loads(make_api(session)['plot']('bad', 'partial'))
+        self.assertFalse(reply['ok'])
+        self.assertEqual(reply['plots'], 0)
+        self.assertEqual(shown, [])
+        self.assertEqual(session.figure_events(), [{
+            'status': 'error', 'kind': 'plot', 'caption': 'partial',
+            'error': 'RuntimeError: failed after drawing',
+        }])
+
+    def test_streaming_callback_failure_does_not_lose_buffered_figure(self):
+        def broken_callback(*_args):
+            raise RuntimeError('display socket unavailable')
+
+        session = DoSession(plot_backend=FakePlotBackend(),
+                            on_plot=broken_callback)
+        reply = json.loads(make_api(session)['plot']('plt.plot([1])', 'safe'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(session.figure_events()[0]['status'], 'ok')
 
     def test_no_figure_is_an_error(self):
         backend = FakePlotBackend({'ok': True, 'stdout': '', 'stderr': '',
@@ -3958,6 +4199,8 @@ class TestPlotTool(unittest.TestCase):
         self.assertTrue(res['ok'])
         self.assertEqual(len(res['steps']), 1)  # plot is not a step
         self.assertEqual(shown, ['the parabola'])
+        self.assertEqual(res['figures'][0]['caption'], 'the parabola')
+        self.assertIsNone(res['figure_error'])
 
     def test_get_backend_off(self):
         with mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'off'}):
@@ -4325,6 +4568,80 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
 
+    def test_codex_plot_is_rendered_once_on_the_kernel_thread(self):
+        import engine
+
+        main_thread = threading.get_ident()
+        displayed = []
+
+        def capture(*objects, **_kwargs):
+            for obj in objects:
+                self.displays.append(obj)
+                displayed.append((threading.get_ident(),
+                                  getattr(obj, 'data', str(obj))))
+
+        engine.setHandler(capture)
+        plot_threads = []
+
+        class WorkerPlotBackend(FakePlotBackend):
+            def run_plot(inner_self, code, timeout=None):
+                plot_threads.append(threading.get_ident())
+                return super(WorkerPlotBackend, inner_self).run_plot(
+                    code, timeout=timeout)
+
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'plot',
+             'arguments': {'code': 'plt.plot([1])',
+                           'caption': 'worker-thread figure'}},
+            {'message': 'Rendered the requested illustration.'},
+        ])
+        self.shell.route = agent_config.AgentRoute(
+            backend=agent_config.CODEX, model='gpt-5.6-terra')
+        with mock.patch.object(codex_backend, 'runtime',
+                               return_value=transport), \
+                mock.patch.object(plot_sandbox, 'get_backend',
+                                  return_value=WorkerPlotBackend()), \
+                mock.patch.object(plot_sandbox, 'get_tikz_backend',
+                                  return_value=None):
+            self.shell.exec('do! draw it', 22, add_to_history=True)
+
+        self.assertEqual(len(plot_threads), 1)
+        self.assertNotEqual(plot_threads[0], main_thread)
+        figure_threads = [thread for thread, html in displayed
+                          if '<img' in html]
+        self.assertEqual(figure_threads, [main_thread])
+        self.assertEqual(self._html().count('<img'), 1)
+        self.assertIn('worker-thread figure', self._html())
+
+    def test_failed_codex_plot_is_visible_without_partial_image(self):
+        backend = FakePlotBackend({
+            'ok': False,
+            'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
+            'error': 'NameError: missing_name',
+        })
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'plot',
+             'arguments': {'code': 'missing_name()',
+                           'caption': 'broken worker plot'}},
+            {'message': 'The illustration could not be produced.'},
+        ])
+        self.shell.route = agent_config.AgentRoute(
+            backend=agent_config.CODEX, model='gpt-5.6-terra')
+        with mock.patch.object(codex_backend, 'runtime',
+                               return_value=transport), \
+                mock.patch.object(plot_sandbox, 'get_backend',
+                                  return_value=backend), \
+                mock.patch.object(plot_sandbox, 'get_tikz_backend',
+                                  return_value=None):
+            self.shell.exec('do! draw it', 23, add_to_history=True)
+
+        out = self._html()
+        self.assertIn('<strong>plot failed:</strong>', out)
+        self.assertIn('broken worker plot', out)
+        self.assertIn('NameError: missing_name', out)
+        self.assertNotIn('<img', out)
+        self.assertIn('mechanically checked mathematics is unaffected', out)
+
     def test_do_open_outcome_banner_typesets_dollar_math(self):
         # the reason's $-delimited math must reach the banner intact and
         # the banner div must stay MathJax-eligible (unlike note prose,
@@ -4463,8 +4780,9 @@ class TestMathShellDo(unittest.TestCase):
         out = self._html()
         self.assertNotIn('did not close', out)
         self.assertNotIn('do! error', out)
-        # 17 replayed steps plus the composite glue check
-        self.assertEqual(len(self.shell.ledger.steps), 18)
+        # 17 replayed steps; a whole-cell single command keeps its
+        # designated result — no composite glue step to respell it
+        self.assertEqual(len(self.shell.ledger.steps), 17)
         self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
         chained = self.shell.resolve_backrefs('[[6]]')
         self.assertIn('\\ln', chained)
@@ -5052,10 +5370,47 @@ class TestExprComposite(unittest.TestCase):
             return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2}', 1, add_to_history=True)
-        step = self.shell.ledger.steps[-1]
-        self.assertIn('C', step['result'])
-        self.assertNotIn('C_{', step['result'])  # no gratuitous renaming
-        self.assertEqual(step['check']['status'], 'agree')
+        chained = self.shell.resolve_backrefs('[[1]]')
+        self.assertIn('C', chained)
+        self.assertNotIn('C_{', chained)         # no gratuitous renaming
+
+    def test_composite_renders_chain_and_prose_assumptions(self):
+        # the live report: a Codex cell showed only its final value — the
+        # streamed step displays were lost off the kernel thread, and the
+        # assumptions line wrapped whole prose sentences in math mode
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            arg = _arg_of(instruction)
+            run = _ok('\\frac{x^4}{4} + C', goal=f'\\int {arg} \\, dx')
+            run['steps'] = [
+                {'id': 's1', 'op': 'scripted',
+                 'input': f'\\int {arg} \\, dx', 'result': 'F',
+                 'assumptions': [], 'check': {'status': 'agree'}},
+                {'id': 's2', 'op': 'scripted', 'input': 'F',
+                 'result': '\\frac{x^4}{4} + C',
+                 'assumptions': [], 'check': {'status': 'agree'}},
+            ]
+            run['final_provenance']['step'] = 's2'
+            run['assumptions'] = [
+                {'text': 'x^{3} is continuous on [0, 1]',
+                 'display': '$x^{3}$ is continuous on $[0, 1]$'}]
+            run['premises'] = [
+                {'step': 's1', 'input': f'\\int {arg} \\, dx'}]
+            return run
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^3', 1, add_to_history=True)
+        html = self._html()
+        # the chain table is rendered on the kernel thread from the run's
+        # own records, so the cell shows its ledger evidence even when the
+        # per-step streaming was lost
+        self.assertIn('<code>s1</code>', html)
+        self.assertIn('<code>s2</code>', html)
+        # prose stays prose: the display field routes only the math spans
+        # to MathJax, never the sentence
+        self.assertNotIn('$x^{3} is continuous on [0, 1]$', html)
+        self.assertIn('is continuous on', html)
+        self.assertIn('$x^{3}$', html)
+        # the premises boundary renders too
+        self.assertIn('stated premise', html)
 
     def test_user_constant_never_captured(self):
         # a C the user wrote in the cell must stay distinct from the minted one
@@ -5093,7 +5448,9 @@ class TestExprComposite(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('int! x^3', 1, add_to_history=True)  # no braces
         self.assertEqual(len(calls), 1)
-        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+        # whole-cell single command: designated result, no glue step
+        self.assertEqual(self.shell.ledger.steps, [])
+        self.assertIn('x^{4}', self.shell.resolve_backrefs('[[1]]'))
 
     def test_composite_agent_run_uses_notebook_model_routing(self):
         calls = []
@@ -5192,7 +5549,10 @@ class TestExprComposite(unittest.TestCase):
             return run
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^3}', 1, add_to_history=True)
-        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+        # accepted: no goal-chain refusal, and the designated result is
+        # chainable (a single command records no glue step)
+        self.assertNotIn('did not close', self._html())
+        self.assertIn('C', self.shell.resolve_backrefs('[[1]]'))
 
     def test_whole_cell_lim_ellipsis_closes_via_sum_tactics(self):
         # the original failing notebook cell, end to end through the shell
@@ -5205,7 +5565,7 @@ class TestExprComposite(unittest.TestCase):
         self.assertNotIn('do! error', html)
         ops = [s['op'] for s in self.shell.ledger.steps]
         self.assertEqual(ops, ['sum_from_ellipsis', 'sum_telescope',
-                               'limit_table', 'expand'])
+                               'limit_table'])
         chained = self.shell.resolve_backrefs('[[1]]')
         self.assertEqual(core_tactics.equal_exprs(chained, '1')['verdict'],
                          'yes')
@@ -5274,6 +5634,56 @@ class TestChainsToGoal(unittest.TestCase):
                         ('6u^2', '2u^{3} + C')),
             's2',
             '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
+
+    def test_body_rooted_chain_cannot_establish_a_definite_integral(self):
+        # live gen-64 probe: the agent derived F from the bare integrand,
+        # substituted one bound, and the cell showed a green "verified"
+        # value that was F(upper) alone — right only because F(lower)
+        # happened to be 0. On other bounds the same moves admit a wrong
+        # number, so a body-rooted chain never establishes the bounded
+        # integral.
+        import expr_commands as ec
+        steps = self._steps(
+            ('x^{2}', '\\frac {1} {3}x^{3} + C'),
+            ('\\frac {1} {3}x^{3} + C', '\\frac {1} {3}(2)^{3}+C'),
+            ('\\frac {1} {3}(2)^{3}+C', '\\frac {1} {3}(2)^{3}'),
+            ('\\frac {1} {3}(2)^{3}', '\\frac {8} {3}'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's4', '\\int_1^2 x^{2} \\, dx'))
+
+    def test_body_rooted_chain_cannot_establish_a_limit(self):
+        # same binder-family hole: evaluating the body at any point is a
+        # recordable chain, and its value must not admit as "the limit"
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\frac{x^2-4}{x-2}', 'x+2'),
+            ('x+2', '(2)+2'),
+            ('(2)+2', '4'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's3', '\\lim_{x \\to 2} \\frac{x^2-4}{x-2}'))
+
+    def test_integrand_rooted_chain_still_establishes_the_indefinite(self):
+        # the honest antiderivative chain roots at its bare integrand and
+        # the integrating step itself is derivative-checked; the
+        # establishes tightening must not refuse it
+        import expr_commands as ec
+        steps = self._steps(('x^{2}', '\\frac {1} {3}x^{3} + C'))
+        self.assertTrue(ec._chains_to_goal(steps, 's1',
+                                           '\\int x^{2} \\, dx'))
+
+    def test_definite_chain_roots_at_the_definite_integral(self):
+        # the honest route: integrate_definite consumes the bounded
+        # integral itself, so its chain admits directly
+        import expr_commands as ec
+        steps = self._steps(
+            ('x^{2}', '\\frac {1} {3}x^{3} + C'),
+            ('\\int_1^2 x^{2} \\, dx',
+             '\\left(\\frac {1} {3}(2)^{3}+C\\right) - '
+             '\\left(\\frac {1} {3}(1)^{3}+C\\right)'),
+            ('\\left(\\frac {1} {3}(2)^{3}+C\\right) - '
+             '\\left(\\frac {1} {3}(1)^{3}+C\\right)', '\\frac {7} {3}'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's3', '\\int_1^2 x^{2} \\, dx'))
 
     def test_bracket_respelling_hop_accepted(self):
         # second live model, same cell: the agent retyped the assemble
@@ -5355,9 +5765,11 @@ class TestDirectCommands(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('diff! x^2', 1, add_to_history=True)  # no braces
         ops = [s['op'] for s in self.shell.ledger.steps]
-        self.assertEqual(ops, ['differentiate', 'expand'])
+        self.assertEqual(ops, ['differentiate'])
         self.assertEqual(
             self.shell.ledger.steps[0]['result'].replace(' ', ''), '2x')
+        self.assertEqual(
+            self.shell.resolve_backrefs('[[1]]').replace(' ', ''), '2x')
 
     def test_direct_inside_direct(self):
         with mock.patch.object(agent_do, 'run_instruction', _never):
