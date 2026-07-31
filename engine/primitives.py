@@ -543,15 +543,59 @@ def _plain_symbol_name(sym, notation):
     return None
 
 
+def _split_trailing_direction(sym, notation):
+    """(replacement, direction) when the RIGHTMOST leaf of an approach
+    expression carries the bare ``^+``/``^-`` marker that ordinary
+    precedence bound to an inner factor — ``\\pi/2^-`` parses as
+    ``\\pi/(2^-)`` and ``\\frac{\\pi}{2}^-`` hangs the marker on the
+    denominator, so a top-level INDEX check alone reads them as
+    TWO-SIDED limits at a corrupted point whose ``-`` the oracle then
+    samples as a free variable.  A bare sign is never legitimate
+    arithmetic (the grammar keeps it only as a direction marker), so
+    stripping it structurally is sound; ``(sym, None)`` otherwise."""
+    f = notation.get(sym)
+    if f is None:
+        return sym, None
+    if f.sym == Notation.INDEX:
+        sub_l, sup_l, power, sub_r = f.args[1]
+        if (sub_l is None and sup_l is None and sub_r is None
+                and isinstance(power, Symbol)
+                and notation.get(power) is None
+                and power.name in ('+', '-')):
+            return (f.args[0],
+                    'right' if power.name == '+' else 'left')
+        return sym, None
+    if f.sym.name in FRAC_NAMES:
+        inner, direction = _split_trailing_direction(f.args[1], notation)
+        if direction is None:
+            return sym, None
+        return notation.setf(f.sym, (f.args[0], inner)), direction
+    if f.sym in (Notation.GROUP, Notation.V_GROUP, Notation.S_GROUP,
+                 Notation.MINUS, Notation.PLUS, Notation.P_LIST,
+                 Notation.S_LIST, Notation.SLASH):
+        args = list(f.args)
+        inner, direction = _split_trailing_direction(args[-1], notation)
+        if direction is None:
+            return sym, None
+        args[-1] = inner
+        return notation.setf(f.sym, tuple(args)), direction
+    return sym, None
+
+
 def _approach_point(sym, notation):
     """Return ``(point, direction)`` for a limit endpoint.
 
     The parser represents ``a^+`` / ``a^-`` as INDEX(a, power='+/-').
     Ordinary powered endpoints (``a^2``) remain untouched.  Direction is
-    ``right`` / ``left`` / ``two-sided``.
+    ``right`` / ``left`` / ``two-sided``.  A marker that precedence
+    bound to an inner factor of a compound point (``\\pi/2^-``) is
+    recovered by the trailing walk.
     """
     f = notation.getf(sym, Notation.INDEX)
     if f is None:
+        stripped, direction = _split_trailing_direction(sym, notation)
+        if direction is not None:
+            return stripped, direction
         return sym, 'two-sided'
     sub_l, sup_l, power, sub_r = f.args[1]
     if sub_l is not None or sup_l is not None or sub_r is not None:

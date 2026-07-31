@@ -911,7 +911,8 @@ def integrate_assemble(expr, var, antiderivatives):
     return rec
 
 
-def integrate_definite(expr, var, antiderivative):
+def integrate_definite(expr, var, antiderivative, upper_limit=None,
+                       lower_limit=None):
     """Evaluate a definite integral from a RECORDED antiderivative
     (Fundamental Theorem of Calculus, part 2).
 
@@ -921,13 +922,27 @@ def integrate_definite(expr, var, antiderivative):
     letting the agent retype it).  This primitive independently
     re-differentiates the antiderivative against the integrand, then
     builds ``F(b) - F(a)`` by substitution — any fresh ``+ C`` riding on
-    the recorded antiderivative cancels in the following expand.  The
-    check leg re-integrates the integrand by quadrature and never touches
-    F.  Continuity of the integrand on [a,b] is recorded as an
-    assumption, not proved — though the quadrature leg refuses outright
-    when it lands on an interior domain break, which is exactly the case
-    where F(b) - F(a) is the classic wrong answer."""
+    the recorded antiderivative cancels in the following expand.
+
+    When the antiderivative's SPELLING is singular at a bound (the
+    classic ``\\arctan(c \\tan x)`` at ``\\pi/2``), substitution is the
+    wrong move: the honest endpoint value is the one-sided limit of the
+    antiderivative from inside the interval.  ``upper_limit`` /
+    ``lower_limit`` carry that RECORDED limit value (the do! tool
+    supplies each from a limit step id whose input is checked to be
+    exactly ``\\lim_{var \\to bound^∓} <antiderivative>``); the endpoint
+    then uses the recorded value and an assumption states the continuous
+    extension.  The check leg re-integrates the integrand by quadrature
+    and never touches F, so a lying endpoint value is refused
+    regardless of its provenance.  Continuity of the integrand on [a,b]
+    is recorded as an assumption, not proved — though the quadrature leg
+    refuses outright when it lands on an interior domain break, which is
+    exactly the case where F(b) - F(a) is the classic wrong answer."""
     args = {'expr': expr, 'var': var, 'antiderivative': antiderivative}
+    if upper_limit is not None:
+        args['upper_limit'] = upper_limit
+    if lower_limit is not None:
+        args['lower_limit'] = lower_limit
     parts = definite_integral_parts(expr, var)
     if parts is None:
         return _error(
@@ -956,14 +971,42 @@ def integrate_definite(expr, var, antiderivative):
             f'the recorded value is not an antiderivative of '
             f'{integrand!r} (verdict: '
             f'{equality.get("verdict", "error")})')
-    at_upper = substitute(antiderivative, var, upper)
-    at_lower = substitute(antiderivative, var, lower)
-    if not (at_upper.get('ok') and at_lower.get('ok')):
-        failed = at_upper if not at_upper.get('ok') else at_lower
-        return _error('integrate_definite', args,
-                      'cannot substitute a bound: '
-                      + failed.get('error', 'unknown error'))
-    result = f'{_paren(at_upper["result"])} - {_paren(at_lower["result"])}'
+    assumptions = [{
+        'text': f'{integrand} is continuous on '
+                f'[{lower}, {upper}]',
+        'display': f'${integrand}$ is continuous on '
+                   f'$[{lower}, {upper}]$'}]
+    endpoint_values = []
+    for tag, bound, endpoint_limit in (('upper', upper, upper_limit),
+                                       ('lower', lower, lower_limit)):
+        if endpoint_limit is not None:
+            try:
+                ls, ln = parse_latex(endpoint_limit)
+            except PrimitiveError as e:
+                return _error('integrate_definite', args,
+                              f'{tag} endpoint limit is malformed: {e}')
+            if var in free_symbols(ls, ln):
+                return _error('integrate_definite', args,
+                              f'{tag} endpoint limit still contains '
+                              f'{var}')
+            endpoint_values.append(endpoint_limit)
+            side = 'below' if tag == 'upper' else 'above'
+            assumptions.append({
+                'text': (f'the antiderivative extends continuously to '
+                         f'{var} = {bound} (one-sided limit from '
+                         f'{side} recorded)'),
+                'display': (f'the antiderivative extends continuously '
+                            f'to ${var} = {bound}$ (one-sided limit '
+                            f'from {side} recorded)')})
+            continue
+        at_bound = substitute(antiderivative, var, bound)
+        if not at_bound.get('ok'):
+            return _error('integrate_definite', args,
+                          f'cannot substitute the {tag} bound: '
+                          + at_bound.get('error', 'unknown error'))
+        endpoint_values.append(at_bound['result'])
+    result = (f'{_paren(endpoint_values[0])} - '
+              f'{_paren(endpoint_values[1])}')
     try:
         parse_latex(result)
     except PrimitiveError as e:
@@ -971,11 +1014,7 @@ def integrate_definite(expr, var, antiderivative):
                       f'internal: unparseable evaluation: {e}')
     rec = _result(
         'integrate_definite', args, expr, result,
-        assumptions=[{
-            'text': f'{integrand} is continuous on '
-                    f'[{lower}, {upper}]',
-            'display': f'${integrand}$ is continuous on '
-                       f'$[{lower}, {upper}]$'}],
+        assumptions=assumptions,
         extra={'integrand': integrand, 'lower': lower, 'upper': upper})
     rec['check'] = numeric_definite_check(expr, var, result)
     return rec

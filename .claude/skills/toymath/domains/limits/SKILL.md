@@ -24,6 +24,15 @@ Use one tactic per mathematical justification:
   one-sided limit steps of the same body that reached the same value. Cite the
   two step ids; each side may itself be closed by any tactic, including a
   one-sided squeeze.
+- `limit_evaluate` certifies a limit VALUE you propose, checked by the
+  independent directional approach oracle. It is the route for a
+  composite no named rule spells — the standard example is an endpoint
+  behaviour you can see, `\lim_{x \to \pi/2^{-}} \arctan(\frac{a}{b}
+  \tan x)`. Its check is sampled, so reach for the named rules first
+  when one binds (they carry exact or stronger evidence), and propose a
+  spelling that holds for EVERY parameter sign — here
+  `\frac{\pi}{2|ab|}`-style absolute values, not a sign-assuming form;
+  a wrong proposal is refused with the oracle's witness.
 
 When no direct rule closes the limit but the body is bounded by simpler
 sequences, propose the bounds yourself and squeeze. This is the standard

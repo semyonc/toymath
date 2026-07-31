@@ -344,6 +344,49 @@ def limit_substitute(expr):
                           'direction': parts['direction']})
 
 
+def limit_evaluate(expr, value):
+    """Certify an agent-proposed VALUE for a limit by the independent
+    approach oracle.
+
+    The route for limits no named rule reaches — a composite whose
+    endpoint behaviour the agent can see but the table cannot spell,
+    e.g. ``\\lim_{x \\to \\pi/2^-} \\arctan(\\frac{a}{b} \\tan x)``.
+    The agent proposes, the directional Richardson/Aitken approach
+    oracle verifies; a proposal the ladder cannot confirm is refused
+    with the oracle's evidence, never recorded.  Sampled trust, named
+    in the check — the `rewrite_as` bargain for limits: prefer the
+    named table/l'Hopital/substitution rules where they bind."""
+    args = {'expr': expr, 'value': value}
+    try:
+        parts = _limit_parts(expr)
+        vs, vn = parse_latex(value)
+    except PrimitiveError as e:
+        return _error('limit_evaluate', args, str(e))
+    if parts['var'] in free_symbols(vs, vn):
+        return _error('limit_evaluate', args,
+                      'the proposed value still contains the bound '
+                      'variable')
+    check = _limit_check(parts['body_latex'], parts['var'],
+                         parts['point_latex'], parts['direction'], value)
+    if check.get('status') != 'agree':
+        if check.get('status') == 'disagree':
+            detail = (f'the approach oracle estimates '
+                      f'{check.get("numeric")} against the proposed '
+                      f'{check.get("expected")} at {check.get("point")}')
+        else:
+            detail = check.get('reason', check.get('status', 'unknown'))
+        return _error('limit_evaluate', args,
+                      'the proposed limit value was not confirmed: '
+                      + detail)
+    check = dict(check)
+    check['method'] = 'agent-proposed value; ' + check.get('method', '')
+    return _result('limit_evaluate', args, expr, value, check=check,
+                   extra={'body': parts['body_latex'],
+                          'var': parts['var'],
+                          'point': parts['point_latex'],
+                          'direction': parts['direction']})
+
+
 def limit_linearity(expr):
     """Split the limit of a top-level sum, conditional on piece limits."""
     args = {'expr': expr}

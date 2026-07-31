@@ -5486,6 +5486,134 @@ class TestSymbolicConstantPeel(unittest.TestCase):
         self.assertIn('complete the square', rec['error'])
 
 
+class TestApproachDirectionRecovery(unittest.TestCase):
+    """A bare ^-/^+ marker that precedence bound to an inner factor of a
+    compound point must still read as the direction — before this, the
+    oracle sampled the `-` as a free variable and checked a two-sided
+    limit at a corrupted point (live: every natural spelling of
+    x -> pi/2^- misread)."""
+
+    def _parts(self, expr):
+        return Limits._limit_parts(expr)
+
+    def test_slash_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\pi/2^-} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\pi /2', 'left'))
+
+    def test_braced_marker_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\pi/2^{-}} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\pi /2', 'left'))
+
+    def test_frac_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to \\frac{\\pi}{2}^{-}} \\sin x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('\\frac {\\pi} {2}', 'left'))
+
+    def test_negative_point_recovers_direction(self):
+        p = self._parts('\\lim_{x \\to -1^-} x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('-1', 'left'))
+
+    def test_powered_endpoint_stays_two_sided(self):
+        p = self._parts('\\lim_{x \\to a^2} x')
+        self.assertEqual((p['point_latex'], p['direction']),
+                         ('a^{2}', 'two-sided'))
+
+
+class TestLimitEvaluate(unittest.TestCase):
+    """Agent proposes a limit value; the approach oracle verifies."""
+
+    LIM = ('\\lim_{x \\to \\pi/2^{-}} \\left(\\frac {1} {ab}\\arctan'
+           '\\left (( \\frac {a} {b}( \\tan x)) \\right )+C\\right)')
+
+    def test_certifies_the_endpoint_composite(self):
+        rec = Limits.limit_evaluate(self.LIM, '\\frac{\\pi}{2|ab|}+C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('agent-proposed', rec['check']['method'])
+        self.assertEqual(rec['direction'], 'left')
+
+    def test_refuses_the_sign_wrong_value(self):
+        rec = Limits.limit_evaluate(self.LIM, '\\frac{\\pi}{2ab}+C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_refuses_a_value_containing_the_variable(self):
+        rec = Limits.limit_evaluate('\\lim_{x \\to 0^+} x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bound variable', rec['error'])
+
+    def test_simple_limit_still_certifies(self):
+        rec = Limits.limit_evaluate('\\lim_{x \\to \\infty} \\arctan x',
+                                    '\\frac{\\pi}{2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestIntegrateDefiniteEndpointDoor(unittest.TestCase):
+    """A recorded one-sided limit stands in for substitution at a bound
+    where the antiderivative's spelling is singular."""
+
+    EXPR = ('\\int_{0}^{\\pi/2}\\frac{1}{a^{2}\\sin^{2}x'
+            '+b^{2}\\cos^{2}x}\\,dx')
+    F = ('\\frac {1} {ab}\\arctan\\left (( \\frac {a} {b}( \\tan x)) '
+         '\\right )+C')
+
+    def test_upper_limit_value_replaces_substitution(self):
+        rec = Integration.integrate_definite(
+            self.EXPR, 'x', self.F,
+            upper_limit='\\frac{\\pi}{2|ab|}+C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\frac{\\pi}{2|ab|}+C', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('extends continuously', texts)
+
+    def test_endpoint_value_with_the_variable_refused(self):
+        rec = Integration.integrate_definite(
+            self.EXPR, 'x', self.F, upper_limit='\\tan x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('still contains', rec['error'])
+
+    def test_plain_path_unchanged(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertNotIn('upper_limit', rec['args'])
+
+
+class TestSideConditionSplit(unittest.TestCase):
+    """A trailing bracketed relation in an expr-command argument is a
+    stated side condition, not a factor — as a factor it poisoned goal
+    coverage (live: a perfect derivation failed designation)."""
+
+    def test_the_live_cell_splits(self):
+        import expr_commands as ec
+        core, cond = ec._split_side_condition(
+            '\\int_{0}^{\\pi /{2}}\\frac  {dx} '
+            '{a^{2} \\sin^{2}x+b^{2} \\cos^{2}x}\\ (ab \\ne {0})')
+        self.assertEqual(cond, 'ab \\ne{0}')
+        self.assertTrue(P.covers_goal(
+            '\\int_0^{\\pi/2} \\frac{1}{a^2 \\sin^2 x + b^2 \\cos^2 x}'
+            ' \\, dx', core, establishes=True))
+
+    def test_plain_arguments_do_not_split(self):
+        import expr_commands as ec
+        for arg in ['\\int_0^1 x^2 \\, dx', 'x+2 = 7', '(x+1)(x+2)',
+                    '\\{(-1,2),(1,-2)\\}']:
+            core, cond = ec._split_side_condition(arg)
+            self.assertIsNone(cond, arg)
+            self.assertEqual(core, arg)
+
+    def test_simple_product_with_condition_splits(self):
+        import expr_commands as ec
+        core, cond = ec._split_side_condition('2x\\ (x \\gt 0)')
+        self.assertEqual(cond, 'x \\gt 0')
+        self.assertEqual(core, '2x')
+
+
 class TestEstablishesGoalCoverage(unittest.TestCase):
     """covers_goal's admission question: a bare body never establishes a
     value-bearing binder."""

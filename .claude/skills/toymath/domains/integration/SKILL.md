@@ -92,11 +92,25 @@ numerically. Substituting the bounds by hand records steps about the
 antiderivative, not about the definite integral — the cell will refuse
 that chain as its value.
 
+If the antiderivative's SPELLING is singular at a bound (the classic
+`\arctan(\frac{a}{b}\tan x)` at `x = \pi/2`), do not substitute there:
+the honest endpoint value is a one-sided limit. Load the `limits` skill
+and record `\lim_{x \to b^{-}} (F)` — the FULL antiderivative, its
+`+ C` included, approaching the bound from inside the interval
+(`a^{+}` for the lower bound); `limit_evaluate` certifies your proposed
+value when no named rule reaches it, and a value that holds for every
+parameter sign (absolute-value spelling, `\frac{\pi}{2|ab|}+C`) needs
+no case split. Then cite both recorded steps:
+`integrate_definite EXPR VAR ANTIDERIVATIVE_STEP --upper-limit-step
+LIMIT_STEP` (or `--lower-limit-step`). The limit step must be about
+exactly that antiderivative or it is refused.
+
 Continuity of the integrand on `[a, b]` is recorded as an assumption; a
 pole strictly inside the bounds makes the check refuse (the integral is
-improper there). Improper integrals — infinite bounds or an interior or
-endpoint singularity — have no closing tactic yet: report the verified
-stopping point with the open outcome instead of forcing a value.
+improper there). Truly improper integrals — infinite bounds or an
+integrand singularity inside or at the interval — still have no closing
+tactic: report the verified stopping point with the open outcome
+instead of forcing a value.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly
