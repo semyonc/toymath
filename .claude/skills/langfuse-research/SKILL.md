@@ -85,7 +85,10 @@ A `do!` trace's shape maps directly onto how a run can go wrong:
   burning turns — e.g. one real stall here was 15 of 45 `run_tactic` calls
   erroring, which exhausted `max_turns`.
 - **TOOL `name` is the do! stable tool surface** — `claim`, `comment`,
-  `load_skill`, `run_tactic`, `conclude`, `set_result`. Reading them in order
+  `load_skill`, `run_tactic`, `conclude`, `set_result`. The OpenRouter
+  instrumentor names spans bare (`run_tactic`); the Codex backend's
+  child spans are prefixed (`tool:run_tactic`) — substring-match tool
+  names when triaging, or a Codex trace reads as "0 calls". Reading them in order
   reconstructs the agent's strategy, including dead branches it (honestly)
   left visible.
 - **GENERATION `usage` / `latency`** expose token spend and slow turns; a turn
@@ -107,7 +110,7 @@ print("concluded:", d.get("output") is not None)   # False => never called set_r
 for e in obs:
     if e.get("level") == "ERROR":
         print("ERROR:", e.get("type"), e.get("name"), "-", e.get("statusMessage"))
-rt = [x for x in obs if x.get("name") == "run_tactic"]
+rt = [x for x in obs if "run_tactic" in (x.get("name") or "")]
 kw = collections.Counter()
 for x in rt:
     s = json.dumps(x.get("output"))
