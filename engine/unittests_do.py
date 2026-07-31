@@ -4463,8 +4463,9 @@ class TestMathShellDo(unittest.TestCase):
         out = self._html()
         self.assertNotIn('did not close', out)
         self.assertNotIn('do! error', out)
-        # 17 replayed steps plus the composite glue check
-        self.assertEqual(len(self.shell.ledger.steps), 18)
+        # 17 replayed steps; a whole-cell single command keeps its
+        # designated result — no composite glue step to respell it
+        self.assertEqual(len(self.shell.ledger.steps), 17)
         self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
         chained = self.shell.resolve_backrefs('[[6]]')
         self.assertIn('\\ln', chained)
@@ -5052,10 +5053,47 @@ class TestExprComposite(unittest.TestCase):
             return _ok('\\frac{x^3}{3} + C', _arg_of(instruction))
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^2}', 1, add_to_history=True)
-        step = self.shell.ledger.steps[-1]
-        self.assertIn('C', step['result'])
-        self.assertNotIn('C_{', step['result'])  # no gratuitous renaming
-        self.assertEqual(step['check']['status'], 'agree')
+        chained = self.shell.resolve_backrefs('[[1]]')
+        self.assertIn('C', chained)
+        self.assertNotIn('C_{', chained)         # no gratuitous renaming
+
+    def test_composite_renders_chain_and_prose_assumptions(self):
+        # the live report: a Codex cell showed only its final value — the
+        # streamed step displays were lost off the kernel thread, and the
+        # assumptions line wrapped whole prose sentences in math mode
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            arg = _arg_of(instruction)
+            run = _ok('\\frac{x^4}{4} + C', goal=f'\\int {arg} \\, dx')
+            run['steps'] = [
+                {'id': 's1', 'op': 'scripted',
+                 'input': f'\\int {arg} \\, dx', 'result': 'F',
+                 'assumptions': [], 'check': {'status': 'agree'}},
+                {'id': 's2', 'op': 'scripted', 'input': 'F',
+                 'result': '\\frac{x^4}{4} + C',
+                 'assumptions': [], 'check': {'status': 'agree'}},
+            ]
+            run['final_provenance']['step'] = 's2'
+            run['assumptions'] = [
+                {'text': 'x^{3} is continuous on [0, 1]',
+                 'display': '$x^{3}$ is continuous on $[0, 1]$'}]
+            run['premises'] = [
+                {'step': 's1', 'input': f'\\int {arg} \\, dx'}]
+            return run
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^3', 1, add_to_history=True)
+        html = self._html()
+        # the chain table is rendered on the kernel thread from the run's
+        # own records, so the cell shows its ledger evidence even when the
+        # per-step streaming was lost
+        self.assertIn('<code>s1</code>', html)
+        self.assertIn('<code>s2</code>', html)
+        # prose stays prose: the display field routes only the math spans
+        # to MathJax, never the sentence
+        self.assertNotIn('$x^{3} is continuous on [0, 1]$', html)
+        self.assertIn('is continuous on', html)
+        self.assertIn('$x^{3}$', html)
+        # the premises boundary renders too
+        self.assertIn('stated premise', html)
 
     def test_user_constant_never_captured(self):
         # a C the user wrote in the cell must stay distinct from the minted one
@@ -5093,7 +5131,9 @@ class TestExprComposite(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('int! x^3', 1, add_to_history=True)  # no braces
         self.assertEqual(len(calls), 1)
-        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+        # whole-cell single command: designated result, no glue step
+        self.assertEqual(self.shell.ledger.steps, [])
+        self.assertIn('x^{4}', self.shell.resolve_backrefs('[[1]]'))
 
     def test_composite_agent_run_uses_notebook_model_routing(self):
         calls = []
@@ -5192,7 +5232,10 @@ class TestExprComposite(unittest.TestCase):
             return run
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('{int! x^3}', 1, add_to_history=True)
-        self.assertEqual(self.shell.ledger.steps[-1]['op'], 'expand')
+        # accepted: no goal-chain refusal, and the designated result is
+        # chainable (a single command records no glue step)
+        self.assertNotIn('did not close', self._html())
+        self.assertIn('C', self.shell.resolve_backrefs('[[1]]'))
 
     def test_whole_cell_lim_ellipsis_closes_via_sum_tactics(self):
         # the original failing notebook cell, end to end through the shell
@@ -5205,7 +5248,7 @@ class TestExprComposite(unittest.TestCase):
         self.assertNotIn('do! error', html)
         ops = [s['op'] for s in self.shell.ledger.steps]
         self.assertEqual(ops, ['sum_from_ellipsis', 'sum_telescope',
-                               'limit_table', 'expand'])
+                               'limit_table'])
         chained = self.shell.resolve_backrefs('[[1]]')
         self.assertEqual(core_tactics.equal_exprs(chained, '1')['verdict'],
                          'yes')
@@ -5405,9 +5448,11 @@ class TestDirectCommands(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', _never):
             self.shell.exec('diff! x^2', 1, add_to_history=True)  # no braces
         ops = [s['op'] for s in self.shell.ledger.steps]
-        self.assertEqual(ops, ['differentiate', 'expand'])
+        self.assertEqual(ops, ['differentiate'])
         self.assertEqual(
             self.shell.ledger.steps[0]['result'].replace(' ', ''), '2x')
+        self.assertEqual(
+            self.shell.resolve_backrefs('[[1]]').replace(' ', ''), '2x')
 
     def test_direct_inside_direct(self):
         with mock.patch.object(agent_do, 'run_instruction', _never):
