@@ -7,6 +7,7 @@ fake Model. Set TOYMATH_LIVE_TESTS=1 to also run one real OpenRouter
 round-trip (requires OPEN_ROUTER in the environment/.env).
 """
 import _thread
+import base64
 import dataclasses
 import json
 import os
@@ -2370,6 +2371,213 @@ class TestCodexHomeAndPolicy(unittest.TestCase):
         with self.assertRaises(agent_do.DoAgentError) as caught:
             codex_backend.mcp_overrides(self.home)
         self.assertIn('could not be read', str(caught.exception))
+
+    # -- telemetry containment ---------------------------------------------
+    def test_every_self_starting_exporter_is_pinned_off(self):
+        # `metrics_exporter` is the one that defaults to a live destination
+        # (statsig -> a baked-in ab.chatgpt.com endpoint in a release
+        # build). The gate that spares it today is `app-server`'s own
+        # default_analytics_enabled=false, which is the binary's argument
+        # and not ToyMath's decision.
+        for key in ('otel.exporter', 'otel.metrics_exporter'):
+            self.assertIn(f'{key}="none"',
+                          codex_backend.CONTAINMENT_OVERRIDES)
+
+    def test_the_trace_exporter_is_left_to_the_home_config(self):
+        # Not an omission: a --config override is SessionFlags, which
+        # outranks $CODEX_HOME/config.toml, so pinning the trace exporter
+        # would silently disable a trace exporter configured in the home's
+        # own config.toml (which is how a credential-bearing exporter stays
+        # out of argv) while buying no containment - it already defaults to
+        # none. Measured: pinned on the CLI, the runtime exports zero spans
+        # and reports nothing.
+        self.assertFalse(
+            [override for override in codex_backend.CONTAINMENT_OVERRIDES
+             if override.startswith(('otel.trace_exporter',
+                                     'otel.log_user_prompt'))])
+
+    # -- the runtime's own trace export ------------------------------------
+    #: the module runs with TOYMATH_OBSERVABILITY=off, so "tracing off" is
+    #: the ambient state and an explicit target is how a test says "on"
+    TARGET = ('http://localhost:3100/api/public/otel/v1/traces',
+              {'Authorization': 'Basic ZmFrZTpmYWtl'})
+
+    def _config_text(self):
+        with open(os.path.join(self.home, codex_backend.CONFIG_FILE),
+                  encoding='utf-8') as handle:
+            return handle.read()
+
+    def _parsed_config(self):
+        import tomllib
+        return tomllib.loads(self._config_text())
+
+    def test_the_trace_block_is_written_where_mcp_can_still_read_it(self):
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        exporter = self._parsed_config()['otel']['trace_exporter']['otlp-http']
+        self.assertEqual(exporter['endpoint'], self.TARGET[0])
+        self.assertEqual(exporter['protocol'], 'json')
+        self.assertEqual(exporter['headers']['Authorization'],
+                         self.TARGET[1]['Authorization'])
+        # the file the containment reader now has to parse on every run
+        self.assertEqual(codex_backend.mcp_overrides(self.home), ())
+
+    def test_tracing_off_removes_the_block_and_the_credential(self):
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        self.assertFalse(codex_backend.ensure_trace_export(self.home))
+        text = self._config_text()
+        self.assertNotIn('otlp-http', text)
+        self.assertNotIn('Basic', text)
+
+    def test_tracing_off_creates_no_file_at_all(self):
+        self.assertFalse(codex_backend.ensure_trace_export(self.home))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.home, codex_backend.CONFIG_FILE)))
+
+    def test_foreign_configuration_survives_both_directions(self):
+        self._write_config('[mcp_servers.alpha]\ncommand = "a"\n')
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        self.assertEqual(codex_backend.mcp_overrides(self.home),
+                         ('mcp_servers.alpha.enabled=false',))
+        codex_backend.ensure_trace_export(self.home)          # off again
+        self.assertIn('mcp_servers.alpha', self._config_text())
+
+    def test_writing_the_same_block_twice_changes_nothing(self):
+        codex_backend.ensure_trace_export(self.home, target=self.TARGET)
+        first = self._config_text()
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        self.assertEqual(self._config_text(), first)
+
+    def test_a_config_that_would_not_parse_is_left_alone(self):
+        # tracing is observability only: it may not make the backend worse
+        self._write_config('this is not = = toml\n')
+        with self.assertLogs('toymath.agent.codex', level='WARNING'):
+            self.assertFalse(codex_backend.ensure_trace_export(
+                self.home, target=self.TARGET))
+        self.assertEqual(self._config_text(), 'this is not = = toml\n')
+
+    def test_the_sampler_is_pinned_only_when_the_runtime_traces(self):
+        # without it the runtime exports every span it raises, at any
+        # level; there is no verbosity knob on that pipeline
+        seen = {}
+
+        class Recorder(object):
+            def __init__(self, **kwargs):
+                seen.clear()
+                seen.update(kwargs)
+
+            def start(self):
+                return self
+
+        with mock.patch.object(codex_backend, 'AppServerTransport', Recorder), \
+                mock.patch.object(codex_backend, 'runtime_binary',
+                                  lambda: '/nonexistent/codex'):
+            codex_backend.open_transport(home=self.home)
+            self.assertFalse(seen.get('env'))          # tracing off
+            with mock.patch.object(codex_backend, 'ensure_trace_export',
+                                   lambda home: True):
+                codex_backend.open_transport(home=self.home)
+            self.assertEqual(seen['env'], codex_backend.TRACE_SAMPLER_ENV)
+
+    def test_an_interrupted_write_is_repaired_not_compounded(self):
+        # an opened block with no terminator is our own half-written file
+        self._write_config('model = "x"\n' + codex_backend.TRACE_BLOCK_BEGIN
+                           + '\n[otel.trace_exporter.otlp-h')
+        self.assertTrue(codex_backend.ensure_trace_export(
+            self.home, target=self.TARGET))
+        text = self._config_text()
+        self.assertEqual(text.count(codex_backend.TRACE_BLOCK_BEGIN), 1)
+        self.assertIn('model = "x"', text)
+        self._parsed_config()                       # and it parses
+
+
+class TestCodexRequestTracing(unittest.TestCase):
+    """The runtime parents a request's spans on the `trace` field of the
+    JSON-RPC envelope, so ToyMath's run span can adopt them."""
+
+    TRACEPARENT = '00-' + 'a' * 32 + '-' + 'b' * 16 + '-01'
+
+    def _sent(self, carrier):
+        transport = codex_transport.AppServerTransport(trace_carrier=carrier)
+        sent = []
+        transport._write = sent.append
+        with self.assertRaises(codex_transport.CodexUnavailable):
+            transport.request('turn/start', {'threadId': 't'}, timeout=0.01)
+        return sent[0]
+
+    def test_a_request_carries_the_caller_trace(self):
+        message = self._sent(lambda: {'traceparent': self.TRACEPARENT})
+        # a sibling of params, never inside it
+        self.assertEqual(message['trace'], {'traceparent': self.TRACEPARENT})
+        self.assertEqual(message['params'], {'threadId': 't'})
+
+    def test_no_carrier_leaves_the_envelope_untouched(self):
+        self.assertNotIn('trace', self._sent(None))
+
+    def test_an_untraced_run_adds_no_field(self):
+        # observability.traceparent returns None when tracing is inactive
+        self.assertNotIn('trace', self._sent(lambda: None))
+
+    def test_a_broken_carrier_costs_the_trace_not_the_run(self):
+        def carrier():
+            raise RuntimeError('no tracer')
+        self.assertNotIn('trace', self._sent(carrier))
+
+
+class TestObservabilityExportTarget(unittest.TestCase):
+    """Where a subprocess with its own OTel pipeline is told to ship."""
+
+    CREDS = {'LANGFUSE_PUBLIC_KEY': 'pk-lf-1', 'LANGFUSE_SECRET_KEY': 'sk-lf-2'}
+
+    def test_no_target_while_tracing_is_off(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'off'})):
+            self.assertIsNone(observability.otlp_trace_target())
+
+    def test_no_target_without_credentials(self):
+        env = {observability.ENABLE_VAR: 'on'}
+        with mock.patch.dict(os.environ, env, clear=False):
+            for var in observability._CRED_VARS:
+                os.environ.pop(var, None)
+            self.assertIsNone(observability.otlp_trace_target())
+
+    def test_the_endpoint_and_basic_header(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'on',
+                'LANGFUSE_BASE_URL': 'http://localhost:3100/'})):
+            endpoint, headers = observability.otlp_trace_target()
+        self.assertEqual(endpoint,
+                         'http://localhost:3100/api/public/otel/v1/traces')
+        self.assertEqual(
+            headers['Authorization'],
+            'Basic ' + base64.b64encode(b'pk-lf-1:sk-lf-2').decode())
+
+    def test_the_carrier_keeps_only_flags_codex_accepts(self):
+        # measured against 0.144.4: flags 03 (sampled + the level-2
+        # random-id hint) makes it reject the whole carrier, silently, and
+        # the runtime's spans start their own trace instead of joining ours
+        stem = '00-' + 'a' * 32 + '-' + 'b' * 16
+        self.assertEqual(observability._plain_flags(stem + '-03'),
+                         stem + '-01')
+        self.assertEqual(observability._plain_flags(stem + '-01'),
+                         stem + '-01')
+
+    def test_an_unsampled_parent_is_not_promoted(self):
+        stem = '00-' + 'a' * 32 + '-' + 'b' * 16
+        self.assertEqual(observability._plain_flags(stem + '-02'),
+                         stem + '-00')
+
+    def test_an_unfamiliar_carrier_is_left_alone(self):
+        for value in ('nonsense', '01-a-b-c-d', ''):
+            self.assertEqual(observability._plain_flags(value) or '', value)
+
+    def test_a_bare_host_gets_a_scheme(self):
+        with mock.patch.dict(os.environ, dict(self.CREDS, **{
+                observability.ENABLE_VAR: 'on',
+                'LANGFUSE_BASE_URL': 'cloud.langfuse.com'})):
+            endpoint, _ = observability.otlp_trace_target()
+        self.assertTrue(endpoint.startswith('https://cloud.langfuse.com/'))
 
 
 class TestCodexAuthentication(unittest.TestCase):

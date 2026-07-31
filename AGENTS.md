@@ -383,9 +383,34 @@ if isinstance(n, IntegerValue): ...
   `observability.capture_context()` + `child_span()`. OTel context is
   thread-local and Codex tool callbacks run on transport worker threads, so
   a child span without the captured context starts an orphan trace rather
-  than nesting. The Codex thread also pins `otel.exporter="none"`: the
-  runtime has its own telemetry pipeline, and a ToyMath derivation must not
-  ship anything anywhere by default.
+  than nesting. The Codex thread also pins the runtime's own telemetry
+  pipeline off — a ToyMath derivation must not ship anything anywhere by
+  default. That pipeline is three exporters, not one: `otel.exporter`
+  (logs) and `otel.metrics_exporter` are both pinned to `"none"`, the
+  latter because it defaults to `statsig`, i.e. a baked-in
+  `ab.chatgpt.com` endpoint and API key in a release build; the
+  `analytics.enabled` gate that spares it today is `app-server`'s own
+  default argument, not ToyMath's decision. LANDMINE: do NOT complete the
+  set with `otel.trace_exporter` (or `otel.log_user_prompt`). It already
+  defaults to none, and a `--config` override is SessionFlags, which
+  outranks `$CODEX_HOME/config.toml` — measured, pinning it exports zero
+  spans and reports nothing. That door is open on purpose: with
+  `TOYMATH_OBSERVABILITY` on, `ensure_trace_export` writes an OTLP block
+  into the home's own `config.toml` (atomically, and re-parsed first,
+  because `mcp_overrides` fails closed on that same file) so the Langfuse
+  credential never becomes a process argument. Pinning the key would
+  silently disable it.
+- Two measured landmines in that runtime-tracing path, both silent:
+  (1) the pinned runtime rejects a `traceparent` whose flags it does not
+  recognise instead of ignoring the unknown bit, and this OTel SDK emits
+  `03` — so `observability._plain_flags` reduces flags to `01`/`00`, or the
+  runtime's spans quietly start their own trace instead of joining the run;
+  (2) once its trace exporter is on, the runtime exports EVERY span it
+  raises at any level (`trace_export_filter` takes any span; `RUST_LOG`
+  reaches only its stderr layer), so an idle runtime buries Langfuse in
+  trace-level `auth` spans — `TRACE_SAMPLER_ENV`
+  (`OTEL_TRACES_SAMPLER=parentbased_always_off`) is what keeps the export
+  to spans descending from a traced run.
 - To research a misbehaving do! run from its Langfuse trace, invoke the
   `langfuse-research` skill (`.claude/skills/langfuse-research/SKILL.md`):
   re-run with `TOYMATH_OBSERVABILITY=on`, then pull the trace with the

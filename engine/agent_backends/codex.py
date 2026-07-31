@@ -104,10 +104,33 @@ CONTAINMENT_OVERRIDES = (
     'features.workspace_dependencies=false',
     'features.skill_mcp_dependency_install=false',
     'features.tool_suggest=false',
-    # the runtime has its own OpenTelemetry pipeline (`none | statsig |
-    # otlp-http | otlp-grpc`); a ToyMath thread ships nothing anywhere
-    # unless that is an explicit, separate decision
+    # The runtime has its own OpenTelemetry pipeline, and it is three
+    # separate exporters (each `none | statsig | otlp-http | otlp-grpc`),
+    # not one. A ToyMath thread ships nothing anywhere unless that is an
+    # explicit, separate decision, so the two that can carry a payload off
+    # this machine on their own are pinned:
+    #   `exporter`         - logs; defaults to none
+    #   `metrics_exporter` - defaults to STATSIG, which resolves in a
+    #                        release build to a baked-in OTLP endpoint at
+    #                        ab.chatgpt.com with a baked-in API key.
+    #                        `app-server` happens to pass
+    #                        default_analytics_enabled=false, which gates
+    #                        it off today - but that is the binary's
+    #                        argument, not ToyMath's decision, and any
+    #                        `analytics.enabled=true` in a lower config
+    #                        layer flips the gate back. Pinning the
+    #                        exporter holds regardless of both.
     'otel.exporter="none"',
+    'otel.metrics_exporter="none"',
+    # LANDMINE: `otel.trace_exporter` deliberately does NOT belong here,
+    # tidy as the third line would look. It already defaults to none, so
+    # pinning it buys no containment - and a `--config` override is
+    # SessionFlags, which outranks `$CODEX_HOME/config.toml`. Measured:
+    # adding it exports zero spans and says nothing at all, so it would
+    # silently disable a trace exporter configured in this home's own
+    # config.toml - the one door left open on purpose, because that is how
+    # such an exporter's credential stays out of argv and off the process
+    # table. Same trap for `otel.log_user_prompt`.
 )
 
 _runtime_lock = threading.RLock()
@@ -314,6 +337,142 @@ def mcp_overrides(home):
     return tuple(f'mcp_servers.{name}.enabled=false' for name in sorted(names))
 
 
+#: The one region of the home's `config.toml` ToyMath owns. Everything
+#: outside it survives a rewrite - the file is ToyMath's in practice, but
+#: the runtime's own `config/value/write` RPCs and a human editor can both
+#: reach it, so it is never clobbered wholesale.
+TRACE_BLOCK_BEGIN = '# >>> toymath trace export >>>'
+TRACE_BLOCK_END = '# <<< toymath trace export <<<'
+
+TRACE_BLOCK_NOTE = (
+    '# Written by ToyMath while TOYMATH_OBSERVABILITY is on, and removed\n'
+    '# when it is off. Do not edit inside this block. It carries a\n'
+    '# credential, which is why it lives here rather than in a --config\n'
+    '# override: those become process arguments.')
+
+
+#: Measured: once the runtime's trace exporter is on, EVERY span it raises
+#: is exported. `trace_export_filter` accepts any span at any level, and
+#: `RUST_LOG` reaches only its stderr layer - there is no verbosity knob.
+#: An idle runtime raised 21 trace-level `auth` spans in 25s, each landing
+#: in Langfuse as a separate trace. A parent-based sampler cuts that at the
+#: root: a span exports only if it descends from a request ToyMath marked
+#: sampled, so what ships is this run and nothing else (26 spans -> 4, zero
+#: unrelated). Without it, an open kernel would bury the ledger's own
+#: traces in `auth` noise.
+TRACE_SAMPLER_ENV = {'OTEL_TRACES_SAMPLER': 'parentbased_always_off'}
+
+
+def ensure_trace_export(home, target=None):
+    """Match the home's `config.toml` to the observability toggle: the
+    runtime's own trace exporter pointed at Langfuse, or no block at all.
+
+    Returns whether the export block is now present.
+
+    Two rules this must not break. It is *observability only*, so every
+    failure is a warning and the derivation runs unchanged. And it shares
+    a file with `mcp_overrides`, which fails closed on unparseable TOML -
+    so the new text is parsed before it is installed, and installed by
+    atomic replace. A crash mid-write cannot leave a half file that
+    disables the backend and reports itself as an MCP problem.
+    """
+    if target is None:
+        import observability
+        target = observability.otlp_trace_target()
+    path = os.path.join(home, CONFIG_FILE)
+    try:
+        with open(path, encoding='utf-8') as handle:
+            existing = handle.read()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        log.warning('could not read %s (%s); leaving runtime tracing alone',
+                    path, exc)
+        return False
+
+    text = _without_trace_block(existing or '')
+    if target:
+        endpoint, headers = target
+        head = text.rstrip('\n')
+        text = (head + '\n\n' if head.strip() else '') + _trace_block(
+            endpoint, headers)
+    if existing is None and not text.strip():
+        return False                      # nothing to say, no file to create
+    if text == existing:
+        return bool(target)
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        # our own block is generated, so this means the rest of the file
+        # is broken - say so plainly instead of installing it
+        log.warning('%s would not parse after updating the trace-export '
+                    'block (%s); leaving it untouched', path, exc)
+        return bool(existing and TRACE_BLOCK_BEGIN in existing)
+    if not _install(path, text):
+        return bool(existing and TRACE_BLOCK_BEGIN in existing)
+    return bool(target)
+
+
+def _install(path, text):
+    """Replace `path` atomically, 0600 - the block carries a credential."""
+    tmp = path + '.toymath-new'
+    try:
+        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        log.warning('could not update %s (%s); runtime tracing unchanged',
+                    path, exc)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _without_trace_block(text):
+    """`text` with ToyMath's block removed, everything else intact.
+
+    An opened block with no terminator is our own interrupted write, so it
+    is dropped to the end of the file rather than left to be parsed.
+    """
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped == TRACE_BLOCK_BEGIN:
+            skipping = True
+            continue
+        if skipping:
+            if stripped == TRACE_BLOCK_END:
+                skipping = False
+            continue
+        out.append(line)
+    return ''.join(out)
+
+
+def _trace_block(endpoint, headers):
+    lines = [TRACE_BLOCK_BEGIN, TRACE_BLOCK_NOTE,
+             '[otel.trace_exporter.otlp-http]',
+             f'endpoint = {_toml_string(endpoint)}',
+             'protocol = "json"',
+             '',
+             '[otel.trace_exporter.otlp-http.headers]']
+    lines += [f'{name} = {_toml_string(headers[name])}'
+              for name in sorted(headers)]
+    lines.append(TRACE_BLOCK_END)
+    return '\n'.join(lines) + '\n'
+
+
+def _toml_string(value):
+    escaped = (str(value).replace('\\', '\\\\').replace('"', '\\"')
+               .replace('\n', '\\n').replace('\r', '\\r')
+               .replace('\t', '\\t'))
+    return f'"{escaped}"'
+
+
 def _configured_mcp_servers(home):
     path = os.path.join(home, CONFIG_FILE)
     try:
@@ -338,10 +497,16 @@ def open_transport(home=None, binary=None):
     binary = binary or runtime_binary()
     if binary is None:
         require_available()
+    import observability
     home, workdir = ensure_home(home=home)
+    # written before mcp_overrides reads the same file, so one parse of the
+    # final text serves both
+    traced = ensure_trace_export(home)
     transport = AppServerTransport(
         binary=binary, home=home, cwd=workdir,
-        config_overrides=CONTAINMENT_OVERRIDES + mcp_overrides(home))
+        config_overrides=CONTAINMENT_OVERRIDES + mcp_overrides(home),
+        env=dict(TRACE_SAMPLER_ENV) if traced else None,
+        trace_carrier=observability.traceparent)
     return transport.start()
 
 

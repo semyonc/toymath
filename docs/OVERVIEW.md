@@ -447,10 +447,23 @@ Tracing is observability only — it never touches the ledger or the numeric
 oracle, and a Langfuse outage is downgraded to a logged warning so the
 derivation still runs.
 
-The Codex runtime has its own OpenTelemetry pipeline
-(`otel.exporter = none | statsig | otlp-http | otlp-grpc`). ToyMath pins it
-to `none` for its threads, so a derivation ships no runtime telemetry
-anywhere unless that is an explicit, separate decision.
+The Codex runtime has its own OpenTelemetry pipeline — three exporters,
+each `none | statsig | otlp-http | otlp-grpc`. ToyMath pins the two that
+would otherwise start on their own (`otel.exporter` for logs, and
+`otel.metrics_exporter`, which defaults to `statsig` and would resolve to a
+built-in endpoint) to `none` for its threads, so a derivation ships no
+runtime telemetry anywhere unless that is an explicit, separate decision.
+`otel.trace_exporter` is left unpinned on purpose, because that separate
+decision is `TOYMATH_OBSERVABILITY` itself: with tracing on, ToyMath writes
+an OTLP block into the home's own `config.toml` pointing that exporter at
+the same Langfuse, and removes the block when tracing is off. It goes in
+the file rather than a `--config` override so the credential never becomes
+a process argument. The runtime's spans then nest inside the `do!` trace
+rather than arriving beside it — each JSON-RPC request carries a W3C
+`traceparent`, which the app-server uses to parent that request's spans.
+A parent-based sampler (`OTEL_TRACES_SAMPLER`) keeps the export to spans
+that descend from a traced run; without it the runtime exports every span
+it raises, at any level.
 
 The normal test suite is offline; live provider and plot probes are opt-in
 and separately gated:

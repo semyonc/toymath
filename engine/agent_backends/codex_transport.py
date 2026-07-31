@@ -306,11 +306,16 @@ class AppServerTransport(CodexTransport):
 
     def __init__(self, binary=None, home=None, cwd=None,
                  config_overrides=(), env=None, client_name='toymath',
-                 client_version='0.1.0'):
+                 client_version='0.1.0', trace_carrier=None):
         self.binary = binary
         self.home = home
         self.cwd = cwd
         self.config_overrides = tuple(config_overrides)
+        #: optional `() -> {'traceparent': ...}` read per request, so the
+        #: runtime's own spans join the caller's trace instead of starting
+        #: their own. A seam, not an import: the transport stays unaware of
+        #: whether tracing exists.
+        self.trace_carrier = trace_carrier
         self.extra_env = dict(env or {})
         self.client_name = client_name
         self.client_version = client_version
@@ -419,6 +424,11 @@ class AppServerTransport(CodexTransport):
         message = {'id': request_id, 'method': method}
         if params is not None:
             message['params'] = params
+        carrier = self._trace_carrier()
+        if carrier:
+            # a sibling of `params`, per the app-server's JSONRPCRequest;
+            # notifications have no such field
+            message['trace'] = carrier
         self._write(message)
         deadline = self.REQUEST_TIMEOUT if timeout is None else timeout
         if not waiter['event'].wait(deadline):
@@ -429,6 +439,19 @@ class AppServerTransport(CodexTransport):
         if waiter['error'] is not None:
             raise CodexError(method, waiter['error'])
         return waiter['result']
+
+    def _trace_carrier(self):
+        """The W3C carrier for this request, or None. Never raises: a
+        tracing fault may not cost a derivation."""
+        if self.trace_carrier is None:
+            return None
+        try:
+            carrier = self.trace_carrier()
+        except Exception:
+            log.debug('could not build a request trace carrier',
+                      exc_info=True)
+            return None
+        return carrier if isinstance(carrier, dict) and carrier else None
 
     def notify(self, method, params=None):
         message = {'method': method}
