@@ -21,7 +21,12 @@ chain that lets the cell accept your final value.
    constant integrands, `1/x` (gives `\ln x`, records `x > 0`), and the
    arctan family `1/(a x^2 + b)` with positive literals `a`, `b` — a
    constant numerator (even an irrational one like `\sqrt{5}`, in the
-   numerator or as a denominator factor) is handled with it. A quadratic
+   numerator or as a denominator factor) is handled with it, and any
+   var-free constant factor peels automatically, symbolic ones included
+   (`\frac{1}{ab(v^2+1)}` closes as `\frac{1}{ab}\arctan(v)` directly —
+   no rewrite needed to pull the constant out first). Symbolic
+   coefficients ON the variable (`1/(a^2u^2+b^2)`) still need your
+   substitution (`v = \frac{a}{b}u`). A quadratic
    denominator with a linear term is one completing-the-square
    `integrate_rewrite` plus shift substitution away from this rule.
 2. Use `integrate_substitute` when you can propose `u`, a new variable, and

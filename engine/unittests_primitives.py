@@ -5329,22 +5329,27 @@ class TestDefiniteIntegralParts(unittest.TestCase):
     def test_canonical_spelling(self):
         self.assertEqual(
             P.definite_integral_parts('\\int_0^1 x^{2} \\, dx', 'x'),
-            ('x^{2}', '0', '1'))
+            ('x', 'x^{2}', '0', '1'))
 
     def test_reversed_script_order_normalizes(self):
         self.assertEqual(
             P.definite_integral_parts('\\int^1_0 x^{2} \\, dx', 'x'),
-            ('x^{2}', '0', '1'))
+            ('x', 'x^{2}', '0', '1'))
 
     def test_textbook_differential_in_numerator(self):
         self.assertEqual(
             P.definite_integral_parts('\\int_1^2 \\frac{dx}{x}', 'x'),
-            ('\\frac {1} {x}', '1', '2'))
+            ('x', '\\frac {1} {x}', '1', '2'))
 
     def test_symbolic_bounds_read(self):
         self.assertEqual(
             P.definite_integral_parts('\\int_{a}^{b} x \\, dx', 'x'),
-            ('x', 'a', 'b'))
+            ('x', 'x', 'a', 'b'))
+
+    def test_variable_is_discovered_when_unstated(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_1^2 \\frac{dt}{t}'),
+            ('t', '\\frac {1} {t}', '1', '2'))
 
     def test_indefinite_is_none(self):
         self.assertIsNone(
@@ -5440,6 +5445,47 @@ class TestIntegrateDefinite(unittest.TestCase):
         self.assertIn('improper', rec['check'].get('reason', ''))
 
 
+class TestSymbolicConstantPeel(unittest.TestCase):
+    """The rational legs' multivariate refusal must not preempt the
+    structural constant split (live: the a^2 sin^2 + b^2 cos^2 arctangent
+    cell stopped exactly here, in every spelling the agent could reach)."""
+
+    def test_symbolic_factor_in_the_denominator_peels(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b\\left(v^{2}+1\\right)}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\arctan', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_factor_in_product_form_peels(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b}\\frac{1}{v^{2}+1}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertIn('\\arctan', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_numerator_over_the_literal_arctan_family(self):
+        rec = Integration.integrate_table(
+            '\\frac{c}{3u^{2}+\\frac{5}{3}}', 'u')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_symbolic_quadratic_coefficients_still_refuse(self):
+        # a^2 u^2 + b^2 is NOT one constant split away from the table —
+        # the (a/b) substitution is a genuine agent move; the table must
+        # not absorb it
+        rec = Integration.integrate_table(
+            '\\frac{1}{a^{2}u^{2}+b^{2}}', 'u')
+        self.assertFalse(rec['ok'])
+        self.assertIn('denominator must be constant', rec['error'])
+
+    def test_completed_square_steering_survives_the_fallback(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{v^{2}+2v+3}', 'v')
+        self.assertFalse(rec['ok'])
+        self.assertIn('complete the square', rec['error'])
+
+
 class TestEstablishesGoalCoverage(unittest.TestCase):
     """covers_goal's admission question: a bare body never establishes a
     value-bearing binder."""
@@ -5464,6 +5510,23 @@ class TestEstablishesGoalCoverage(unittest.TestCase):
     def test_identity_still_establishes(self):
         goal = '\\int_0^1 x^{2} \\, dx'
         self.assertTrue(P.covers_goal(goal, goal, establishes=True))
+
+    def test_definite_spellings_cover_each_other(self):
+        # the textbook and canonical spellings of ONE definite integral —
+        # an honest FTC chain was refused purely on this respelling
+        textbook = ('\\int_{0}^{\\pi /{2}}\\frac  {dx} '
+                    '{a^{2} \\sin^{2}x+b^{2} \\cos^{2}x}')
+        canonical = ('\\int_0^{\\pi/2} \\frac{1}{a^2 \\sin^2 x '
+                     '+ b^2 \\cos^2 x} \\, dx')
+        self.assertTrue(P.covers_goal(canonical, textbook,
+                                      establishes=True))
+        self.assertTrue(P.covers_goal(textbook, canonical,
+                                      establishes=True))
+
+    def test_different_bounds_do_not_cover(self):
+        self.assertFalse(P.covers_goal(
+            '\\int_0^1 x^{2} \\, dx', '\\int_0^2 x^{2} \\, dx',
+            establishes=True))
 
 
 if __name__ == '__main__':

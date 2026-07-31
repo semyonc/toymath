@@ -286,16 +286,19 @@ def _operator_body_latex(latex):
     return write_latex(_peel_groups(body, notation), notation)
 
 
-def definite_integral_parts(latex, var):
-    """(integrand_latex, lower_latex, upper_latex) for a top-level
-    definite integral ``\\int_a^b f \\, d<var>``, else None.
+def definite_integral_parts(latex, var=None):
+    """(var, integrand_latex, lower_latex, upper_latex) for a top-level
+    definite integral ``\\int_a^b f \\, d<var>``, else None.  With
+    ``var=None`` the variable is discovered from the differential itself,
+    so the canonical and textbook spellings of one definite integral can
+    be compared parts-to-parts (the same discipline
+    `_integral_parts_latex` gives indefinite integrals).
 
     Reads the notation directly: the parser normalizes both bound orders
     onto the INDEX head's (power, sup_r) slots as (upper, lower).  The
     integrand is read by re-heading the product with a bare ``\\int`` and
-    reusing the indefinite reader, so the canonical and textbook
-    differential spellings both work.  Shared structure-reading only —
-    the FTC tactic's symbolic leg and the quadrature check leg both read
+    reusing the indefinite readers.  Shared structure-reading only — the
+    FTC tactic's symbolic leg and the quadrature check leg both read
     bounds through here, but neither leg's *computation* is shared."""
     try:
         sym, notation = parse_latex(latex)
@@ -322,13 +325,21 @@ def definite_integral_parts(latex, var):
         return None
     bare = notation.setf(Notation.P_LIST,
                          (Symbol('\\int'),) + tuple(args[1:]))
-    try:
-        integrand = _strip_integral(bare, notation, var)
-    except PrimitiveError:
-        return None
-    if integrand is None:
-        return None
-    return (write_latex(_peel_groups(integrand, notation), notation),
+    if var is None:
+        parts = _integral_parts_latex(write_latex(bare, notation))
+        if parts is None:
+            return None
+        var, integrand_latex = parts
+    else:
+        try:
+            integrand = _strip_integral(bare, notation, var)
+        except PrimitiveError:
+            return None
+        if integrand is None:
+            return None
+        integrand_latex = write_latex(_peel_groups(integrand, notation),
+                                      notation)
+    return (var, integrand_latex,
             write_latex(_peel_groups(lower, notation), notation),
             write_latex(_peel_groups(upper, notation), notation))
 
@@ -428,6 +439,21 @@ def covers_goal(input_latex, goal_latex, establishes=False):
     if (in_parts is not None and goal_parts is not None
             and in_parts[0] == goal_parts[0]
             and stripped_eq(in_parts[1], goal_parts[1])):
+        return True
+    # one DEFINITE integral restates another: same variable, and
+    # integrand plus both bounds equal modulo spelling (the textbook
+    # \int_a^b dx/g and canonical \int_a^b 1/g dx forms of one
+    # integral must cover each other exactly as the indefinite branch
+    # above provides — live: an honest FTC chain was refused purely
+    # because the goal was textbook-spelled). No body hop is involved,
+    # so this holds in establishes mode too.
+    in_def = definite_integral_parts(input_latex)
+    goal_def = definite_integral_parts(goal_latex)
+    if (in_def is not None and goal_def is not None
+            and in_def[0] == goal_def[0]
+            and stripped_eq(in_def[1], goal_def[1])
+            and stripped_eq(in_def[2], goal_def[2])
+            and stripped_eq(in_def[3], goal_def[3])):
         return True
     if (in_parts is not None and goal_parts is None
             and stripped_eq(in_parts[1], goal_latex)):
@@ -1470,7 +1496,7 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
     parts = definite_integral_parts(expr, var)
     if parts is None:
         return {'status': 'skipped', 'reason': 'not a definite integral'}
-    integrand, lower, upper = parts
+    _var, integrand, lower, upper = parts
     try:
         fs, fn = parse_latex(integrand)
         ls, ln = parse_latex(lower)

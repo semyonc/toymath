@@ -184,7 +184,8 @@ def _steer_completed_square(rf, var):
 def _table_integrate(sym, notation, var, assumptions):
     """Mechanical antiderivative (no constant): power rule + logarithm +
     arctan family + basic functions of the bare variable, closed under sums
-    and constant factors (fully constant integrands integrate to c·var).
+    and constant factors — symbolic var-free factors included (fully
+    constant integrands integrate to c·var).
     Raises PrimitiveError with an honest reason otherwise."""
     rf = None
     try:
@@ -193,16 +194,38 @@ def _table_integrate(sym, notation, var, assumptions):
         pass
     except ZeroDivisionError:
         raise PrimitiveError('integrand contains division by zero')
+    rational_error = None
     if rf is not None:
         try:
             return _power_integrate_ratfunc(rf, var, assumptions,
                                             allow_log=True)
-        except PrimitiveError:
+        except PrimitiveError as e:
             alt = _arctan_integrate_ratfunc(rf, var)
             if alt is not None:
                 return alt
+            # Do NOT raise yet: the structural branches below can peel
+            # var-free SYMBOLIC factors the rational legs refuse
+            # (1/(ab(v^2+1)) is multivariate to polyrat but one constant
+            # split away from the arctan rule — live: the
+            # a^2 sin^2 + b^2 cos^2 arctangent cell). If they cannot
+            # close it either, the rational refusal below is the honest
+            # message, with the completed-square steering preserved.
+            rational_error = e
+    try:
+        return _table_structural(sym, notation, var, assumptions)
+    except PrimitiveError:
+        if rational_error is not None:
             _steer_completed_square(rf, var)
-            raise
+            raise rational_error
+        raise
+
+
+def _table_structural(sym, notation, var, assumptions):
+    """The spelling-structural half of the table: unwraps groups and
+    signs, splits sums, peels var-free (possibly symbolic) constant
+    factors from products and denominators, and applies the basic
+    function/power rules. Sub-terms re-enter `_table_integrate`, so a
+    peeled core gets the rational legs again."""
     if var not in free_symbols(sym, notation):
         # var-free integrand outside the rational fragment (\sqrt{5}/5,
         # 1+\sqrt{2}, ...): a constant integrates to c·var regardless of
@@ -912,7 +935,7 @@ def integrate_definite(expr, var, antiderivative):
             'expr must be a definite integral \\int_a^b f \\, d<var> '
             'with both bounds present (for indefinite integrals use the '
             'other integration tactics)')
-    integrand, lower, upper = parts
+    _var, integrand, lower, upper = parts
     if not isinstance(antiderivative, str) or not antiderivative.strip():
         return _error('integrate_definite', args,
                       'antiderivative must be a recorded result')
