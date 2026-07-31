@@ -261,6 +261,42 @@ OpenRouter; with Codex selected, `model!` lists the models that account
 offers and takes no provider argument. With no explicit choice, Codex uses
 the account's own default rather than a model id hard-coded into ToyMath.
 
+### Reading a cell as mathematics
+
+A cell holds LaTeX, and a dense formula is hard to read as source. In
+JupyterLab, a ToyMath cell shows its formula typeset while it is not being
+edited, and its source the moment it is — the bargain a markdown cell makes,
+applied to code cells. Double-click (or <kbd>Enter</kbd>) opens the source;
+leaving the cell renders it again. *Render ToyMath Cell Input* in the command
+palette turns this off for a notebook.
+
+The kernel decides what a cell renders as, because the kernel owns the
+parser: the rendered formula is what the engine understood, not a second
+reading of the source by the frontend. `\int \frac {dx} (x+1)` — the ToyMath
+dialect, taking a parenthesised second operand — renders as the fraction it
+parses to. A `[[n]]` backreference renders as the formula it stands for.
+
+A cell is read as a whole formula first, and only failing that as prose with
+formulas in it. So `int! \int x^2 dx` renders as one formula, while
+
+```text
+do! differentiate x³−3x, find where the derivative is zero
+```
+
+renders as that sentence with `x³−3x` typeset inside it — no `$…$` required,
+since nobody writes them in a prompt. Only a command that hands its argument
+to the agent is read this way; a plain cell and a rewrite action are one
+expression, and describing them as a sentence would misdescribe them.
+
+Every rendered formula parses back to the same expression as the characters
+it replaces, so a cell can never show something other than what it runs. The
+prose scan adds one thing that check cannot cover — it *guesses where a
+formula starts and ends* — so it is tuned for precision: a formula left as
+prose is invisible, whereas prose swallowed into a formula is glaring. What
+the guess gives back stays visible as prose, so no part of a prompt can
+disappear from the view. Fragments the engine cannot read keep their source,
+which makes an unparsable cell visible as one before it is run.
+
 ## Notebook command tiers
 
 Saved notebook commands are Markdown templates in `commands/`:
@@ -444,7 +480,7 @@ engine/agent_config.py     notebook-local AgentRoute and backend resolution
 engine/agent_backends/     provider seam: cancellation, OpenRouter, Codex
 engine/model_config.py     model! configuration loading and validation
 engine/models.yaml         selectable OpenRouter models/provider orders
-jupyterlab-extension/      TypeScript source for completion/title integration
+jupyterlab-extension/      TypeScript source for completion/title/rendered input
 labextension/              committed prebuilt JupyterLab extension
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition

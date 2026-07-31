@@ -37,7 +37,8 @@ Two layers coexist:
 | `engine/agent_backends/` | Provider seam: `base.py` (request/outcome/cancellation/dispatcher), `openrouter.py` (Agents SDK), `codex.py` + `codex_transport.py` (experimental personal Codex) |
 | `engine/agent_config.py` | Notebook-local `AgentRoute`, `backend!` resolution, backend-neutral status |
 | `engine/model_config.py`, `engine/models.yaml` | Notebook-local `model!` selection and configured OpenRouter model/provider endpoints |
-| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup and notebook-local live model title; TypeScript source and committed prebuilt bundle |
+| `jupyterlab-extension/src/index.ts`, `labextension/` | Native JupyterLab completion popup, notebook-local live model title, and rendered cell input; TypeScript source and committed prebuilt bundle |
+| `engine/cell_input.py` | Read-only readings of a cell's raw source: how it splits into statements, and what it renders as in the notebook |
 | `engine/expr_commands.py`, `engine/prompt_commands.py` | Composite/inline command resolution; notebook prompt-commands loaded from `commands/*.md` |
 | `engine/plot_sandbox.py` | Sandboxed figure backends for `do!`: Python under Pyodide/Deno (`pyodide_runner.mjs`), TeX under node-tikzjax (`tikz_runner.mjs`) |
 | `engine/processor.py` | MathProcessor, Calculator — legacy fixed-point iteration engine |
@@ -268,6 +269,33 @@ if isinstance(n, IntegerValue): ...
 - Use `primitives.display_latex` when rich-rendering an already-recorded LaTeX
   string. It derives display-only `*` → `\cdot` spelling behind a structural
   parse check; never rewrite the persisted ledger input/result or its hash.
+- The rendered cell input (`cell_input.preview` → the `toymath.render` comm →
+  `rendered_input.ts`) is kernel-authoritative on purpose: the frontend never
+  parses. Two guards are load-bearing, not polish. The prose veto must stay
+  *lexical* — the parser accepts `the derivative` as a product of one-letter
+  symbols, so it can reject but never classify. And a rendered fragment must
+  pass `primitives.same_expression` against its source: the writer silently
+  drops what it cannot spell (`track! {goal! …}` comes back without the
+  `track!`), and a view that says something other than what the cell runs is
+  worse than no view. Anything unproven renders as its own source; keep it
+  that way. Rendering swaps the editor through the public
+  `InputArea.renderInput` / `showEditor`, so no
+  `NotebookPanel.IContentFactory` override is involved.
+- The prose scan (`cell_input.prose_segments`) finds the formulas inside an
+  unescaped `do!` prompt, and answers a weaker question than the whole-cell
+  reading: it *guesses fragment boundaries*. Tune it for precision — a
+  formula left as prose is invisible, prose swallowed into a formula is
+  glaring — and keep what a trim gives back visible as prose, so no part of a
+  prompt can vanish from the view. Only commands that hand their argument to
+  the agent are scanned; a plain cell or a rewrite action is one expression.
+  `bare_seeds=False` drops the tier whose evidence is notation rather than a
+  `\macro` (`x³−3x`); that tier finds about as much again as the macro tier
+  and carries the higher risk, which is why it can be switched off alone.
+  LANDMINE: the parser accepts a bare `\begin` (debris from an environment it
+  cannot read) as an opaque symbol and the writer spells it back unchanged,
+  so `same_expression` sees nothing wrong — `_is_debris` is what rejects it.
+  Extend `PROSE_CASES` in `unittests_cell_input.py` when the scan changes; a
+  heuristic without a golden corpus rots.
 - Array-family nodes require matching lexer, grammar, writer, and Replicator
   dispatch. Standard non-alignment environments (`matrix`, `pmatrix`,
   `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, and `cases`)

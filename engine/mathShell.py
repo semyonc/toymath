@@ -12,8 +12,10 @@ from replicator import Replicator
 from prolog import PrologModel
 from ledger import Ledger
 import agent_config
+import cell_input
 import model_config
 import prompt_commands
+from cell_input import split_lines
 
 from IPython.display import HTML, Javascript
 from engine import display
@@ -83,25 +85,6 @@ def _notify_route(handler, route):
         handler(route)
 
 
-def split_lines(self, code):
-    bracket = 0
-    buffer = ''
-    for codePoint in code:
-        if codePoint == '{':
-            bracket += 1
-        elif codePoint == '}':
-            bracket -= 1
-        elif codePoint == '\n' and bracket == 0:
-            yield buffer
-            buffer = ''
-            continue
-        elif codePoint == '\r':
-            continue
-        buffer += codePoint
-    if buffer != '':
-        yield buffer
-
-
 class MathShell(object):
 
     def __init__(self):
@@ -139,6 +122,30 @@ class MathShell(object):
         return (set(self.processor.actions) | set(self.commands)
                 | set(prompt_commands.RESERVED))
 
+    def preview_cell(self, code):
+        """Rendered segments for a cell's input, or None to keep it raw.
+
+        Read-only: the frontend calls this while the user edits, so it must
+        never touch the history, the ledger, or the live notation graph.
+
+        A `[[n]]` backreference renders as the formula it stands for — the
+        expression the cell will actually run on. A fresh kernel has no
+        history yet, so until that result exists the reference renders as
+        itself and the cell still reads as the command it is.
+        """
+        names = self._command_names()
+        # only a command that hands its argument to the agent may carry prose
+        prose = set(self.commands) | {'do'}
+        if BACKREF_RE.search(code):
+            try:
+                resolved = cell_input.preview(self.resolve_backrefs(code),
+                                              names, prose)
+            except Exception:
+                resolved = None
+            if resolved:
+                return resolved
+        return cell_input.preview(code, names, prose)
+
     def trace_step(self, sym, notation, index):
         if self.trace:
             writer = LaTexWriter(notation)
@@ -171,7 +178,7 @@ class MathShell(object):
         if self.has_expr_command(stripped):
             self.exec_composite(stripped, execution_count, add_to_history)
             return
-        lines = [line for line in split_lines(self, code)]
+        lines = [line for line in split_lines(code)]
         for index, line in enumerate(lines):
             last = index == len(lines) - 1
             self.exec_stmt(line, execution_count, add_to_history and last, last)

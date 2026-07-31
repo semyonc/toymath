@@ -99,6 +99,8 @@ class MathKernel(Kernel):
         self._model_comms = set()
         self.comm_manager.register_target('toymath.model',
                                           self._open_model_comm)
+        self.comm_manager.register_target('toymath.render',
+                                          self._open_render_comm)
         self.mathShell.model_change_handler = self._broadcast_model
         setShell(self.mathShell)
 
@@ -124,6 +126,29 @@ class MathKernel(Kernel):
                 comm.send(payload)
             except Exception:
                 self._model_comms.discard(comm)
+
+    def _open_render_comm(self, comm, _open_msg):
+        """Answer the extension's rendered-input requests.
+
+        One request, one reply, keyed by the frontend's `id`: the extension
+        has several cells in flight and matches replies by that key. A cell
+        the engine does not read as a formula answers with no segments, and
+        the extension keeps showing the source — so a failure here costs the
+        rendered view, never the cell.
+        """
+        comm.on_msg(lambda msg: self._render_cell(comm, msg))
+
+    def _render_cell(self, comm, msg):
+        data = msg['content']['data']
+        try:
+            segments = self.mathShell.preview_cell(data.get('code', ''))
+        except Exception:
+            self.log.debug('cell preview failed', exc_info=True)
+            segments = None
+        try:
+            comm.send({'id': data.get('id'), 'segments': segments})
+        except Exception:
+            self.log.debug('cell preview reply failed', exc_info=True)
 
     async def do_complete(self, code, cursor_pos):
         """Complete `backend!` names, `login!` options, and `model!` ids for
