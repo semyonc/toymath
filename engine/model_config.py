@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - dotenv ships with the kernel env
 
 
 MODEL_VAR = 'OPENROUTER_MODEL'
-DEFAULT_MODEL = 'google/gemini-3.6-flash'
+DEFAULT_MODEL = 'openai/gpt-5.6-luna'
 MODELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'models.yaml')
 
