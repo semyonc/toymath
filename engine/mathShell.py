@@ -768,6 +768,40 @@ class MathShell(object):
         display(HTML(f'<div class="tex2jax_ignore"><em>{label}'
                      f'{_html.escape(res["summary"])}</em></div>'))
 
+    @classmethod
+    def _show_run_figures(cls, res):
+        """Render run-local illustrations after returning to the kernel thread.
+
+        Provider tools execute on worker threads. Publishing Jupyter output
+        there is best-effort and can lose or mis-parent the message, so the
+        session buffers successful figures and the final failed attempt for
+        this deterministic render pass.
+        """
+        for illustration in res.get('figures') or []:
+            try:
+                parts = [cls._figure_html(figure)
+                         for figure in illustration.get('figures') or []]
+                parts.append(f'<div style="color:#888"><em>'
+                             f'{_html.escape(illustration.get("caption", ""))}'
+                             f'</em> &mdash; illustration, not machine-checked'
+                             f'</div>')
+                display(HTML(''.join(parts)))
+            except Exception as exc:
+                cls._do_error('figure could not be displayed: ' + str(exc))
+
+        failure = res.get('figure_error')
+        if failure:
+            kind = ('TikZ figure' if failure.get('kind') == 'tikz'
+                    else 'plot')
+            caption = failure.get('caption') or 'uncaptioned illustration'
+            error = failure.get('error') or 'the renderer returned no figure'
+            display(HTML(
+                f'<div style="color:#b65c00"><strong>{kind} failed:</strong> '
+                f'<em>{_html.escape(caption)}</em> &mdash; the mechanically '
+                f'checked mathematics is unaffected.'
+                f'<pre style="white-space:pre-wrap;margin:.4em 0">'
+                f'{_html.escape(error)}</pre></div>'))
+
     @staticmethod
     def _show_run_premises(res):
         # where this run's checking starts: inputs it stated rather than
@@ -893,21 +927,9 @@ class MathShell(object):
             except Exception:
                 pass  # rendering must never fail the derivation step
 
-        def on_plot(caption, figures):
-            try:
-                parts = [self._figure_html(f) for f in figures]
-                parts.append(f'<div style="color:#888"><em>'
-                             f'{_html.escape(caption)}</em> '
-                             f'&mdash; illustration, not machine-checked'
-                             f'</div>')
-                display(HTML(''.join(parts)))
-            except Exception:
-                pass  # rendering must never fail the plot call
-
         try:
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
-                                           on_plot=on_plot,
                                            proof_goal=proof_goal,
                                            route=self.route)
         except agent_do.DoAgentError as e:
@@ -936,6 +958,7 @@ class MathShell(object):
             all_steps=self.ledger.steps)
         if chain:
             display(HTML(chain))
+        self._show_run_figures(res)
         self._show_run_narrative(res)
         self._show_run_premises(res)
         self._show_assumptions(res['assumptions'])

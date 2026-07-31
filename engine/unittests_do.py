@@ -4115,6 +4115,10 @@ class TestPlotTool(unittest.TestCase):
         # backend is adapted up into the typed shape
         self.assertEqual(shown[0][0], 'a parabola')
         self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
+        self.assertEqual(session.figure_events(), [{
+            'status': 'ok', 'kind': 'figure', 'caption': 'a parabola',
+            'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
+        }])
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
 
@@ -4142,6 +4146,35 @@ class TestPlotTool(unittest.TestCase):
         reply = json.loads(make_api(session)['plot']('bad', 'cap'))
         self.assertFalse(reply['ok'])
         self.assertIn('NameError', reply['error'])
+        self.assertEqual(session.figure_events()[-1]['status'], 'error')
+        self.assertIn('NameError', session.figure_events()[-1]['error'])
+
+    def test_failed_python_does_not_publish_its_partial_figure(self):
+        shown = []
+        backend = FakePlotBackend({
+            'ok': False, 'figures': [
+                {'kind': 'png', 'data': FAKE_PNG_B64}],
+            'error': 'RuntimeError: failed after drawing'})
+        session = DoSession(plot_backend=backend,
+                            on_plot=lambda *args: shown.append(args))
+        reply = json.loads(make_api(session)['plot']('bad', 'partial'))
+        self.assertFalse(reply['ok'])
+        self.assertEqual(reply['plots'], 0)
+        self.assertEqual(shown, [])
+        self.assertEqual(session.figure_events(), [{
+            'status': 'error', 'kind': 'plot', 'caption': 'partial',
+            'error': 'RuntimeError: failed after drawing',
+        }])
+
+    def test_streaming_callback_failure_does_not_lose_buffered_figure(self):
+        def broken_callback(*_args):
+            raise RuntimeError('display socket unavailable')
+
+        session = DoSession(plot_backend=FakePlotBackend(),
+                            on_plot=broken_callback)
+        reply = json.loads(make_api(session)['plot']('plt.plot([1])', 'safe'))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(session.figure_events()[0]['status'], 'ok')
 
     def test_no_figure_is_an_error(self):
         backend = FakePlotBackend({'ok': True, 'stdout': '', 'stderr': '',
@@ -4166,6 +4199,8 @@ class TestPlotTool(unittest.TestCase):
         self.assertTrue(res['ok'])
         self.assertEqual(len(res['steps']), 1)  # plot is not a step
         self.assertEqual(shown, ['the parabola'])
+        self.assertEqual(res['figures'][0]['caption'], 'the parabola')
+        self.assertIsNone(res['figure_error'])
 
     def test_get_backend_off(self):
         with mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'off'}):
@@ -4532,6 +4567,80 @@ class TestMathShellDo(unittest.TestCase):
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
+
+    def test_codex_plot_is_rendered_once_on_the_kernel_thread(self):
+        import engine
+
+        main_thread = threading.get_ident()
+        displayed = []
+
+        def capture(*objects, **_kwargs):
+            for obj in objects:
+                self.displays.append(obj)
+                displayed.append((threading.get_ident(),
+                                  getattr(obj, 'data', str(obj))))
+
+        engine.setHandler(capture)
+        plot_threads = []
+
+        class WorkerPlotBackend(FakePlotBackend):
+            def run_plot(inner_self, code, timeout=None):
+                plot_threads.append(threading.get_ident())
+                return super(WorkerPlotBackend, inner_self).run_plot(
+                    code, timeout=timeout)
+
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'plot',
+             'arguments': {'code': 'plt.plot([1])',
+                           'caption': 'worker-thread figure'}},
+            {'message': 'Rendered the requested illustration.'},
+        ])
+        self.shell.route = agent_config.AgentRoute(
+            backend=agent_config.CODEX, model='gpt-5.6-terra')
+        with mock.patch.object(codex_backend, 'runtime',
+                               return_value=transport), \
+                mock.patch.object(plot_sandbox, 'get_backend',
+                                  return_value=WorkerPlotBackend()), \
+                mock.patch.object(plot_sandbox, 'get_tikz_backend',
+                                  return_value=None):
+            self.shell.exec('do! draw it', 22, add_to_history=True)
+
+        self.assertEqual(len(plot_threads), 1)
+        self.assertNotEqual(plot_threads[0], main_thread)
+        figure_threads = [thread for thread, html in displayed
+                          if '<img' in html]
+        self.assertEqual(figure_threads, [main_thread])
+        self.assertEqual(self._html().count('<img'), 1)
+        self.assertIn('worker-thread figure', self._html())
+
+    def test_failed_codex_plot_is_visible_without_partial_image(self):
+        backend = FakePlotBackend({
+            'ok': False,
+            'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
+            'error': 'NameError: missing_name',
+        })
+        transport = codex_transport.TranscriptTransport([
+            {'tool': 'plot',
+             'arguments': {'code': 'missing_name()',
+                           'caption': 'broken worker plot'}},
+            {'message': 'The illustration could not be produced.'},
+        ])
+        self.shell.route = agent_config.AgentRoute(
+            backend=agent_config.CODEX, model='gpt-5.6-terra')
+        with mock.patch.object(codex_backend, 'runtime',
+                               return_value=transport), \
+                mock.patch.object(plot_sandbox, 'get_backend',
+                                  return_value=backend), \
+                mock.patch.object(plot_sandbox, 'get_tikz_backend',
+                                  return_value=None):
+            self.shell.exec('do! draw it', 23, add_to_history=True)
+
+        out = self._html()
+        self.assertIn('<strong>plot failed:</strong>', out)
+        self.assertIn('broken worker plot', out)
+        self.assertIn('NameError: missing_name', out)
+        self.assertNotIn('<img', out)
+        self.assertIn('mechanically checked mathematics is unaffected', out)
 
     def test_do_open_outcome_banner_typesets_dollar_math(self):
         # the reason's $-delimited math must reach the banner intact and

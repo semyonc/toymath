@@ -432,6 +432,12 @@ if isinstance(n, IntegerValue): ...
   Both spawn with a scrubbed env, so a widened grant still reaches no
   secrets. Figure kinds are `png`/`html`/`svg`; only `html` (plotly) needs
   the network at view time.
+- Figure tools run on provider worker threads, but Jupyter display must not:
+  successful figures are buffered on `DoSession` under the cancellation lock
+  and rendered by `MathShell` only after `run_instruction` returns to the
+  kernel thread. Failed Python/TikZ attempts never publish partial figures;
+  the final failure is shown as a bounded, non-ledger notebook notice. Keep
+  figure bytes out of model replies, traces, the ledger, and replay.
 
 ## Reference Reading
 

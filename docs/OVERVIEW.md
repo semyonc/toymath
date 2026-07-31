@@ -359,7 +359,12 @@ remain explicit CLI operations rather than math tactics.
 When Deno is installed, plots run in Pyodide WASM under deny-by-default Deno
 permissions: no environment access, no project-filesystem access, and network
 access only to package CDNs. Images are rendered as unverified illustrations,
-never ledger evidence. Set `TOYMATH_SANDBOX=off` to disable the tool.
+never ledger evidence. A provider tool buffers each successful figure under
+the session's cancellation boundary; the notebook renders that buffer only
+after control returns to the kernel thread, so a worker-thread display cannot
+be lost or attached to the wrong cell. If the final render attempt fails, its
+bounded sandbox error is shown without invalidating any mechanically checked
+math. Set `TOYMATH_SANDBOX=off` to disable the tool.
 
 ## The classic kernel
 
