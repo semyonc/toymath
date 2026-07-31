@@ -1,10 +1,10 @@
 ---
 name: toymath-integration
 key: integration
-description: Tactic-shaped indefinite integration, substitutions, by-parts, linearity, and provenance-aware assembly.
+description: Tactic-shaped indefinite and definite integration - substitutions, by-parts, linearity, provenance-aware assembly.
 ---
 
-# Indefinite integration
+# Integration
 
 There is no autonomous integrate tactic. Pick one narrow move at a time and
 continue until no integral remains. Feed every returned `result` string
@@ -73,6 +73,25 @@ end to end. Worked shape:
   `\frac{1}{3u^2+\frac{5}{3}}` in one step; back-substitute with core
   `substitute` in reverse order. Do NOT hand-simplify the arctan argument
   between steps — feed each recorded result forward exactly.
+
+## Definite integrals
+
+A definite integral `\int_a^b f \, dx` is closed in exactly two moves, and
+no other route is accepted: derive the ANTIDERIVATIVE first with the
+indefinite tactics above (the integrand alone, no bounds — the bounded
+spelling is refused there), then call `integrate_definite` with the whole
+definite integral and the ledger step id of the recorded antiderivative.
+It substitutes both bounds itself, the `+ C` cancels in a follow-up core
+`expand`, and the independent check re-integrates the integrand
+numerically. Substituting the bounds by hand records steps about the
+antiderivative, not about the definite integral — the cell will refuse
+that chain as its value.
+
+Continuity of the integrand on `[a, b]` is recorded as an assumption; a
+pole strictly inside the bounds makes the check refuse (the integral is
+improper there). Improper integrals — infinite bounds or an interior or
+endpoint singularity — have no closing tactic yet: report the verified
+stopping point with the open outcome instead of forcing a value.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly

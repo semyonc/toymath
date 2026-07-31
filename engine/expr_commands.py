@@ -290,12 +290,16 @@ def _chains_to_goal(steps, final_id, goal_latex):
     must not have its last intermediate spliced in as the command's value.
     Linkage is structural (no oracle) and inherits the ledger's chaining
     convention (`_chain_links`): an integrand/body-consuming step continues
-    its big-operator-shaped predecessor, exactly as the primitives accept
-    in goal gating — bare value-equality stays too permissive here, and a
-    strict spelling match breaks every honest `\\int`-boundary hop (live:
-    a fully green substitution/assemble chain was refused because the
-    rewrite results are `\\int`-wrapped while the next inputs are their
-    integrands)."""
+    its big-operator-shaped predecessor — bare value-equality stays too
+    permissive here, and a strict spelling match breaks every honest
+    `\\int`-boundary hop (live: a fully green substitution/assemble chain
+    was refused because the rewrite results are `\\int`-wrapped while the
+    next inputs are their integrands).  The root-vs-goal test itself asks
+    the stricter ``establishes`` question: a chain rooted at the bare BODY
+    of a value-bearing binder (definite integral, `\\lim`, bounded sum)
+    does not establish that binder's value — no checked step ever consumed
+    the bounds or approach point (live: a definite integral's cell showed
+    F(upper) alone as its green "verified" value)."""
     import primitives
     from ledger import _chain_links
     transforming = [s for s in steps if s.get('result') is not None]
@@ -307,7 +311,7 @@ def _chains_to_goal(steps, final_id, goal_latex):
     while cur is not None and cur['id'] not in seen:
         seen.add(cur['id'])
         cur_input = cur.get('input') or ''
-        if primitives.covers_goal(cur_input, goal_latex):
+        if primitives.covers_goal(cur_input, goal_latex, establishes=True):
             return True
         prev = None
         for s in transforming:

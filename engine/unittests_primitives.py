@@ -5323,5 +5323,148 @@ class TestAlternativeCasesInTheLedger(unittest.TestCase):
         self.assertNotIn('Alternative case', out)
 
 
+class TestDefiniteIntegralParts(unittest.TestCase):
+    """Shared structure-reading for the FTC tactic and quadrature leg."""
+
+    def test_canonical_spelling(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_0^1 x^{2} \\, dx', 'x'),
+            ('x^{2}', '0', '1'))
+
+    def test_reversed_script_order_normalizes(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int^1_0 x^{2} \\, dx', 'x'),
+            ('x^{2}', '0', '1'))
+
+    def test_textbook_differential_in_numerator(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_1^2 \\frac{dx}{x}', 'x'),
+            ('\\frac {1} {x}', '1', '2'))
+
+    def test_symbolic_bounds_read(self):
+        self.assertEqual(
+            P.definite_integral_parts('\\int_{a}^{b} x \\, dx', 'x'),
+            ('x', 'a', 'b'))
+
+    def test_indefinite_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int x^{2} \\, dx', 'x'))
+
+    def test_single_bound_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int_0 x^{2} \\, dx', 'x'))
+
+    def test_wrong_variable_is_none(self):
+        self.assertIsNone(
+            P.definite_integral_parts('\\int_0^1 x^{2} \\, dx', 't'))
+
+
+class TestNumericDefiniteCheck(unittest.TestCase):
+    """The quadrature leg re-integrates the integrand and never touches
+    the antiderivative."""
+
+    def test_right_value_agrees(self):
+        check = P.numeric_definite_check('\\int_0^1 x^{2} \\, dx', 'x',
+                                         '\\frac{1}{3}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertEqual(check['method'], 'composite-simpson quadrature')
+
+    def test_wrong_value_disagrees(self):
+        # F(2) alone for \int_1^2 — the exact live wrong-answer shape
+        check = P.numeric_definite_check('\\int_1^2 x^{2} \\, dx', 'x',
+                                         '\\frac{8}{3}')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_interior_pole_refuses(self):
+        # the classic FTC trap: \int_{-1}^{1} x^{-2} "=" -2
+        check = P.numeric_definite_check(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x', '-2')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('improper', check.get('reason', ''))
+
+    def test_parameters_are_sampled(self):
+        check = P.numeric_definite_check('\\int_0^1 c x \\, dx', 'x',
+                                         '\\frac{c}{2}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['samples'], 1)
+
+    def test_symbolic_bounds_are_skipped(self):
+        check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
+                                         '\\frac{b^2-a^2}{2}')
+        self.assertEqual(check['status'], 'skipped')
+
+
+class TestIntegrateDefinite(unittest.TestCase):
+    """FTC part 2 as a narrow move over a recorded antiderivative."""
+
+    def test_evaluates_from_the_recorded_antiderivative(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['lower'], '0')
+        self.assertEqual(rec['upper'], '1')
+        # the riding + C cancels in the follow-up expand
+        expanded = Core.expand(rec['result'])
+        self.assertEqual(
+            Core.equal_exprs(expanded['result'],
+                             '\\frac{1}{3}')['verdict'], 'yes')
+
+    def test_continuity_is_recorded_not_proved(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('continuous on [0, 1]' in t for t in texts))
+
+    def test_refuses_an_indefinite_spelling(self):
+        rec = Integration.integrate_definite(
+            '\\int x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('definite integral', rec['error'])
+
+    def test_refuses_a_non_antiderivative(self):
+        rec = Integration.integrate_definite(
+            '\\int_0^1 x^{2} \\, dx', 'x', 'x^{2} + C')
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an antiderivative', rec['error'])
+
+    def test_interior_pole_check_refuses(self):
+        # -1/x IS an antiderivative of 1/x^2 on each side of 0, so the
+        # symbolic leg passes; only the quadrature leg can see that the
+        # bounds straddle the pole. The record must carry that refusal.
+        rec = Integration.integrate_definite(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x',
+            '-\\frac{1}{x} + C')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+        self.assertIn('improper', rec['check'].get('reason', ''))
+
+
+class TestEstablishesGoalCoverage(unittest.TestCase):
+    """covers_goal's admission question: a bare body never establishes a
+    value-bearing binder."""
+
+    def test_body_does_not_establish_a_definite_integral(self):
+        goal = '\\int_0^1 x^{2} \\, dx'
+        self.assertTrue(P.covers_goal('x^{2}', goal))
+        self.assertFalse(P.covers_goal('x^{2}', goal, establishes=True))
+
+    def test_body_does_not_establish_a_limit(self):
+        goal = '\\lim_{x \\to 2} \\frac{x^2-4}{x-2}'
+        body = '\\frac{x^2-4}{x-2}'
+        self.assertTrue(P.covers_goal(body, goal))
+        self.assertFalse(P.covers_goal(body, goal, establishes=True))
+
+    def test_integrand_still_establishes_the_indefinite_integral(self):
+        # the honest antiderivative chain roots at its integrand; the
+        # indefinite branches are untouched by the tightening
+        self.assertTrue(P.covers_goal('x^{2}', '\\int x^{2} \\, dx',
+                                      establishes=True))
+
+    def test_identity_still_establishes(self):
+        goal = '\\int_0^1 x^{2} \\, dx'
+        self.assertTrue(P.covers_goal(goal, goal, establishes=True))
+
+
 if __name__ == '__main__':
     unittest.main()

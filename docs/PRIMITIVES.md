@@ -314,8 +314,17 @@ writer, comparer, and replicator landmines.
   matches, and a failed selection lists the available positions. Match
   positions count each visible subterm once and include the numeric
   perfect-power variants of the lemma pattern.
-- Absolute value is a sound opaque atom, but its grammar/table coverage is
-  intentionally narrow; floor and ceiling are not modeled.
+- Absolute value, floor, and ceiling are sound bracket operators with real
+  oracle evaluation, but their grammar/table coverage is intentionally
+  narrow.
+- A definite integral closes only through `integrate_definite`, which
+  consumes a recorded antiderivative step, substitutes both bounds itself,
+  and is checked by independent quadrature over the integrand; continuity
+  on the interval is recorded, not proved, and an interior domain break
+  makes the quadrature leg refuse. Improper integrals (infinite bounds or
+  an interior/endpoint singularity) have no closing tactic. A chain rooted
+  at the bare integrand — or the bare body of any value-bearing binder,
+  such as a limit — is never accepted as the bounded expression's value.
 - Matrix arithmetic is literal-only and cell-wise: the named tactics add,
   scale, multiply (ordered, exactly two factors), transpose, and take 2x2
   determinants of written-out matrices, delegating each cell to checked

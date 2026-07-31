@@ -121,6 +121,24 @@ def _integrate_assemble_from_steps(context, args):
     return result
 
 
+def _integrate_definite_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_definite',
+                      'integrate_definite requires a session')
+    by_id = {step['id']: step for step in steps}
+    source_id = args['antiderivative_step']
+    source = by_id.get(source_id)
+    if source is None or source.get('result') is None:
+        return _error('integrate_definite',
+                      f'unknown transforming step {source_id!r}')
+    result = integration.integrate_definite(
+        args['expr'], args['var'], source['result'])
+    if result.get('ok'):
+        result['sources'] = {'antiderivative': source_id}
+    return result
+
+
 def _limit_assemble_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -475,6 +493,16 @@ def _validate_integrate_assemble(step, seen):
     return None
 
 
+def _validate_integrate_definite(step, seen):
+    sources = step.get('sources') or {}
+    source = seen.get(sources.get('antiderivative'))
+    if source is None or source.get('result') is None:
+        return 'missing antiderivative provenance'
+    if source.get('result') != step.get('args', {}).get('antiderivative'):
+        return 'antiderivative provenance mismatch'
+    return None
+
+
 def _validate_limit_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -722,6 +750,24 @@ TACTICS = (
                  'ordered antiderivative step ids', nargs='+')),
         cli_handler=_integrate_assemble_from_steps,
         provenance_validator=_validate_integrate_assemble),
+    TacticSpec(
+        'integrate_definite', 'integrate_definite', 'integration',
+        'evaluate a definite integral from a recorded antiderivative '
+        '(FTC)',
+        integration.integrate_definite,
+        (E, V, _arg('antiderivative', 'ANTIDERIVATIVE',
+                    'recorded antiderivative value')),
+        agent_arguments=(
+            E, V,
+            _arg('antiderivative_step', 'STEP',
+                 'antiderivative ledger step id')),
+        agent_handler=_integrate_definite_from_steps,
+        cli_arguments=(
+            E, V,
+            _arg('antiderivative_step', 'STEP',
+                 'antiderivative ledger step id')),
+        cli_handler=_integrate_definite_from_steps,
+        provenance_validator=_validate_integrate_definite),
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',

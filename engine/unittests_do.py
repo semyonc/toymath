@@ -5275,6 +5275,56 @@ class TestChainsToGoal(unittest.TestCase):
             's2',
             '\\int\\frac {dx} {(x^{\\frac {1} {2}}+x^{\\frac {1} {3}})}'))
 
+    def test_body_rooted_chain_cannot_establish_a_definite_integral(self):
+        # live gen-64 probe: the agent derived F from the bare integrand,
+        # substituted one bound, and the cell showed a green "verified"
+        # value that was F(upper) alone — right only because F(lower)
+        # happened to be 0. On other bounds the same moves admit a wrong
+        # number, so a body-rooted chain never establishes the bounded
+        # integral.
+        import expr_commands as ec
+        steps = self._steps(
+            ('x^{2}', '\\frac {1} {3}x^{3} + C'),
+            ('\\frac {1} {3}x^{3} + C', '\\frac {1} {3}(2)^{3}+C'),
+            ('\\frac {1} {3}(2)^{3}+C', '\\frac {1} {3}(2)^{3}'),
+            ('\\frac {1} {3}(2)^{3}', '\\frac {8} {3}'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's4', '\\int_1^2 x^{2} \\, dx'))
+
+    def test_body_rooted_chain_cannot_establish_a_limit(self):
+        # same binder-family hole: evaluating the body at any point is a
+        # recordable chain, and its value must not admit as "the limit"
+        import expr_commands as ec
+        steps = self._steps(
+            ('\\frac{x^2-4}{x-2}', 'x+2'),
+            ('x+2', '(2)+2'),
+            ('(2)+2', '4'))
+        self.assertFalse(ec._chains_to_goal(
+            steps, 's3', '\\lim_{x \\to 2} \\frac{x^2-4}{x-2}'))
+
+    def test_integrand_rooted_chain_still_establishes_the_indefinite(self):
+        # the honest antiderivative chain roots at its bare integrand and
+        # the integrating step itself is derivative-checked; the
+        # establishes tightening must not refuse it
+        import expr_commands as ec
+        steps = self._steps(('x^{2}', '\\frac {1} {3}x^{3} + C'))
+        self.assertTrue(ec._chains_to_goal(steps, 's1',
+                                           '\\int x^{2} \\, dx'))
+
+    def test_definite_chain_roots_at_the_definite_integral(self):
+        # the honest route: integrate_definite consumes the bounded
+        # integral itself, so its chain admits directly
+        import expr_commands as ec
+        steps = self._steps(
+            ('x^{2}', '\\frac {1} {3}x^{3} + C'),
+            ('\\int_1^2 x^{2} \\, dx',
+             '\\left(\\frac {1} {3}(2)^{3}+C\\right) - '
+             '\\left(\\frac {1} {3}(1)^{3}+C\\right)'),
+            ('\\left(\\frac {1} {3}(2)^{3}+C\\right) - '
+             '\\left(\\frac {1} {3}(1)^{3}+C\\right)', '\\frac {7} {3}'))
+        self.assertTrue(ec._chains_to_goal(
+            steps, 's3', '\\int_1^2 x^{2} \\, dx'))
+
     def test_bracket_respelling_hop_accepted(self):
         # second live model, same cell: the agent retyped the assemble
         # result WITHOUT its decorative per-piece \left(...\right)

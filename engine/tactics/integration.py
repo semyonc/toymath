@@ -12,6 +12,7 @@ from polyrat import (Poly, NotInFragment, to_ratfunc, poly_to_notation,
 from primitives import (
     FRAC_NAMES, PrimitiveError, parse_latex, write_latex, free_symbols,
     _result, _error, _peel_groups, _strip_integral, _paren, _is_sum_str,
+    definite_integral_parts, numeric_definite_check,
 )
 from tactics.core import (
     equal_exprs, substitute, _merge_checks,
@@ -884,4 +885,74 @@ def integrate_assemble(expr, var, antiderivatives):
     if rec['check'].get('status') == 'agree':
         rec['check']['method'] = (
             'per-piece derivatives + signed linearity')
+    return rec
+
+
+def integrate_definite(expr, var, antiderivative):
+    """Evaluate a definite integral from a RECORDED antiderivative
+    (Fundamental Theorem of Calculus, part 2).
+
+    ``expr`` is the definite integral ``\\int_a^b f \\, d<var>`` itself;
+    ``antiderivative`` is the result of an earlier recorded integration
+    step (the do! tool supplies it from a ledger step id rather than
+    letting the agent retype it).  This primitive independently
+    re-differentiates the antiderivative against the integrand, then
+    builds ``F(b) - F(a)`` by substitution — any fresh ``+ C`` riding on
+    the recorded antiderivative cancels in the following expand.  The
+    check leg re-integrates the integrand by quadrature and never touches
+    F.  Continuity of the integrand on [a,b] is recorded as an
+    assumption, not proved — though the quadrature leg refuses outright
+    when it lands on an interior domain break, which is exactly the case
+    where F(b) - F(a) is the classic wrong answer."""
+    args = {'expr': expr, 'var': var, 'antiderivative': antiderivative}
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return _error(
+            'integrate_definite', args,
+            'expr must be a definite integral \\int_a^b f \\, d<var> '
+            'with both bounds present (for indefinite integrals use the '
+            'other integration tactics)')
+    integrand, lower, upper = parts
+    if not isinstance(antiderivative, str) or not antiderivative.strip():
+        return _error('integrate_definite', args,
+                      'antiderivative must be a recorded result')
+    try:
+        parse_latex(antiderivative)
+    except PrimitiveError as e:
+        return _error('integrate_definite', args,
+                      f'antiderivative is malformed: {e}')
+    derivative = differentiate(antiderivative, var)
+    if not derivative.get('ok'):
+        return _error('integrate_definite', args,
+                      'cannot differentiate the antiderivative: '
+                      + derivative.get('error', 'unknown error'))
+    equality = equal_exprs(derivative['result'], integrand)
+    if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+        return _error(
+            'integrate_definite', args,
+            f'the recorded value is not an antiderivative of '
+            f'{integrand!r} (verdict: '
+            f'{equality.get("verdict", "error")})')
+    at_upper = substitute(antiderivative, var, upper)
+    at_lower = substitute(antiderivative, var, lower)
+    if not (at_upper.get('ok') and at_lower.get('ok')):
+        failed = at_upper if not at_upper.get('ok') else at_lower
+        return _error('integrate_definite', args,
+                      'cannot substitute a bound: '
+                      + failed.get('error', 'unknown error'))
+    result = f'{_paren(at_upper["result"])} - {_paren(at_lower["result"])}'
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_definite', args,
+                      f'internal: unparseable evaluation: {e}')
+    rec = _result(
+        'integrate_definite', args, expr, result,
+        assumptions=[{
+            'text': f'{integrand} is continuous on '
+                    f'[{lower}, {upper}]',
+            'display': f'${integrand}$ is continuous on '
+                       f'$[{lower}, {upper}]$'}],
+        extra={'integrand': integrand, 'lower': lower, 'upper': upper})
+    rec['check'] = numeric_definite_check(expr, var, result)
     return rec
