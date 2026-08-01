@@ -214,8 +214,11 @@ class MathShell(object):
         if not rest:
             self._do_error(f'{name}! needs an argument')
             return True
-        instruction = prompt_commands.render(cmd, rest)
-        proof_goal = rest if cmd.mode == 'prove' else None
+        resolved = self._resolve_prompt_argument(cmd, rest)
+        if resolved is None:
+            return True
+        instruction = prompt_commands.render(cmd, resolved)
+        proof_goal = resolved if cmd.mode == 'prove' else None
         self.exec_do(instruction, execution_count, add_to_history,
                      proof_goal=proof_goal)
         return True
@@ -234,6 +237,8 @@ class MathShell(object):
         rows = ['<tr><td style="padding:2px 14px 2px 0;vertical-align:top">'
                 f'<code>{_html.escape(c.name)}!</code></td>'
                 f'<td style="color:#444">{_html.escape(c.description)}'
+                + (f' <code>[{_html.escape(prompt_commands.signature(c))}]'
+                   '</code>' if prompt_commands.signature(c) else '')
                 + (f' <code>[direct: {_html.escape(c.direct)}]</code>'
                    if c.direct else '')
                 + '</td></tr>'
@@ -1094,6 +1099,112 @@ class MathShell(object):
             except Exception:
                 self._do_error('final result could not be parsed for '
                                '[[n]] chaining')
+
+    def _resolve_prompt_argument(self, cmd, argument):
+        """Resolve inline value commands inside a whole-derivation input.
+
+        ``expr`` historically answered two different questions: may a
+        command's result be spliced, and may its argument contain splices.
+        Explicit input/output contracts separate them.  A derivation command
+        such as ``solve!`` stays non-inline, while its typed mathematical
+        input may now contain expression-producing commands.  The assembled
+        input gets the same checked ``expand`` glue as an ordinary composite
+        cell before it is handed to the agent.
+        """
+        import agent_do
+        import expr_commands
+        import primitives
+
+        try:
+            text = self.resolve_backrefs(argument)
+        except ValueError as e:
+            self._do_error(str(e))
+            return None
+
+        if not self.has_expr_command(text):
+            try:
+                expr_commands.validate_command_input(cmd, text)
+            except (expr_commands.ExprCommandError,
+                    primitives.PrimitiveError) as e:
+                self._do_error(str(e))
+                return None
+            return text
+
+        try:
+            sym, notation = primitives.parse_latex(text,
+                                                   allow_ellipsis=True)
+        except primitives.PrimitiveError as e:
+            self._do_error(str(e))
+            return None
+
+        def on_step(step):
+            try:
+                display(HTML(self.render_do_step(step)))
+            except Exception:
+                pass
+
+        def run_selected(instruction, **kwargs):
+            kwargs['route'] = self.route
+            return agent_do.run_instruction(instruction, **kwargs)
+
+        resolver = expr_commands.ExprResolver(
+            notation, Notation(), self.commands, self.ledger, on_step,
+            run_selected)
+        try:
+            root = resolver(sym)
+            composite = primitives.write_latex(
+                root, resolver.output_notation)
+            # Check the assembled top-level shape before recording glue.  A
+            # relation-valued inner result is valid for solve!/prove!, but
+            # must never become an integration or simplification input.
+            expr_commands.validate_command_input(cmd, composite)
+
+            from tactic_registry import _same_spelling
+            singles = ([r.get('final_result') for r in resolver.subruns]
+                       + [r.get('result')
+                          for r in resolver.direct_records])
+            glue = None
+            if (len(singles) == 1 and singles[0]
+                    and _same_spelling(composite, singles[0])):
+                resolved = singles[0]
+            else:
+                from tactics import core as core_tactics
+                glue = core_tactics.expand(composite)
+                if not glue.get('ok'):
+                    raise expr_commands.ExprCommandError(
+                        'composition not verified: '
+                        + glue.get('error', 'expand failed'))
+                step = self.ledger.record(glue)
+                on_step(step)
+                resolved = glue['result']
+            expr_commands.validate_command_input(cmd, resolved)
+        except (expr_commands.ExprCommandError,
+                agent_do.DoAgentError,
+                primitives.PrimitiveError) as e:
+            self._do_error(str(e))
+            return None
+
+        # Provider callbacks may run off the kernel thread, so reproduce the
+        # end-of-composite evidence here after every inner run finishes.
+        for run in resolver.subruns:
+            chain = self.render_do_chain(run.get('steps') or [],
+                                         run.get('branch_topology'),
+                                         all_steps=self.ledger.steps)
+            if chain:
+                display(HTML(chain))
+            self._show_run_narrative(run)
+            self._show_run_premises(run)
+        assumptions = []
+        for run in resolver.subruns:
+            for item in run.get('assumptions', []):
+                if item not in assumptions:
+                    assumptions.append(item)
+        for record in resolver.direct_records + ([glue] if glue else []):
+            for item in record.get('assumptions', []):
+                if item not in assumptions:
+                    assumptions.append(item)
+        self._show_assumptions(assumptions)
+        return resolved
 
     def process(self, sym, notation):
         return self.processor(sym, notation, self.execution_history, self.history)

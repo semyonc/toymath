@@ -2,6 +2,8 @@
 name: diff
 description: Differentiate the argument (zero-token, verified differentiate primitive)
 direct: differentiate
+input: expression
+output: expression
 ---
 Differentiate $ARGUMENTS with respect to its single free variable.
 

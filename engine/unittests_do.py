@@ -3,8 +3,10 @@
 """Tests for the do! agent endpoint (agent_do.py + MathShell integration).
 
 Everything here runs offline: the agent loop is exercised with a scripted
-fake Model. Set TOYMATH_LIVE_TESTS=1 to also run one real OpenRouter
-round-trip (requires OPEN_ROUTER in the environment/.env).
+fake Model. Set TOYMATH_LIVE_TESTS=1 to also run real OpenRouter
+round-trips (the OPEN_ROUTER credential is the one thing they still take
+from the environment/.env; backend, model, tracing, and figure sandboxes
+are pinned by the live classes themselves - see LIVE_MODEL).
 """
 import _thread
 import base64
@@ -49,6 +51,10 @@ from openai.types.responses import (ResponseFunctionToolCall,
 _NO_BROWSER = None
 _SANDBOX_HOME = None
 _CLEARED_ENV = None
+#: Whatever `TOYMATH_CODEX_HOME` said before the throwaway home replaced it.
+#: The live Codex class is the one place that must see the developer's own
+#: signed-in home again; everything else keeps the sandbox.
+_REAL_CODEX_HOME = None
 
 #: Notebook-default routing this module must decide for itself. ToyMath loads
 #: `.env`, so leaving these set makes the suite assert against whatever the
@@ -80,10 +86,11 @@ def setUpModule():
     Environment: `.env` is loaded for real runs, so the routing defaults are
     cleared here and reinstated afterwards.
     """
-    global _NO_BROWSER, _SANDBOX_HOME, _CLEARED_ENV
+    global _NO_BROWSER, _SANDBOX_HOME, _CLEARED_ENV, _REAL_CODEX_HOME
     _NO_BROWSER = mock.patch('webbrowser.open', return_value=False)
     _NO_BROWSER.start()
     _SANDBOX_HOME = tempfile.mkdtemp(prefix='toymath-test-codex-home-')
+    _REAL_CODEX_HOME = os.environ.get(codex_backend.HOME_VAR)
     os.environ[codex_backend.HOME_VAR] = _SANDBOX_HOME
     # `load_dotenv()` runs at import of each module that needs it, and
     # `toymathkernel` is imported lazily inside tests - late enough to put a
@@ -94,12 +101,25 @@ def setUpModule():
                     for name in _ENV_DEFAULTS if name in os.environ}
 
 
+def _set_codex_home(home):
+    """Point `TOYMATH_CODEX_HOME` at `home`, or unset it when None.
+
+    A plain assignment cannot express "unset", and the difference matters:
+    an unset variable means the default `~/.toymath/codex-home`, which is
+    exactly the authenticated home the offline suite must stay out of.
+    """
+    if home is None:
+        os.environ.pop(codex_backend.HOME_VAR, None)
+    else:
+        os.environ[codex_backend.HOME_VAR] = home
+
+
 def tearDownModule():
     if _NO_BROWSER is not None:
         _NO_BROWSER.stop()
     codex_backend.close_runtime()
     if _SANDBOX_HOME is not None:
-        os.environ.pop(codex_backend.HOME_VAR, None)
+        _set_codex_home(_REAL_CODEX_HOME)
         shutil.rmtree(_SANDBOX_HOME, True)
     os.environ.update(_CLEARED_ENV or {})
 
@@ -849,6 +869,36 @@ class TestDoSessionApi(unittest.TestCase):
         selected = json.loads(api['set_result'](rec['result']))
         self.assertTrue(selected['ok'], selected.get('error'))
         self.assertEqual(selected['provenance']['step'], rec['step']['id'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_cases_assemble_closes_the_between_workflow(self):
+        # Realistic sign-case path: the endpoint x<1 remains conditioned on
+        # x>-1 until the assembly combines both into one bounded answer.
+        target = r'x^2 \lt 1'
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        moved = json.loads(api['apply'](target, '-', '1'))
+        expanded = json.loads(api['expand'](moved['result']))
+        factored = json.loads(api['run_tactic'](
+            'factor_quadratic', [expanded['result'], 'x']))
+        divided = json.loads(api['apply'](
+            factored['result'], '/', 'x+1', r'x \gt -1'))
+        cancelled = json.loads(api['expand'](divided['result']))
+        shifted = json.loads(api['apply'](cancelled['result'], '+', '1'))
+        endpoint = json.loads(api['expand'](shifted['result']))
+
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble',
+            [target, r'-1 \lt x \lt 1', endpoint['step']['id']]))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'-1 \lt x \land x \lt 1')
+        self.assertEqual(rec['sources'],
+                         {'cases': [endpoint['step']['id']]})
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(
+            session.ledger.presentation_topology()['spine_assumptions'], [])
         self.assertEqual(session.ledger.replay()['status'], 'verified')
 
     def test_cases_assemble_discharges_the_case_hypotheses(self):
@@ -1632,6 +1682,40 @@ class TestCanonicalToolBindings(unittest.TestCase):
             self.assertEqual(binding.input_schema,
                              derived.params_json_schema, binding.name)
 
+    def test_a_figure_binding_states_what_it_returns(self):
+        # LANDMINE (measured on the Codex path): a figure tool whose
+        # description only says "render an illustration" leaves the model
+        # to guess the reply. One run drove `tikz` from the runtime's
+        # scripting tool, iterated the reply as `r.content` (an MCP shape
+        # it never had), and then passed it to the script helper
+        # `image(...)`; the appended `image_url` was
+        # `{"ok": true, "plots": 1}`, and the provider refused the next
+        # request outright - `Invalid 'input[0].output[1].image_url'` -
+        # killing a run whose figures had already rendered.
+        #
+        # The scripts are authored BEFORE any result exists, so the field
+        # names are the part the model cannot observe; where the figure
+        # went, it can never observe. Keep those two, here, where they ship
+        # only with the tool - not the prohibition, which is one backend's
+        # scripting layer and belongs in that backend's policy.
+        bindings = {b.name: b for b in agent_do.make_tool_bindings(
+            DoSession(plot_backend=FakePlotBackend(),
+                      tikz_backend=FakeTikzBackend()))}
+        for name in ('plot', 'tikz'):
+            # the docstring wraps, so read it the way the model does
+            description = ' '.join(bindings[name].description.split())
+            self.assertIn('not back to you', description, name)
+            self.assertIn('{"ok", "plots", "figure"}', description, name)
+            # backend-neutral: no Codex scripting helper in the canonical
+            # surface, which OpenRouter advertises verbatim
+            self.assertNotIn('image(', description, name)
+            self.assertNotIn('generatedImage', description, name)
+        # the Args block still parses: the contract is in the summary, and
+        # `_parse_docstring` folds anything after `Args:` into an argument
+        self.assertNotIn('not back to you',
+                         bindings['tikz'].input_schema
+                         ['properties']['caption']['description'])
+
     def test_figure_bindings_appear_only_with_their_backends(self):
         names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
         self.assertNotIn('plot', names)
@@ -2019,6 +2103,41 @@ class TestCodexExecution(unittest.TestCase):
             repository))
         self.assertNotIn('model', params)      # the account's own default
 
+    def test_a_refused_request_is_explained_rather_than_dumped(self):
+        # Measured (Into.ipynb, `do! plot interval [[2]]`): the model drove
+        # `tikz` from the runtime's scripting tool and passed the reply to
+        # the script helper `image(...)`. The appended `image_url` was our
+        # status JSON, so the provider refused the NEXT request and the
+        # cell showed the raw 400 - a message about `input[0].output[1]`
+        # that tells a mathematician nothing about what to do.
+        refusal = json.dumps({'type': 'error', 'error': {
+            'type': 'invalid_request_error', 'code': 'invalid_value',
+            'message': ("Invalid 'input[0].output[1].image_url'. Expected a "
+                        'valid URL, but got a value with an invalid '
+                        'format.'),
+            'param': 'input[0].output[1].image_url'}, 'status': 400})
+        res = run_instruction(
+            'draw the interval', tikz_backend=FakeTikzBackend(),
+            backend=self._backend([
+                {'tool': 'tikz', 'arguments': {'code': '\\draw (0,0);',
+                                               'caption': 'interval'}},
+                {'fail': refusal}]))
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('attached a ToyMath tool result', res['error'])
+        self.assertIn('never returned to the model', res['error'])
+        self.assertIn('re-run the cell', res['error'])
+        # the provider's own words survive: this is a translation, not a
+        # replacement, and the raw cause is what a bug report needs
+        self.assertIn('image_url', res['error'])
+
+    def test_an_unrelated_refusal_keeps_its_own_words(self):
+        # a wrong guess about why a run died is worse than the raw message
+        for error in ('the Codex turn failed',
+                      json.dumps({'error': {'message': 'context too long',
+                                            'code': 'context_length'}}),
+                      '', None):
+            self.assertEqual(codex_backend.explain_turn_failure(error), error)
+
     def test_tool_dispatch_is_serialized_on_the_codex_path(self):
         seen = {}
         original = agent_base.ToolDispatcher.__init__
@@ -2264,6 +2383,27 @@ class TestCodexHomeAndPolicy(unittest.TestCase):
         # project AGENTS.md can join the instruction chain
         self.assertEqual(os.listdir(workdir), [])
         self.assertTrue(workdir.startswith(home))
+
+    def test_both_policy_forms_state_what_attaching_a_result_costs(self):
+        # The Codex path does not hand the model our tools directly: it
+        # reaches them through the runtime's scripting tool, whose helpers
+        # can append images to the conversation. A model that reads `tikz`
+        # as "returns a picture" writes `image(r)`, and the provider then
+        # refuses the whole turn. This text is always-on, so it carries
+        # only what the model cannot see for itself: the reply's shape it
+        # observes on the first call, but the refused turn never reaches
+        # it, and neither does the fact that the user already has the
+        # figure. Neither varies with the session, so both forms carry it.
+        for policy in (codex_backend.role_policy(),
+                       codex_backend.role_policy(self.names)):
+            self.assertIn("reach the user's notebook", policy)
+            self.assertIn('image, generatedImage', policy)
+            self.assertIn('refuses the whole turn', policy)
+        # ... and naming those helpers must not smuggle the session's own
+        # figure tools into the durable form, which outlives the session
+        durable = codex_backend.role_policy()
+        self.assertNotIn('plot', durable)
+        self.assertNotIn('tikz', durable)
 
     def test_the_durable_policy_defers_to_the_threads_list(self):
         # the two reach the model together, so the durable one must not
@@ -4116,9 +4256,14 @@ class TestPlotTool(unittest.TestCase):
         self.assertEqual(shown[0][0], 'a parabola')
         self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
         self.assertEqual(session.figure_events(), [{
-            'status': 'ok', 'kind': 'figure', 'caption': 'a parabola',
+            'status': 'ok', 'kind': 'figure', 'id': 'f1',
+            'caption': 'a parabola',
             'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
         }])
+        # the model is told which figure it drew, so a corrected render can
+        # supersede it instead of adding a second one
+        self.assertEqual(reply['figure'], 'f1')
+        self.assertNotIn('replaced', reply)
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
 
@@ -4165,6 +4310,64 @@ class TestPlotTool(unittest.TestCase):
             'status': 'error', 'kind': 'plot', 'caption': 'partial',
             'error': 'RuntimeError: failed after drawing',
         }])
+
+    def test_a_corrected_figure_supersedes_the_one_it_redraws(self):
+        # Measured (Into.ipynb, `do! plot interval [[2]]`): the model's own
+        # post-processing failed after a successful render, so it re-ran the
+        # same tikz and the cell showed the number line twice. The redraw
+        # now names the figure it replaces and lands in its place.
+        session = DoSession(plot_backend=FakePlotBackend(),
+                            tikz_backend=FakeTikzBackend())
+        api = make_api(session)
+        first = json.loads(api['plot']('plt.plot([1])', 'draft'))
+        other = json.loads(api['tikz']('\\draw (0,0);', 'a diagram'))
+        fixed = json.loads(api['plot']('plt.plot([2])', 'corrected',
+                                       first['figure']))
+        self.assertEqual(fixed['replaced'], first['figure'])
+        self.assertNotIn('note', fixed)
+        events = session.figure_events()
+        # replaced in place: two figures, the correction where the draft was
+        self.assertEqual([e['caption'] for e in events],
+                         ['corrected', 'a diagram'])
+        self.assertEqual([e['id'] for e in events],
+                         [fixed['figure'], other['figure']])
+        self.assertNotEqual(fixed['figure'], first['figure'])
+        # omitting it is the normal case: the canonical validator restores
+        # the default rather than the model having to send an empty string
+        schema = {b.name: b.input_schema for b in
+                  agent_do.make_tool_bindings(session)}['plot']
+        self.assertEqual(
+            agent_base.validate_arguments(
+                schema, {'code': 'plt.plot([1])', 'caption': 'c'}),
+            {'code': 'plt.plot([1])', 'caption': 'c', 'replaces': ''})
+
+    def test_replacing_a_figure_this_run_never_drew_keeps_the_picture(self):
+        # a bookkeeping mistake must not cost the user the figure that
+        # rendered, and ids are per session: no run can reach another's
+        session = DoSession(plot_backend=FakePlotBackend())
+        api = make_api(session)
+        drawn = json.loads(api['plot']('plt.plot([1])', 'first'))
+        for stale in ('f9', drawn['figure'] + 'x', '   '):
+            session_before = len(session.figure_events())
+            reply = json.loads(api['plot']('plt.plot([2])', 'second', stale))
+            self.assertTrue(reply['ok'])
+            self.assertNotIn('replaced', reply)
+            self.assertEqual(len(session.figure_events()), session_before + 1)
+        self.assertIn('f9', json.loads(
+            api['plot']('plt.plot([3])', 'third', 'f9'))['note'])
+
+    def test_a_replacement_after_the_run_is_stopped_is_still_refused(self):
+        session = DoSession(plot_backend=FakePlotBackend())
+        api = make_api(session)
+        first = json.loads(api['plot']('plt.plot([1])', 'kept'))
+        session.close('user')
+        reply = json.loads(api['plot']('plt.plot([2])', 'late',
+                                       first['figure']))
+        self.assertFalse(reply['ok'])
+        self.assertTrue(reply['cancelled'])
+        # the committed figure is untouched: a stopped run rewrites nothing
+        self.assertEqual([e['caption'] for e in session.figure_events()],
+                         ['kept'])
 
     def test_streaming_callback_failure_does_not_lose_buffered_figure(self):
         def broken_callback(*_args):
@@ -5047,6 +5250,54 @@ class TestPromptCommandModel(unittest.TestCase):
             '---\nname: b\ndescription: d\nexpr: true\n---\n$ARGUMENTS', 'b')
         self.assertTrue(inline.expr)
 
+    def test_command_input_output_types_parsed(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command(
+            '---\nname: typed\ndescription: d\n'
+            'input: [expression, relation]\noutput: derivation\n'
+            '---\n$ARGUMENTS', 'typed')
+        self.assertEqual(cmd.input_types, ('expression', 'relation'))
+        self.assertEqual(cmd.output_types, ('derivation',))
+        self.assertEqual(pc.signature(cmd),
+                         'expression|relation -> derivation')
+
+    def test_unknown_command_type_rejected(self):
+        import prompt_commands as pc
+        with self.assertRaisesRegex(ValueError, 'unknown command input type'):
+            pc.parse_command(
+                '---\nname: typed\ndescription: d\ninput: theorem\n'
+                '---\n$ARGUMENTS', 'typed')
+
+    def test_inline_command_cannot_return_derivation(self):
+        import prompt_commands as pc
+        with self.assertRaisesRegex(ValueError, 'cannot return a derivation'):
+            pc.parse_command(
+                '---\nname: typed\ndescription: d\nexpr: true\n'
+                'output: derivation\n---\n$ARGUMENTS', 'typed')
+
+    def test_committed_commands_declare_both_type_boundaries(self):
+        import prompt_commands as pc
+        commands = pc.load_commands()
+        self.assertTrue(commands)
+        for command in commands.values():
+            with self.subTest(command=command.name):
+                self.assertTrue(command.input_types)
+                self.assertTrue(command.output_types)
+
+    def test_factor_command_boundary(self):
+        # factor! is a whole-cell derivation command like simplify!: the
+        # agent chooses the factors, so it must never be inline-spliceable,
+        # and its typed boundary refuses relation input before any agent run.
+        import prompt_commands as pc
+        cmd = pc.load_commands().get('factor')
+        self.assertIsNotNone(cmd)
+        self.assertFalse(cmd.expr)
+        self.assertIsNone(cmd.direct)
+        self.assertEqual(cmd.input_types, ('expression', 'relation'))
+        self.assertEqual(cmd.output_types, ('derivation',))
+        self.assertEqual(pc.signature(cmd),
+                         'expression|relation -> derivation')
+
     def test_prove_mode_parsed_and_cannot_compose(self):
         import prompt_commands as pc
         cmd = pc.parse_command(
@@ -5168,6 +5419,53 @@ class TestPromptCommandDispatch(unittest.TestCase):
         self.assertIn('5', box['instruction'])
         self.assertNotIn('[[1]]', box['instruction'])
 
+    def test_plain_command_resolves_typed_inline_input_before_agent(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec(
+                'solve! {expand! (x+1)^2}=4', 1, add_to_history=True)
+        self.assertNotIn('expand!', box['instruction'])
+        self.assertIn('x^{2}+2x+1 = 4', box['instruction'])
+        # One checked step produces the inner value; another checks its
+        # placement on the relation side before solve! sees the input.
+        self.assertEqual([s['op'] for s in self.shell.ledger.steps],
+                         ['expand', 'expand'])
+        self.assertEqual(self.shell.ledger.steps[-1]['result'],
+                         'x^{2}+2x+1 = 4')
+        self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
+
+    def test_prove_goal_uses_the_resolved_typed_input(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec(
+                'prove! {expand! (x-1)^2}=x^2-2x+1', 1,
+                add_to_history=True)
+        self.assertNotIn('expand!', box['kwargs']['proof_goal'])
+        self.assertEqual(box['kwargs']['proof_goal'],
+                         'x^{2}-2x+1 = x^{2}-2x+1')
+
+    def test_plain_command_refuses_incompatible_resolved_input(self):
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('outer agent must not run')):
+            self.shell.exec('simplify! {expand! x=1}', 1,
+                            add_to_history=True)
+        self.assertIn('expected expression input, got relation', self._html())
+
+    def test_factor_command_dispatches_and_types_its_input(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('factor! x^3-3x^2+4', 1, add_to_history=True)
+        self.assertIn('Factor x^3-3x^2+4', box['instruction'])
+        # the typed boundary refuses a shape no factoring works on,
+        # before any agent run
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('agent must not run')):
+            self.shell.exec('factor! \\{1,2\\}', 2, add_to_history=True)
+        self.assertIn('expected expression or relation input, got collection',
+                      self._html())
+
     def test_unregistered_prefix_is_not_a_command(self):
         # `n!` (factorial) must fall through to the math path
         called = []
@@ -5190,6 +5488,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
         out = self._html()
         self.assertIn('notebook commands', out)
         self.assertIn('int', out)
+        self.assertIn('expression -&gt; expression', out)
         self.assertIn('model!', out)
 
     def test_model_command_sets_configured_routing_for_later_runs(self):
@@ -5777,6 +6076,41 @@ class TestDirectCommands(unittest.TestCase):
         final = self.shell.ledger.steps[-1]
         self.assertEqual(final['result'].replace(' ', ''), '3x^{3}')
 
+    def test_typed_outer_expr_refuses_relation_input_before_agent(self):
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('integration agent must not run')):
+            self.shell.exec('{int! {expand! x=1}}', 1,
+                            add_to_history=True)
+        self.assertIn('expected expression input, got relation', self._html())
+
+    def test_declared_output_type_is_checked_before_splicing(self):
+        import expr_commands
+        import primitives
+        import prompt_commands as pc
+        from notation import Notation
+        cmd = pc.parse_command(
+            '---\nname: ev\ndescription: d\ndirect: evaluate\n'
+            'input: expression\noutput: relation\n---\ndocs', 'ev')
+        sym, notation = primitives.parse_latex(
+            '{ev! 2^{3}}', command_names={'ev': cmd})
+        resolver = expr_commands.ExprResolver(
+            notation, Notation(), {'ev': cmd}, None, None, _never)
+        with self.assertRaisesRegex(
+                expr_commands.ExprCommandError,
+                'expected relation output, got expression'):
+            resolver(sym)
+
+    def test_command_type_distinguishes_judgment_from_relation_list(self):
+        # Arithmetic evidence plus an unknown prose-like predicate is not a
+        # typed classification judgment.  The command boundary must not call
+        # it a relation list merely because it uses \land syntax.
+        import expr_commands
+        self.assertEqual(
+            expr_commands.latex_type(
+                r'x=-1 \land \operatorname{maximum}(x)'),
+            'list')
+
     def test_minted_constant_excluded_from_var_inference(self):
         # {diff! {int! x^3}}: the inner splice contains the minted C; the
         # direct differentiate must infer x, not refuse as ambiguous
@@ -6101,13 +6435,88 @@ def _interrupt_after(seconds):
     threading.Timer(seconds, _thread.interrupt_main).start()
 
 
+#: The model every live test runs on, whatever the developer's `.env` says.
+#: ToyMath loads `.env` at import, so an unpinned live run measures whichever
+#: model, backend, and sandbox configuration that machine happens to carry -
+#: and a red live test then says nothing about ToyMath. `TestLiveDefaults`
+#: below checks this pinning offline, including that the id is still one of
+#: the configured endpoints.
+LIVE_MODEL = 'openai/gpt-5.6-luna'
+LIVE_CODEX_MODEL = 'gpt-5.6-luna'
+
+#: Routing is explicit for the same reason: `route` carries backend and model
+#: together, so neither `OPENROUTER_MODEL` nor `TOYMATH_AGENT_BACKEND` can
+#: redirect a live run - a Codex entry in `.env` must not turn "the live
+#: OpenRouter test" into a run against someone's ChatGPT allowance.
+LIVE_ROUTE = agent_config.AgentRoute(backend=agent_config.OPENROUTER,
+                                     model=LIVE_MODEL)
+LIVE_CODEX_ROUTE = agent_config.AgentRoute(backend=agent_config.CODEX,
+                                           model=LIVE_CODEX_MODEL)
+
+#: The two process-wide switches that have no argument form. Tracing off: a
+#: test run is not a derivation anyone wants in Langfuse (the module already
+#: forces this at import; the live classes state their own configuration
+#: rather than inherit it). Sandboxes off: whether Deno is installed here
+#: would otherwise decide whether the live model sees 7 tools or 9, and
+#: these derivations are algebra.
+LIVE_ENV = {'TOYMATH_OBSERVABILITY': 'off', 'TOYMATH_SANDBOX': 'off'}
+
+
+class LiveRun(object):
+    """One live class's pinned configuration, held for each test."""
+
+    ROUTE = None
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, LIVE_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def live(self, instruction, **kwargs):
+        return run_instruction(instruction, route=self.ROUTE, **kwargs)
+
+
+class TestLiveDefaults(unittest.TestCase):
+    """What the live classes pin, checked without spending anything."""
+
+    @mock.patch.dict(os.environ,
+                     {'OPENROUTER_MODEL': 'google/gemini-3.6-flash',
+                      'TOYMATH_AGENT_BACKEND': 'codex',
+                      'TOYMATH_CODEX_MODEL': 'gpt-5.6-terra'})
+    def test_a_developers_env_cannot_redirect_a_live_run(self):
+        for route, name, model in (
+                (LIVE_ROUTE, 'openrouter', LIVE_MODEL),
+                (LIVE_CODEX_ROUTE, 'codex', LIVE_CODEX_MODEL)):
+            backend = agent_do.resolve_backend(backend=route.backend,
+                                               model_name=route.model)
+            self.assertEqual(backend.name, name)
+            self.assertEqual(backend.describe_model(), model)
+
+    @mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'auto',
+                                  'TOYMATH_OBSERVABILITY': 'on'})
+    def test_the_pinned_env_switches_figures_and_tracing_off(self):
+        with mock.patch.dict(os.environ, LIVE_ENV):
+            self.assertIsNone(plot_sandbox.get_backend())
+            self.assertIsNone(plot_sandbox.get_tikz_backend())
+            self.assertFalse(observability.active())
+
+    def test_the_pinned_model_is_still_a_configured_endpoint(self):
+        # a retired id must fail here, offline, not against the provider
+        import model_config
+        endpoints = model_config.load_model_config()
+        self.assertIsNotNone(model_config.find_model(endpoints, LIVE_MODEL))
+
+
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',
                      'set TOYMATH_LIVE_TESTS=1 for a live OpenRouter test')
-class TestLiveOpenRouter(unittest.TestCase):
+class TestLiveOpenRouter(LiveRun, unittest.TestCase):
+    """Runs on LIVE_MODEL; only the OPEN_ROUTER key comes from `.env`."""
+
+    ROUTE = LIVE_ROUTE
+
     def test_solve_linear_equation(self):
         ledger = Ledger()
-        res = run_instruction('Solve 2x + 3 = 7 for x, step by step.',
-                              ledger=ledger)
+        res = self.live('Solve 2x + 3 = 7 for x, step by step.', ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
         self.assertGreaterEqual(len(res['steps']), 2)
         self.assertEqual(ledger.replay()['status'], 'verified')
@@ -6118,7 +6527,7 @@ class TestLiveOpenRouter(unittest.TestCase):
         ledger = Ledger()
         _interrupt_after(3.0)
         started = time.monotonic()
-        res = run_instruction(
+        res = self.live(
             'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
             'every intermediate result.', ledger=ledger)
         self.assertEqual(res['status'], 'interrupted')
@@ -6130,27 +6539,64 @@ class TestLiveOpenRouter(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('TOYMATH_CODEX_LIVE_TESTS') == '1',
                      'set TOYMATH_CODEX_LIVE_TESTS=1 for a live personal '
                      'Codex test (requires an already authenticated account)')
-class TestLiveCodex(unittest.TestCase):
-    """Requires a signed-in local Codex account; never starts a login."""
+class TestLiveCodex(LiveRun, unittest.TestCase):
+    """Requires a signed-in local Codex account; never starts a login.
+
+    Pinned to the same model as the OpenRouter class, under that account's
+    own id for it, rather than to whatever `TOYMATH_CODEX_MODEL` holds here.
+    """
+
+    ROUTE = LIVE_CODEX_ROUTE
+    _sandbox_home = None
 
     @classmethod
     def setUpClass(cls):
         if not codex_backend.available():
             raise unittest.SkipTest('the Codex extra is not installed')
-        names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
-        if not codex_backend.account_status().logged_in:
-            raise unittest.SkipTest(
-                'no Codex account is signed in; run login! first')
+        # The module runs against a throwaway Codex home so no offline test
+        # can read or rewrite the developer's authenticated one. This class
+        # is the exception: the account IS what it measures, so without the
+        # real home back it skips as "not signed in" on every machine,
+        # including a correctly signed-in one. The runtime caches its home,
+        # so whatever the sandbox started has to go first.
+        codex_backend.close_runtime()
+        cls._enter_real_home()
+        try:
+            # `usable`, not `logged_in`: an API-key or Bedrock account bills
+            # a different credential, and this gate leads to spending
+            if not codex_backend.account_status().usable:
+                raise unittest.SkipTest(
+                    'no managed ChatGPT Codex account is signed in; run '
+                    'login! first')
+            models = {model.id for model in codex_backend.list_models()}
+            if LIVE_CODEX_MODEL not in models:
+                raise unittest.SkipTest(
+                    f'this Codex account does not offer {LIVE_CODEX_MODEL}')
+        except BaseException:
+            # a skip raised here means tearDownClass never runs, and the
+            # rest of the module would keep talking to the real home
+            cls._leave_real_home()
+            raise
 
     @classmethod
     def tearDownClass(cls):
-        codex_backend.close_runtime()
+        cls._leave_real_home()
+
+    @classmethod
+    def _enter_real_home(cls):
+        cls._sandbox_home = os.environ.get(codex_backend.HOME_VAR)
+        _set_codex_home(_REAL_CODEX_HOME)
+
+    @classmethod
+    def _leave_real_home(cls):
+        codex_backend.close_runtime()   # never outlive the home it opened
+        _set_codex_home(cls._sandbox_home)
 
     def test_a_short_derivation_is_verified_and_replays(self):
         ledger = Ledger()
-        res = run_instruction(
+        res = self.live(
             'Expand (x+1)^2 with one tactic call, then set_result.',
-            ledger=ledger, backend='codex')
+            ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
         self.assertGreaterEqual(len(res['steps']), 1)
         self.assertTrue(res['final_result'])
@@ -6163,9 +6609,9 @@ class TestLiveCodex(unittest.TestCase):
     def test_stop_interrupts_a_live_turn_and_chains_nothing(self):
         ledger = Ledger()
         _interrupt_after(4.0)
-        res = run_instruction(
+        res = self.live(
             'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
-            'every intermediate result.', ledger=ledger, backend='codex')
+            'every intermediate result.', ledger=ledger)
         self.assertEqual(res['status'], 'interrupted')
         self.assertIsNone(res['final_result'])
         committed = len(ledger.steps)

@@ -859,8 +859,11 @@ class TestDifferentiate(unittest.TestCase):
         )
 
     def test_chain_exp(self):
+        # the rule builder parenthesizes its chain factor for syntax
+        # protection; inside the exponent's braces that wrapper is
+        # delimiter-redundant, so it does not survive into the artifact
         r = self.check('e^{x^2}')
-        self.assertEqual(r['result'], '2xe^{\\left (x^{2}\\right )}')
+        self.assertEqual(r['result'], '2xe^{x^{2}}')
 
     def test_chain_ln(self):
         self.check('\\ln(x^2 + 1)')
@@ -1571,6 +1574,32 @@ class TestNumericUnionCheck(unittest.TestCase):
         self.assertGreater(check['holding_points'], 0)
         self.assertLess(check['holding_points'], check['samples'])
 
+    def test_a_conjunction_disjunct_is_and_of_its_members(self):
+        check = P.numeric_union_check(
+            r'x^2 \lt 1', [r'-1 \lt x \lt 1'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+    def test_wrong_conjunction_member_has_a_witness(self):
+        check = P.numeric_union_check(
+            r'x^2 \lt 1', [r'-1 \lt x \lt 2'])
+        self.assertEqual(check['status'], 'disagree')
+        self.assertGreaterEqual(check['point']['x'], 1)
+        self.assertEqual(check['holds'], {'target': False, 'union': True})
+
+    def test_union_of_two_conjunctions(self):
+        check = P.numeric_union_check(
+            r'(x^2-1)(x^2-4) \lt 0',
+            [r'-2 \lt x \lt -1', r'1 \lt x \lt 2'])
+        self.assertEqual(check['status'], 'agree')
+
+    def test_parenthesized_conjunction_disjuncts(self):
+        check = P.numeric_union_check(
+            r'(x^2-1)(x^2-4) \lt 0',
+            [r'(-2 \lt x \lt -1)', r'\left(1 \lt x \lt 2\right)'])
+        self.assertEqual(check['status'], 'agree')
+
 
 class TestCasesAssemble(unittest.TestCase):
     TARGET = r'\frac{1}{x} \lt 2'
@@ -1599,6 +1628,42 @@ class TestCasesAssemble(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('does not hold at exactly the points', r['error'])
         self.assertIn('hypothesis instead', r['error'])
+
+    def test_assembles_a_bounded_answer_from_one_case(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1', r'-1 \lt x \lt 1',
+            [r'x \lt 1'], [r'x \gt -1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], r'-1 \lt x \land x \lt 1')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_parenthesized_conjunctions_in_a_union(self):
+        r = Equations.cases_assemble(
+            r'(x^2-1)(x^2-4) \lt 0',
+            r'(-2 \lt x \lt -1) \lor \left(1 \lt x \lt 2\right)',
+            [r'x \lt -1', r'x \lt 2'], [r'x \gt -2', r'x \gt 1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        P.parse_latex(r['result'])
+        self.assertEqual(
+            r['result'],
+            r'-2 \lt x \land x \lt -1 \lor 1 \lt x \land x \lt 2')
+
+    def test_every_conjunction_member_must_come_from_the_case(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1', r'-2 \lt x \lt 1',
+            [r'x \lt 1'], [r'x \gt -1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('member', r['error'])
+        self.assertIn('neither the recorded endpoint', r['error'])
+
+    def test_reordered_duplicate_conjunctions_are_refused(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1',
+            r'-1 \lt x \lt 1 \lor x \lt 1 \land x \gt -1',
+            [r'x \lt 1', r'x \lt 1'], [r'x \gt -1', r'x \gt -1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('same relation(s)', r['error'])
 
     def test_invented_disjunct_is_refused(self):
         r = Equations.cases_assemble(
@@ -2830,6 +2895,95 @@ class TestOracleCatchesLies(unittest.TestCase):
                                  assumptions=[{'text': 'y \\ne 0',
                                                'nonzero': 'y'}])
         self.assertEqual(c['status'], 'agree')
+
+
+class TestDisagreementNeedsEvidence(unittest.TestCase):
+    # A `disagree` verdict is a positive claim that two expressions differ,
+    # and it bars the step from the ledger for good. Float evaluation whose
+    # significant digits were consumed by cancellation cannot support that
+    # claim: expand's own canonical output for (x+y)^16 landed 6% from the
+    # compact form at a point where the intermediate terms exceed the
+    # result by eighteen orders of magnitude, so the engine refused an
+    # expansion it had produced itself and told the agent to "correct the
+    # arguments". Unsupported numeric evaluation is honest ignorance, not
+    # evidence against a transformation.
+
+    CANCELLING = [
+        '(x+y)^{16}', '(x+1)^{26}', '(x+1)^{28}', '(x+1)^{30}',
+    ]
+
+    def test_expand_is_not_refused_by_its_own_oracle(self):
+        for expr in self.CANCELLING:
+            rec = Core.expand(expr)
+            self.assertTrue(rec['ok'], expr)
+            self.assertNotEqual(rec['check']['status'], 'disagree', expr)
+
+    def test_the_ledger_accepts_the_expansion(self):
+        led = Ledger()
+        step = led.record(Core.expand('(x+y)^{16}'))
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_a_real_error_inside_a_cancelling_shape_still_disagrees(self):
+        # the guard must not become a hiding place: each pair is WRONG and
+        # each sits inside the same catastrophic-cancellation shape that
+        # motivated the guard
+        for lhs, rhs in [('(x+y)^{16}', '(x+y)^{16}+1'),
+                         ('(x+1)^{30}', '(x+1)^{30}+x'),
+                         ('(x+y)^{12}', '(x-y)^{12}')]:
+            self.assertEqual(
+                P.numeric_spot_check(lhs, rhs)['status'], 'disagree',
+                f'{lhs} vs {rhs}')
+
+    def test_one_corrupted_coefficient_still_disagrees(self):
+        # 12871 where the binomial coefficient is 12870, buried in the
+        # middle of a degree-16 expansion
+        good = ('x^{16}+16x^{15}+120x^{14}+560x^{13}+1820x^{12}+4368x^{11}'
+                '+8008x^{10}+11440x^9+12870x^8+11440x^7+8008x^6+4368x^5'
+                '+1820x^4+560x^3+120x^2+16x+1')
+        self.assertEqual(
+            P.numeric_spot_check('(x+1)^{16}', good)['status'], 'agree')
+        self.assertEqual(
+            P.numeric_spot_check('(x+1)^{16}',
+                                 good.replace('12870', '12871'))['status'],
+            'disagree')
+
+    def test_ordinary_wrong_algebra_is_untouched(self):
+        for lhs, rhs in [('(x+1)^2', 'x^2+1'),
+                         ('\\sin(x+y)', '\\sin x + \\sin y'),
+                         ('x^2+2x+1', 'x^2+2.000001x+1'),
+                         ('\\lfloor x \\rfloor', 'x'),
+                         ('|x|', 'x')]:
+            self.assertEqual(P.numeric_spot_check(lhs, rhs)['status'],
+                             'disagree', f'{lhs} vs {rhs}')
+
+    def test_resolution_compares_the_gap_against_the_oracles_own_noise(self):
+        s1, n1 = P.parse_latex('x^2-1')
+        s2, n2 = P.parse_latex('x^2+1')
+        env = {'x': 2.0006072315296617}
+        v1 = P.numeric_eval(s1, n1, env)
+        v2 = P.numeric_eval(s2, n2, env)
+        # a benign point: the gap of 2 dwarfs a one-ULP nudge
+        self.assertTrue(
+            P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
+        # the same comparison where one side has lost its digits
+        s3, n3 = P.parse_latex('(x+y)^{16}')
+        s4, n4 = P.parse_latex(Core.expand('(x+y)^{16}')['result'])
+        env2 = {'x': 2.0006072315296617, 'y': -2.33288936992431}
+        v3 = P.numeric_eval(s3, n3, env2)
+        v4 = P.numeric_eval(s4, n4, env2)
+        self.assertFalse(P._num_agree(v3, v4, 1e-6))     # the raw floats differ
+        self.assertFalse(
+            P._disagreement_resolves(s3, n3, s4, n4, env2, v3, v4))
+
+    def test_a_shape_mismatch_is_structural_not_numeric(self):
+        # noise can never explain away a matrix that changed shape
+        s1, n1 = P.parse_latex('\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}')
+        s2, n2 = P.parse_latex('\\begin{pmatrix}1&2&3\\end{pmatrix}')
+        env = {}
+        v1 = P.numeric_eval(s1, n1, env)
+        v2 = P.numeric_eval(s2, n2, env)
+        self.assertTrue(
+            P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
 
 
 class TestAbsoluteValue(unittest.TestCase):
@@ -5655,6 +5809,276 @@ class TestEstablishesGoalCoverage(unittest.TestCase):
         self.assertFalse(P.covers_goal(
             '\\int_0^1 x^{2} \\, dx', '\\int_0^2 x^{2} \\, dx',
             establishes=True))
+
+
+class TestFunctionArgumentSpanIsNotErasedByStripping(unittest.TestCase):
+    # Function application is a READING CONVENTION over a flat P_LIST, not a
+    # DAG node, so the argument's grouping is the ONLY thing distinguishing
+    # `\cos(x) y` from `\cos x y`. Stripping it made both normal forms print
+    # `\cos xy`, and every consumer of a normal form read one expression
+    # where there are two -- with the numeric legs disagreeing (0.449 vs
+    # 0.990). Spans come from the oracle's own _func_arg_span, so what the
+    # normal form re-encodes is the reading the numeric leg checks against.
+
+    CAPTURE_PAIRS = [
+        ('\\cos\\left(x\\right) y', '\\cos x y'),
+        ('\\cos{x} y', '\\cos x y'),
+        ('\\ln\\left(x\\right)x', '\\ln x x'),
+        ('\\sin\\left(t\\right)b', '\\sin t b'),
+    ]
+
+    RESPELLINGS = [
+        ('\\cos x', '\\cos{x}'),
+        ('\\cos x', '\\cos\\left(x\\right)'),
+        ('\\sin x \\cos x', '\\sin\\left(x\\right)\\cos\\left(x\\right)'),
+        ('2 \\sin x \\cos x', '2 \\sin(x)\\cos(x)'),
+        ('\\sin 2x', '\\sin(2x)'),
+    ]
+
+    def test_capture_is_not_the_same_expression(self):
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(P.same_expression(a, b), f'{a} vs {b}')
+
+    def test_capture_does_not_chain_link(self):
+        from ledger import _chain_links
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(_chain_links(a, b), f'{a} vs {b}')
+
+    def test_capture_is_not_the_same_spelling(self):
+        # the provenance comparator behind the endpoint-limit door
+        from tactic_registry import _same_spelling
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(_same_spelling(a, b), f'{a} vs {b}')
+
+    def test_the_capture_pairs_really_do_differ_numerically(self):
+        # the whole point: these are not two spellings of one expression
+        for a, b in self.CAPTURE_PAIRS:
+            env = {'x': 0.3, 'y': 0.47, 't': 0.3, 'b': 0.47}
+            sa, na = P.parse_latex(a)
+            sb, nb = P.parse_latex(b)
+            self.assertNotAlmostEqual(P.numeric_eval(sa, na, env),
+                                      P.numeric_eval(sb, nb, env),
+                                      places=6, msg=f'{a} vs {b}')
+
+    def test_honest_respellings_still_compare_equal(self):
+        # the comparator exists to tolerate agents retyping without the
+        # decorative wrappers; that must keep working
+        for a, b in self.RESPELLINGS:
+            self.assertEqual(P._all_bracket_normal_form(a),
+                             P._all_bracket_normal_form(b), f'{a} vs {b}')
+
+    def test_sum_boundaries_were_never_affected(self):
+        from ledger import _chain_links
+        self.assertFalse(_chain_links('(a+b)c', 'a+bc'))
+        self.assertEqual(P._all_bracket_normal_form('(a+b)c'),
+                         P._all_bracket_normal_form('\\left(a+b\\right)c'))
+
+
+class TestWrittenLatexReadsBackAsItsSource(unittest.TestCase):
+    # write_latex used to compare its two candidate spellings only against
+    # each other, which assumes at least one of them round-trips. Measured
+    # false: the raw writer spells `\sin 2x` as `\sin {2}x`, whose integer
+    # value repr closes the argument span, so the string re-reads as
+    # `sin(2) x`. Each candidate is now compared against the SOURCE graph.
+
+    ROUND_TRIP = ['\\sin 2x', '\\cos 3y', '\\sin 2x \\cos x',
+                  '2 \\sin x \\cos x', '\\sin(2x)', '\\ln 2x']
+
+    def test_output_reads_back_as_the_expression_written(self):
+        for latex in self.ROUND_TRIP:
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            self.assertEqual(P._normal_form(out),
+                             P._dag_normal_form(sym, notation), latex)
+
+    def test_numeric_agreement_after_a_write_hop(self):
+        env = {'x': 0.4, 'y': 0.4}
+        for latex in self.ROUND_TRIP:
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            sym2, notation2 = P.parse_latex(out)
+            self.assertAlmostEqual(P.numeric_eval(sym, notation, env),
+                                   P.numeric_eval(sym2, notation2, env),
+                                   places=12, msg=latex)
+
+    def test_the_numeric_leading_argument_keeps_its_span(self):
+        sym, notation = P.parse_latex('\\sin 2x')
+        self.assertEqual(P.write_latex(sym, notation), '\\sin 2x')
+
+
+class TestChainedComparison(unittest.TestCase):
+    # gen 70 (contrarian): the "between" answer a solve! run needs to state
+    # is spelled `-1 < x < 1` by every user and every textbook, and that was
+    # a SYNTAX ERROR. The backlog item asking for conjunction solutions
+    # proposed C_LIST-inside-O_LIST and never noticed that the parser
+    # already speaks \land natively, nor that the user's own spelling did
+    # not parse at all. A chain desugars to the A_LIST the parser has, so
+    # no new node, writer, or Replicator dispatch is involved.
+
+    def chain(self, latex):
+        sym, notation = P.parse_latex(latex)
+        return P.write_latex(sym, notation)
+
+    def test_the_spelling_a_user_writes_parses(self):
+        self.assertEqual(self.chain('-1 \\lt x \\lt 1'),
+                         '-1 \\lt x \\land x \\lt 1')
+        self.assertEqual(self.chain('-1 < x < 1'),
+                         '-1 \\lt x \\land x \\lt 1')
+
+    def test_mixed_strictness(self):
+        self.assertEqual(self.chain('0 \\le x \\lt 5'),
+                         '0 \\le x \\land x \\lt 5')
+
+    def test_it_is_an_a_list_of_two_relations(self):
+        sym, notation = P.parse_latex('-1 \\lt x \\lt 1')
+        f = notation.getf(sym, Notation.A_LIST)
+        self.assertIsNotNone(f)
+        self.assertEqual(len(f.args), 2)
+        for member in f.args:
+            self.assertIsNotNone(notation.getf(member, Notation.COMP))
+
+    def test_non_inequality_comparers_chain_too(self):
+        self.assertEqual(self.chain('a = b = c'), 'a=b \\land b=c')
+
+    def test_binder_arrows_are_untouched(self):
+        # `\to` is a comparer, so the limit binder is the case that would
+        # break if the chain rule reached inside a subscript
+        r = Limits.limit_table('\\lim_{x \\to 0} \\frac{\\sin x}{x}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], '1')
+
+    def test_the_union_oracle_takes_the_conjunction_shape(self):
+        # Gen 71 supplies the mechanism half after gen 70 supplied the
+        # user's chained-comparison spelling: a disjunct is AND of members.
+        r = P.numeric_union_check('x^2 \\lt 1', ['-1 \\lt x \\lt 1'])
+        self.assertEqual(r['status'], 'agree')
+
+
+class TestDerivativeKeepsTheDenominatorAsWritten(unittest.TestCase):
+    # The quotient rule knows its denominator is a power of the one it was
+    # handed; canonicalizing expanded that away, so d/dx x/(x^2+1)^3 printed
+    # a degree-8 polynomial where the textbook keeps (x^2+1)^4. The
+    # re-spelling runs AFTER canonicalization (so cancellation has already
+    # happened) and is admitted only on the EXACT identity base**k == den.
+    # Nothing is factored: the base is READ off the input, never discovered.
+
+    def d(self, expr, var='x'):
+        r = Differentiation.differentiate(expr, var)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree', expr)
+        return r['result']
+
+    def test_polyrat_path_keeps_the_base(self):
+        self.assertEqual(self.d('\\frac{x}{x^2+1}'),
+                         '\\frac {-x^{2}+1} {\\left (x^{2}+1 \\right )^{2}}')
+
+    def test_power_denominator_gains_exactly_one(self):
+        self.assertEqual(self.d('\\frac{x}{(x^2+1)^3}'),
+                         '\\frac {-5x^{2}+1} {\\left (x^{2}+1 \\right )^{4}}')
+        self.assertEqual(self.d('\\frac{1}{(x+1)^2}'),
+                         '\\frac {-2} {\\left (x+1 \\right )^{3}}')
+
+    def test_rules_path_gets_it_too(self):
+        # the rules path canonicalizes through core.expand, so it had the
+        # same expanded denominator -- one mechanism has to serve both
+        self.assertEqual(self.d('\\frac{e^x}{x^2+1}'),
+                         '\\frac {x^{2}e^x-2xe^x+e^x} '
+                         '{\\left (x^{2}+1 \\right )^{2}}')
+
+    def test_symbolic_coefficients(self):
+        self.assertEqual(self.d('\\frac{a}{bx+c}'),
+                         '\\frac {-ab} {\\left (bx+c \\right )^{2}}')
+
+    def test_a_monomial_denominator_is_left_alone(self):
+        # x^2 is both canonical and the shorter spelling; (x)^2 is a loss
+        self.assertTrue(self.d('\\frac{\\sin x}{x}').endswith('{x^{2}}'))
+
+    def test_cancellation_still_wins(self):
+        # runs after canonicalization, so a derivative that collapses to a
+        # non-fraction is never dressed back up as one
+        self.assertEqual(self.d('\\frac{x^2}{x}'), '1')
+        self.assertEqual(self.d('\\frac{x^2-1}{x-1}'), '1')
+
+    def test_a_non_sum_base_is_not_invented(self):
+        # (x+1)(x+2) would need factor tracking to re-present; refusing to
+        # guess is the invariant (no general `factor`)
+        self.assertTrue(
+            self.d('\\frac{x}{(x+1)(x+2)}').endswith(
+                '{x^{4}+6x^{3}+13x^{2}+12x+4}'))
+
+    def test_both_spellings_are_the_same_expression(self):
+        new = self.d('\\frac{x}{x^2+1}')
+        old = '\\frac {-x^{2}+1} {x^{4}+2x^{2}+1}'
+        eq = Core.equal_exprs(new, old)
+        self.assertEqual(eq.get('verdict'), 'yes')
+        # and expand still converges them onto one canonical form, so the
+        # composite glue and chain linkage are unaffected
+        self.assertEqual(Core.expand(new)['result'],
+                         Core.expand(old)['result'])
+
+    def test_recorded_form_is_flagged(self):
+        r = Differentiation.differentiate('\\frac{x}{x^2+1}', 'x')
+        self.assertEqual(r.get('denominator'), 'as written')
+        plain = Differentiation.differentiate('\\frac{\\sin x}{x}', 'x')
+        self.assertIsNone(plain.get('denominator'))
+
+    def test_the_ftc_door_still_matches_the_integrand(self):
+        # integrate_definite re-differentiates the antiderivative and
+        # compares by equal_exprs; that comparison must survive the new
+        # spelling in BOTH directions
+        for integrand in ('\\frac{-x^{2}+1}{\\left(x^{2}+1\\right)^{2}}',
+                          '\\frac{-x^{2}+1}{x^{4}+2x^{2}+1}'):
+            r = Integration.integrate_definite(
+                f'\\int_0^1 {integrand} \\, dx', 'x', '\\frac{x}{x^{2}+1}')
+            self.assertTrue(r['ok'], integrand)
+            self.assertEqual(r['check']['status'], 'agree', integrand)
+
+
+class TestDelimiterRedundantBracketsAreDropped(unittest.TestCase):
+    # The rule builders parenthesize their factors for syntax protection.
+    # Inside a {} slot -- a \sqrt argument, an INDEX dimension, a \frac or
+    # \binom argument -- the braces already bound the span, so the wrapper
+    # cannot be doing work and does not belong in the ledger artifact.
+
+    def written(self, latex):
+        sym, notation = P.parse_latex(latex)
+        return P.write_latex(sym, notation)
+
+    def test_sqrt_argument(self):
+        self.assertEqual(self.written('\\sqrt{\\left(x^{2}+1\\right)}'),
+                         '\\sqrt{x^{2}+1}')
+
+    def test_index_dimension(self):
+        self.assertEqual(self.written('e^{\\left(2x\\right)}'), 'e^{2x}')
+
+    def test_fraction_argument(self):
+        self.assertEqual(self.written('\\frac{\\left(x+1\\right)}{2}'),
+                         '\\frac {x+1} {2}')
+
+    def test_a_function_argument_is_NOT_peeled(self):
+        # `\cos(x)` is the capture-prone case: a following ordinary factor
+        # joins the argument span, so `\cos(x) y` is not `\cos x y`
+        # (MEASURED: they evaluate to 0.449 and 0.990). Only the delimited
+        # slots above are provably safe.
+        self.assertEqual(self.written('\\cos\\left(x\\right) y'),
+                         '\\cos\\left (x \\right )y')
+
+    def test_semantic_brackets_survive(self):
+        for latex in ('\\sqrt{\\left|x\\right|}', '\\frac{|x|}{2}'):
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            self.assertIn('|', out, latex)
+
+    def test_peeling_preserves_the_expression(self):
+        env = {'x': 0.6}
+        for latex in ('\\sqrt{\\left(x^{2}+1\\right)}', 'e^{\\left(2x\\right)}',
+                      '\\frac{\\left(x+1\\right)}{2}', '\\sqrt{\\left|x\\right|}'):
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            sym2, notation2 = P.parse_latex(out)
+            self.assertAlmostEqual(P.numeric_eval(sym, notation, env),
+                                   P.numeric_eval(sym2, notation2, env),
+                                   places=12, msg=latex)
 
 
 if __name__ == '__main__':

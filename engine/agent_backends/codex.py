@@ -247,6 +247,10 @@ list as authoritative. If it cannot perform an action, report the
 limitation; do not try an alternative capability. Only mechanically checked
 ToyMath tool results may be presented as derived mathematics. Model prose is
 explanatory and is not verified.
+
+Figures reach the user's notebook directly; nothing comes back to you.
+Attaching a tool result to the conversation (image, generatedImage) does
+not show one - the provider refuses the whole turn.
 """
 
 
@@ -751,6 +755,50 @@ def _failed(message):
             'contentItems': [{'type': 'inputText', 'text': message}]}
 
 
+#: What a refused-request 400 about an image actually means. Measured: the
+#: model drove `tikz` from inside the runtime's scripting tool and then
+#: passed the tool's own reply to the script helper `image(...)`, which
+#: appends an image item to the conversation. ToyMath figure tools answer a
+#: status record - figure bytes never reach the model - so the appended
+#: `image_url` was `{"ok": true, "plots": 1}`, and the provider rejected the
+#: next request with `Invalid 'input[0].output[1].image_url'`. The turn is
+#: unrepairable from here; what the cell must not show is raw provider JSON.
+FIGURE_ATTACH_FAILURE = (
+    'the run was ended by the provider, not by the mathematics: the model '
+    'attached a ToyMath tool result to the conversation as an image, and '
+    'the request became malformed. ToyMath figures are delivered to the '
+    'notebook and never returned to the model, so a figure result is status '
+    'text rather than an image. Steps already committed stand; re-run the '
+    'cell')
+
+
+def explain_turn_failure(error):
+    """Translate a provider refusal ToyMath understands; pass the rest on.
+
+    Only the measured shape is claimed: an `image_url` the provider could
+    not read. Anything else keeps its original text - a wrong guess about
+    why a run died is worse than the raw message.
+    """
+    if not error:
+        return error
+    payload = error if isinstance(error, dict) else None
+    if payload is None:
+        try:
+            payload = json.loads(error)
+        except (TypeError, ValueError):
+            return error
+    if not isinstance(payload, dict):
+        return error
+    detail = payload.get('error')
+    if not isinstance(detail, dict):
+        detail = payload
+    message = str(detail.get('message') or '')
+    param = str(detail.get('param') or '')
+    if 'image_url' not in message and 'image_url' not in param:
+        return error
+    return f'{FIGURE_ATTACH_FAILURE} (provider: {message or param})'
+
+
 # ---------------------------------------------------------------------------
 # backend
 # ---------------------------------------------------------------------------
@@ -871,8 +919,10 @@ class CodexRunHandle(ThreadedRunHandle):
         if outcome.status == codex_transport.TURN_INTERRUPTED:
             return AgentOutcome(status=INTERRUPTED, metadata=metadata)
         if outcome.status == codex_transport.TURN_FAILED:
-            return AgentOutcome(status=FAILED, metadata=metadata,
-                                error=outcome.error or 'the Codex turn failed')
+            return AgentOutcome(
+                status=FAILED, metadata=metadata,
+                error=explain_turn_failure(outcome.error)
+                or 'the Codex turn failed')
         return AgentOutcome(status=COMPLETED, final_text=outcome.final_text,
                             metadata=metadata)
 

@@ -1,6 +1,8 @@
 ---
 name: conv
 description: Research the convergence of the series via verified tactics
+input: expression
+output: derivation
 ---
 Determine whether the series $ARGUMENTS converges, using verified tactics
 only.

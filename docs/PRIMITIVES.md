@@ -97,6 +97,17 @@ its own graph evaluator, function binding, matrix arithmetic, finite
 sum/product loops, derivative estimates, and limit extrapolation. Unsupported
 numeric evaluation is honest ignorance, not evidence against a transformation.
 
+That cuts both ways, so a `disagree` verdict must be backed by evidence the
+oracle actually holds. `disagree` is a positive claim that two expressions
+differ, and it bars the step from the ledger for good; a float evaluation whose
+significant digits were consumed by cancellation cannot support it. Before
+reporting a difference, the oracle measures its own numerical noise at that
+sample point — how far the evaluation moves when one coordinate is nudged by a
+single ULP, which the same intermediate magnitudes amplify as they amplify
+round-off — and a gap that does not clear that noise leaves the point undecided
+rather than accusing. Undecided points are counted (`unresolved_points`), and a
+comparison where no point could resolve is `skipped`, never `disagree`.
+
 Canonical rational comparison is exact. Outside the rational fragment,
 `equal_exprs` may use shared opaque atoms for conclusive canonical equality and
 independent numeric sampling for probabilistic evidence. Canonical inequality
@@ -235,6 +246,17 @@ certificate(f(g(x))) = certificate(g)
 The final glue check certifies only the expression assembled from already
 recorded sub-results. Composition depth does not turn prose or retyped values
 into evidence.
+
+Notebook commands declare parser-owned `input`/`output` types in their
+frontmatter. This separates two questions the older `expr: true` flag
+conflated: whether a command returns a spliceable mathematical value, and
+whether a whole-derivation command may consume an input containing such
+values. A compatible nested input is resolved inside-out and gets the same
+oracle-checked glue before the outer command runs; a top-level type mismatch
+is refused. The special output type `derivation` means the checked chain is
+the artifact and cannot be spliced as a value. These boundary types do not
+invent new mathematical judgments—a classification such as maximum/minimum
+still requires its own notation and mechanically checked tactic.
 
 ## Mathematical representation
 

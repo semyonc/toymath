@@ -405,6 +405,12 @@ class MathParser(object):
          'comma-item : additive-expr comparer additive-expr'
          p[0] = self.notation.setf(Symbol('comp', op=p[2]),(p[1],p[3]))
 
+     def p_comma_item_chain_comparer(self, p):
+         'comma-item : additive-expr comparer additive-expr comparer additive-expr'
+         left = self.notation.setf(Symbol('comp', op=p[2]), (p[1], p[3]))
+         right = self.notation.setf(Symbol('comp', op=p[4]), (p[3], p[5]))
+         p[0] = self.notation.setf(Notation.A_LIST, [left, right])
+
      def p_comparer(self, p):
          '''comparer : '='
                     | in

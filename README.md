@@ -82,6 +82,39 @@ kernel in deny-by-default Deno sandboxes — Python (matplotlib/seaborn/plotly)
 under Pyodide, and TeX/TikZ through a WebAssembly TeX engine that renders to
 SVG with no network access at all.
 
+### A cell reads as the mathematics it is, not as its source
+
+A dense formula is hard to read as LaTeX source. In JupyterLab, a ToyMath cell
+shows its formula typeset while you are not editing it, and its source the
+moment you are — the bargain a markdown cell makes, applied to code cells. One
+click on the rendered input opens the editor with the cursor placed; leaving
+the cell renders it again. *Render ToyMath Cell Input* in the command palette
+turns it off for a notebook.
+
+The kernel decides what a cell renders as, because the kernel owns the parser:
+what you see is what the **engine** understood, not a second reading of the
+source by the frontend. `\int \frac {dx} (x+1)` — the ToyMath dialect, taking a
+parenthesised second operand — renders as the fraction it actually parses to,
+which MathJax on the raw source would get wrong. A `[[n]]` backreference
+renders as the formula it stands for, and a cell the engine cannot read keeps
+its source, so an unparsable cell is visible as one before you run it.
+
+A cell is read as a whole formula first, and only failing that as prose with
+formulas buried in it. So `int! \int x^2 dx` renders as one formula, while
+
+```text
+do! differentiate x^3 - 3x, find where the derivative is zero
+```
+
+renders as that sentence with `x^3 - 3x` typeset inside it — no `$…$`
+required, since nobody writes them in a prompt. Only a command that hands its
+argument to the agent is read this way; a plain cell and a rewrite action are
+one expression.
+
+Every rendered fragment must parse back to the same expression as the
+characters it replaces, so a cell can never show something other than what it
+runs.
+
 ## Agent backends
 
 `do!` runs on one of two providers, selected per notebook with `backend!`:
@@ -212,7 +245,7 @@ written into a notebook, a ledger, or a trace.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPEN_ROUTER` | — | OpenRouter API key *(secret)*. Enables the OpenRouter backend, and selects it under `backend! auto`. |
-| `OPENROUTER_MODEL` | `google/gemini-3.6-flash` | Default OpenRouter model. `model!` overrides it per notebook. |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Default OpenRouter model. `model!` overrides it per notebook. |
 | `TOYMATH_AGENT_BACKEND` | unset | Forces `openrouter` or `codex`. Outranked only by an explicit `backend!` in the notebook. |
 | `TOYMATH_CODEX_MODEL` | the account's own default | Default model for the Codex backend. ToyMath hardcodes none — the runtime chooses (`gpt-5.6-sol` with the currently pinned one). `model!` overrides it per notebook. |
 | `TOYMATH_CODEX_HOME` | `~/.toymath/codex-home` | ToyMath's dedicated Codex home. Must not be the general one; a directory ToyMath did not create is refused rather than overwritten. |
@@ -246,5 +279,12 @@ cell says so instead of guessing.
 | `TOYMATH_LIVE_TESTS=1` | Adds a live OpenRouter derivation test (spends credits). |
 | `TOYMATH_CODEX_LIVE_TESTS=1` | Adds a live Codex derivation test (needs `login!` first). |
 | `TOYMATH_PLOT_TESTS=1` | Adds the Deno figure-sandbox probes. |
+
+A live test decides its own configuration: it always runs on
+`gpt-5.6-luna`, on the backend its class names, with tracing and the figure
+sandboxes off. `OPENROUTER_MODEL`, `TOYMATH_CODEX_MODEL`,
+`TOYMATH_AGENT_BACKEND`, `TOYMATH_OBSERVABILITY`, and `TOYMATH_SANDBOX` in
+your `.env` change what `do!` does, never what a live test measures — only
+the credential is taken from the environment.
 
 MIT License · Semyon C

@@ -45,7 +45,13 @@ def _model_endpoints(shell):
     Codex reports its own models, so the static OpenRouter catalog is not
     the answer while that backend is selected.
     """
-    from engine import agent_config, model_config
+    # bare names, like `mathShell` uses: `from engine import agent_config`
+    # imports the SAME FILE under a second module identity, giving the
+    # kernel its own `_codex_account` observation cache and re-running
+    # `model_config`'s `load_dotenv()` mid-process. Measured: a completion
+    # popup put cleared `.env` routing variables back into os.environ.
+    import agent_config
+    import model_config
     if shell is None or shell.backend_name != agent_config.CODEX:
         return None
     try:
@@ -105,7 +111,7 @@ class MathKernel(Kernel):
         setShell(self.mathShell)
 
     def _model_payload(self):
-        from engine import agent_config
+        import agent_config            # one identity; see _model_endpoints
         route = self.mathShell.route
         routing = agent_config.describe(route)
         return {'model': routing['model'] or f"{routing['backend']} default",
@@ -154,7 +160,8 @@ class MathKernel(Kernel):
         """Complete `backend!` names, `login!` options, and `model!` ids for
         the selected backend: models.yaml under OpenRouter, the account's
         own catalog under Codex."""
-        from engine import agent_config, model_config
+        import agent_config            # one identity; see _model_endpoints
+        import model_config
         for complete in (agent_config.complete_backend_command,
                          agent_config.complete_login_command):
             reply = complete(code, cursor_pos)

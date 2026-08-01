@@ -185,6 +185,11 @@ class _GroupStripper(Replicator):
         # explicit-\cdot marking is presentation only (the structural
         # comparer ignores it); the comparison normal form must too, or
         # linkage refuses honest respellings of one product
+        spans = self._explicit_func_spans(list(f.args))
+        if spans is not None:
+            props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, spans, **props))
         if 'cdot' in f.props:
             args = self.build_list(f, self.enter_expr)
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
@@ -192,13 +197,126 @@ class _GroupStripper(Replicator):
                 self.mapsym(sym), Func(Notation.P_LIST, args, **props))
         return super(_GroupStripper, self).enter_plist(sym, f)
 
+    def _explicit_func_spans(self, args):
+        """Rebuild a product with every function-argument span explicitly
+        grouped, or None when the product applies no function.
+
+        Function application is a READING CONVENTION over a flat P_LIST,
+        not a DAG node: `\\cos(x) y` and `\\cos x y` differ only by the
+        group, and stripping it made both print `\\cos xy` — one string
+        for two expressions that evaluate to 0.449 and 0.990 (MEASURED).
+        Every consumer of a normal form therefore read a false identity:
+        `same_expression` (provenance linkage), `_chain_links`, the
+        endpoint-limit provenance door, and ledger duplicate detection.
+        Sum/product boundaries were never affected, because the writer
+        braces a composite operand itself (`(a+b)c` prints `{a+b}c`) —
+        which is why the hole was function application only.
+
+        The span comes from the ORACLE's own `_func_arg_span`, so the
+        boundary this re-encodes is by construction the one the numeric
+        leg checks against (the `_PoweredHeadNormalizer` precedent).
+        Emitting exactly one transparent group per span keeps the honest
+        respellings equal (`\\cos x`, `\\cos{x}` and `\\cos(x)` all become
+        `\\cos{x}`) while separating the capture (`\\cos{x}y` from
+        `\\cos{xy}`)."""
+        kept = [a for a in args
+                if not (isinstance(a, Symbol) and a.name in Notation.styles)]
+
+        def is_head(a):
+            return (_is_func_name(a, self.notation)
+                    or _func_power(a, self.notation) is not None)
+
+        if not any(is_head(a) for a in kept):
+            return None
+        out = []
+        i = 0
+        while i < len(kept):
+            a = kept[i]
+            if not is_head(a):
+                out.append(self.enter_expr(a))
+                i += 1
+                continue
+            span, j = _func_arg_span(kept, i, self.notation, is_head)
+            out.append(self.enter_expr(a))
+            if span:
+                inner = [self.enter_expr(s) for s in span]
+                payload = inner[0] if len(inner) == 1 else \
+                    self.output_notation.setf(Notation.P_LIST, tuple(inner))
+                out.append(self.output_notation.setf(
+                    Notation.GROUP, (payload,), br='{}'))
+            i = j
+        return tuple(out)
+
+
+class _RedundantBracketPeeler(Replicator):
+    """Drop a bracket wrapper that an enclosing ``{}`` already delimits.
+
+    A ``{}`` group is exactly the parser's delimiter: whatever slot it
+    fills — a `\\sqrt` argument, an INDEX dimension, a `\\frac` or
+    `\\binom` argument — its braces bound the span on both sides. So a
+    `()` or `\\left(...\\right)` wrapper immediately inside one cannot be
+    doing any work, and `{(X)}` is `{X}` for every X. That is what makes
+    this peel safe where a bare function argument is NOT: nothing can
+    capture across the braces, so the rightward-capture rule that governs
+    products (a following ordinary factor joins the argument span) has
+    nothing to say here.
+
+    Semantic brackets are preserved — `\\lfloor`, `\\lceil` and `|...|`
+    are bracket OPERATORS, not grouping, and peeling one would drop the
+    operator in both trust legs at once."""
+
+    def enter_group(self, sym, f):
+        if f.props.get('br') == '{}' and 'quoted' not in f.props:
+            inner = f.args[0]
+            while True:
+                g = self.notation.vgetf(inner, [Notation.GROUP,
+                                                Notation.V_GROUP])
+                if (g is None or Notation.is_semantic_bracket(g)
+                        or 'quoted' in g.props
+                        or g.props.get('br') not in ('()', '{}')):
+                    break
+                inner = g.args[0]
+            if inner is not f.args[0]:
+                return self.output_notation.repf(
+                    self.mapsym(sym),
+                    Func(Notation.GROUP, (self.enter_formula(inner),),
+                         **f.props))
+        return super(_RedundantBracketPeeler, self).enter_group(sym, f)
+
+
+def _peel_redundant_brackets(sym, notation):
+    """(sym, notation) with delimiter-redundant bracket wrappers dropped.
+
+    Falls back to the input unchanged unless the peeled graph is the same
+    expression modulo bracket respelling — the all-bracket normal form is
+    the right question here precisely because a redundant bracket is the
+    only thing being removed, and that form now keeps function-argument
+    spans apart."""
+    try:
+        out = Notation()
+        peeled = _RedundantBracketPeeler(notation, out)(sym)
+        if (_dag_normal_form(peeled, out, all_brackets=True)
+                == _dag_normal_form(sym, notation, all_brackets=True)):
+            return peeled, out
+    except Exception:
+        pass
+    return sym, notation
+
 
 def _normal_form(latex, allow_ellipsis=False):
     """Parse and print with {}-groups stripped: two strings with equal
     normal forms parse to the same expression."""
     sym, notation = parse_latex(latex, allow_ellipsis=allow_ellipsis)
+    return _dag_normal_form(sym, notation)
+
+
+def _dag_normal_form(sym, notation, all_brackets=False):
+    """The normal form of a graph we already hold, with no parse hop.
+    Lets a candidate spelling be compared against the expression it is
+    meant to spell, rather than only against another spelling of it."""
     out = Notation()
-    return _write_std(_GroupStripper(notation, out)(sym), out)
+    return _write_std(
+        _GroupStripper(notation, out, all_brackets=all_brackets)(sym), out)
 
 
 def same_expression(latex1, latex2):
@@ -480,8 +598,23 @@ def _all_bracket_normal_form(latex):
 
 
 def write_latex(sym, notation):
-    """Readable LaTeX with a safety net: the pretty form is used only if it
-    parses back to the same normal form as the standard output."""
+    """Readable LaTeX with a safety net: a candidate spelling is used only
+    if it reads back as the expression it was asked to write.
+
+    The two candidates used to be compared only against EACH OTHER, which
+    silently assumed at least one of them round-trips. Once the normal
+    form learned to keep function-argument spans apart, that assumption
+    was measurably false: the raw writer spells `\\sin 2x` as
+    `\\sin {2}x` — the integer value repr's braces close the argument
+    span, so the string re-reads as `sin(2) x` (0.364 where the
+    expression is 0.717). The pretty form was right and was being kept
+    for the wrong reason. Comparing each candidate against the SOURCE
+    graph instead names which one is faithful.
+
+    Delimiter-redundant brackets are dropped first, so a rule-built
+    formula's syntax-protection wrappers do not survive into the ledger
+    artifact (`\\sqrt{\\left(x^{2}+1\\right)}`, `e^{\\left(2x\\right)}`)."""
+    sym, notation = _peel_redundant_brackets(sym, notation)
     std = _write_std(sym, notation)
     try:
         pretty = ' '.join(PrettyWriter(notation)(sym).split())
@@ -491,6 +624,13 @@ def write_latex(sym, notation):
         return std
     try:
         if _normal_form(pretty) == _normal_form(std):
+            return pretty
+    except PrimitiveError:
+        pass
+    # the candidates disagree, so at most one of them re-reads correctly
+    try:
+        source = _dag_normal_form(sym, notation)
+        if _normal_form(pretty) == source:
             return pretty
     except PrimitiveError:
         pass
@@ -845,6 +985,12 @@ _ARRAY_EVAL_NAMES = (
     '\\vmatrix', '\\Vmatrix', '\\smallmatrix',
 )
 
+# How far a gap must clear the oracle's own noise before it counts as
+# evidence of a difference. Measured separation is wide: a correct
+# expansion whose digits were lost to cancellation sits at ratio 0.8,
+# while genuinely different expressions sit above 10^12.
+_RESOLUTION_MARGIN = 8.0
+
 
 def _num_shape(m):
     return (len(m), len(m[0]) if m else 0)
@@ -905,6 +1051,72 @@ def _num_abs(v):
     if isinstance(v, list):
         return max((abs(x) for row in v for x in row), default=0.0)
     return abs(v)
+
+
+def _num_gap(v1, v2):
+    """Distance between two oracle values, or None when the two are not
+    numerically comparable at all — a shape mismatch is structural
+    evidence, never a rounding artifact."""
+    m1, m2 = isinstance(v1, list), isinstance(v2, list)
+    if m1 != m2:
+        return None
+    if m1:
+        if _num_shape(v1) != _num_shape(v2):
+            return None
+        return max((abs(x - y) for r1, r2 in zip(v1, v2)
+                    for x, y in zip(r1, r2)), default=0.0)
+    return abs(v1 - v2)
+
+
+def _eval_noise(sym, notation, env, value):
+    """How far this evaluation moves when one coordinate is nudged by a
+    single ULP, or None when no nudge could be evaluated.
+
+    Large intermediate terms amplify an input perturbation exactly as they
+    amplify round-off, so this is a proxy for the oracle's own numerical
+    noise at ``env`` — and it reuses the SAME evaluator, so a node type the
+    oracle gains later is covered without touching this code."""
+    worst = 0.0
+    probed = False
+    for key, coord in env.items():
+        if not isinstance(coord, float):
+            continue
+        for toward in (math.inf, -math.inf):
+            nudged = dict(env)
+            nudged[key] = math.nextafter(coord, toward)
+            try:
+                moved = numeric_eval(sym, notation, nudged)
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                continue
+            gap = _num_gap(value, moved)
+            if gap is None:
+                continue
+            probed = True
+            worst = max(worst, gap)
+    if env and not probed:
+        return None
+    return worst
+
+
+def _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
+    """Whether the values at ``env`` lie far enough apart to be evidence.
+
+    ``disagree`` is a positive claim that two expressions differ, and it
+    bars the step from the ledger for good. A float evaluation whose
+    significant digits were consumed by cancellation cannot support that
+    claim: ``(x+y)^{16}`` and its own canonical expansion land 6% apart at
+    a sample point where the intermediate terms exceed the result by
+    eighteen orders of magnitude. Unsupported numeric evaluation is honest
+    ignorance, not evidence against a transformation, so a gap the oracle
+    cannot resolve leaves the point undecided instead of accusing."""
+    gap = _num_gap(v1, v2)
+    if gap is None:
+        return True
+    noise1 = _eval_noise(s1, n1, env, v1)
+    noise2 = _eval_noise(s2, n2, env, v2)
+    if noise1 is None or noise2 is None:
+        return False
+    return gap > _RESOLUTION_MARGIN * max(noise1, noise2)
 
 
 def _num_agree(v1, v2, tol):
@@ -1248,6 +1460,35 @@ def _relation_parts(latex):
     return comp.args[0], comp.args[1], rel, notation
 
 
+def _conjunction_parts(latex):
+    """Oracle-owned relation parts for one disjunct.
+
+    A plain relation is a one-member conjunction.  An ``A_LIST`` is the
+    first-class ``\\land`` shape (including a chained comparison lowered by
+    the parser), and every member must independently be a supported relation.
+    This parsing stays on the numeric leg; it deliberately does not reuse the
+    tactic-side case/provenance helpers.
+    """
+    sym, notation = parse_latex(latex)
+    while True:
+        wrapper = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if wrapper is None:
+            break
+        sym = wrapper.args[0]
+    head = notation.getf(sym, Notation.A_LIST)
+    members = list(head.args) if head is not None else [sym]
+    parts = []
+    for member in members:
+        comp = notation.getf(member, Notation.COMP)
+        if comp is None:
+            return None
+        rel = comp.sym.props.get('op')
+        if rel not in _ORACLE_REL:
+            return None
+        parts.append((comp.args[0], comp.args[1], rel, notation))
+    return parts
+
+
 def hypothesis_parts(assumption):
     """(lhs, rhs, direction) for an assumption that states a strict
     hypothesis, else None. direction is -1 for '<' and +1 for '>'."""
@@ -1404,6 +1645,7 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     agreed = 0
     tried = 0
     undefined_both = 0
+    unresolved = 0
     mismatches = 0
     mismatch = None
     budget = _sample_budget(samples, guards)
@@ -1429,6 +1671,9 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         if agree is None:
             continue
         if not agree:
+            if not _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
+                unresolved += 1
+                continue
             return {'status': 'disagree', 'point': env,
                     'lhs': v1, 'rhs': v2}
         agreed += 1
@@ -1436,11 +1681,18 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         return {'status': 'domain-differs', 'mismatches': mismatches,
                 'common_samples': agreed, **mismatch}
     if agreed == 0:
+        if unresolved:
+            return {'status': 'skipped', 'unresolved_points': unresolved,
+                    'reason': 'every sample point lost its significant '
+                              'digits to cancellation; the comparison is '
+                              'undecided, not disproved'}
         return {'status': 'skipped',
                 'reason': 'no evaluable sample points'}
     result = {'status': 'agree', 'samples': agreed}
     if undefined_both:
         result['undefined_points'] = undefined_both
+    if unresolved:
+        result['unresolved_points'] = unresolved
     return result
 
 
@@ -1507,14 +1759,21 @@ def _union_truths_at(env, tparts, dparts, tol):
     try:
         t = _relation_truth(numeric_eval(tl, tn, env),
                             numeric_eval(tr, tn, env), trel, tol)
-        truths = [_relation_truth(numeric_eval(dl, dn, env),
-                                  numeric_eval(dr, dn, env), drel, tol)
-                  for dl, dr, drel, dn in dparts]
+        conjunctions = []
+        for group in dparts:
+            truths = [
+                _relation_truth(numeric_eval(dl, dn, env),
+                                numeric_eval(dr, dn, env), drel, tol)
+                for dl, dr, drel, dn in group
+            ]
+            if any(truth is None for truth in truths):
+                return None
+            conjunctions.append(all(truths))
     except (EvalError, ZeroDivisionError, ValueError, OverflowError):
         return None
-    if t is None or any(d is None for d in truths):
+    if t is None:
         return None
-    return t, any(truths)
+    return t, any(conjunctions)
 
 
 def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
@@ -1631,11 +1890,13 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
                         tol=1e-6):
-    """Independently check that a disjunction of relations holds exactly
-    where the target relation holds.
+    """Independently check that a disjunction of relation conjunctions holds
+    exactly where the target relation holds.
 
-    An assembled union claims a biconditional: some disjunct is true at a
-    point if and only if the target is. The mismatch region of a wrong
+    A disjunct may be one relation or an ``A_LIST`` conjunction; its truth is
+    the AND of its member truths, and the union is the OR of the disjuncts.
+    An assembled union claims a biconditional: some complete disjunct is true
+    at a point if and only if the target is. The mismatch region of a wrong
     union is typically a bounded interval between roots, which a handful
     of random points can miss entirely — so the one-variable case also
     walks a fine deterministic sweep (uniform steps plus pole-clustered
@@ -1644,15 +1905,16 @@ def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
     one-sided evidence and reports `skipped`, not `agree`."""
     try:
         tparts = _relation_parts(target)
-        dparts = [_relation_parts(d) for d in disjuncts]
+        dparts = [_conjunction_parts(d) for d in disjuncts]
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
     if tparts is None or not dparts or any(p is None for p in dparts):
         return {'status': 'skipped', 'reason': 'not a supported relation'}
     tl, tr, trel, tn = tparts
     variables = free_symbols(tl, tn) | free_symbols(tr, tn)
-    for dl, dr, _drel, dn in dparts:
-        variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
+    for group in dparts:
+        for dl, dr, _drel, dn in group:
+            variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
     agreed = 0
     holding = 0
     if len(variables) == 1:

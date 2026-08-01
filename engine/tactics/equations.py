@@ -508,18 +508,43 @@ def _same_relation(left, right):
             and same_expression(ll, rr) and same_expression(lr, rl))
 
 
+def _same_disjunct(left, right):
+    """Whether two ordered-or-reordered relation conjunctions are the same."""
+    if len(left) != len(right):
+        return False
+    remaining = list(right)
+    for relation in left:
+        for index, candidate in enumerate(remaining):
+            if _same_relation(relation, candidate):
+                remaining.pop(index)
+                break
+        else:
+            return False
+    return True
+
+
+def _unwrap_logic(sym, notation):
+    """Peel presentation groups around an isolated logical expression."""
+    while True:
+        wrapper = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if wrapper is None:
+            return sym
+        sym = wrapper.args[0]
+
+
 def cases_assemble(target, union, endpoints, hypotheses):
     """Assemble recorded case endpoints under stated hypotheses into the
     union of solutions for one stated relation.
 
-    This is not a solver: each disjunct of the proposed union must be, in
-    order, either the recorded endpoint of its case or the case's stated
-    hypothesis — the two relations a finished case actually recorded —
-    and the whole union is then independently spot-checked to hold at
-    exactly the points where the target does. Which of the two a case
-    contributes is the agent's judgment (the endpoint when it lies inside
-    its hypothesis, the hypothesis when the endpoint outgrew it); a wrong
-    choice is a coverage error the oracle reports with a witness point.
+    This is not a solver: each disjunct of the proposed union may be one
+    relation or a ``\\land`` conjunction.  Every member must, in order, be
+    either the recorded endpoint of its case or the case's stated hypothesis
+    — the two relations a finished case actually recorded — and the whole
+    union is then independently spot-checked to hold at exactly the points
+    where the target does. Which relation(s) a case contributes is the
+    agent's judgment (the endpoint when it lies inside its hypothesis, the
+    hypothesis when the endpoint outgrew it, or both for a bounded case); a
+    wrong choice is a coverage error the oracle reports with a witness point.
     The record says the union covers the target's solutions where it was
     sampled — never that a tighter description does not exist.
     """
@@ -545,22 +570,47 @@ def cases_assemble(target, union, endpoints, hypotheses):
         usym, unotation = parse_latex(union)
     except PrimitiveError as exc:
         return _error('cases_assemble', args, str(exc))
-    head = unotation.getf(usym, Notation.O_LIST)
-    if head is None:
+    logical_root = _unwrap_logic(usym, unotation)
+    head = unotation.getf(logical_root, Notation.O_LIST)
+    root_items = list(head.args) if head is not None else [usym]
+    if head is None \
+            and unotation.getf(logical_root, Notation.A_LIST) is None:
         return _error(
             'cases_assemble', args,
             'the union must be a \\lor disjunction of at least two '
-            'relations, such as x \\lt 0 \\lor x \\gt \\frac{1}{2}; a '
-            'single-case answer needs no assembly')
+            'cases or a \\land conjunction assembled from one case, such '
+            'as -1 \\lt x \\lt 1; a single-relation answer needs no '
+            'assembly')
     disjuncts = []
-    for item in head.args:
-        comp = unotation.getf(item, Notation.COMP)
-        if comp is None:
-            return _error(
-                'cases_assemble', args,
-                f'{write_latex(item, unotation)!r} is not a relation; '
-                'every disjunct must be one')
-        disjuncts.append(write_latex(item, unotation))
+    member_groups = []
+    for item in root_items:
+        logical_item = _unwrap_logic(item, unotation)
+        conjunction = unotation.getf(logical_item, Notation.A_LIST)
+        members = (list(conjunction.args)
+                   if conjunction is not None else [logical_item])
+        written_members = []
+        for member in members:
+            comp = unotation.getf(member, Notation.COMP)
+            if comp is None:
+                return _error(
+                    'cases_assemble', args,
+                    f'{write_latex(member, unotation)!r} in disjunct '
+                    f'{write_latex(item, unotation)!r} is not a relation; '
+                    'every conjunction member must be one')
+            relation = write_latex(member, unotation)
+            if any(_same_relation(relation, seen)
+                   for seen in written_members):
+                return _error(
+                    'cases_assemble', args,
+                    f'disjunct {write_latex(item, unotation)!r} repeats '
+                    f'the same relation {relation!r}; list each member once')
+            written_members.append(relation)
+        # The raw writer can spell a grouped negative as (-{2}...), which
+        # does not reparse. Once isolated as a disjunct the wrapper is
+        # presentation-only, so pass the validated inner spelling to the
+        # oracle and keep the original root solely for the final result.
+        disjuncts.append(write_latex(logical_item, unotation))
+        member_groups.append(written_members)
     if not (len(disjuncts) == len(endpoints) == len(hypotheses)):
         return _error(
             'cases_assemble', args,
@@ -568,13 +618,14 @@ def cases_assemble(target, union, endpoints, hypotheses):
             f'{len(endpoints)} recorded case(s) were supplied; give one '
             'recorded case per disjunct, in the order they are written')
     target_vars = free_symbols(tsym, tnotation)
-    for index, disjunct in enumerate(disjuncts):
-        for seen in disjuncts[:index]:
-            if _same_relation(disjunct, seen):
+    for index, (disjunct, members) in enumerate(zip(disjuncts, member_groups)):
+        for seen, seen_members in zip(disjuncts[:index],
+                                      member_groups[:index]):
+            if _same_disjunct(members, seen_members):
                 return _error(
                     'cases_assemble', args,
-                    f'disjuncts {seen!r} and {disjunct!r} are the same '
-                    'relation; list each case once')
+                    f'disjuncts {seen!r} and {disjunct!r} state the same '
+                    'relation(s); list each case once')
         hypothesis = hypotheses[index]
         try:
             hsym, hnotation = parse_latex(hypothesis)
@@ -589,16 +640,18 @@ def cases_assemble(target, union, endpoints, hypotheses):
                 f'case hypothesis {hypothesis!r} is not a strict '
                 'relation; cases are stated with assuming, which only '
                 'accepts strict hypotheses')
-        if not (_same_relation(disjunct, endpoints[index])
-                or _same_relation(disjunct, hypothesis)):
-            return _error(
-                'cases_assemble', args,
-                f'disjunct {disjunct!r} is neither the recorded endpoint '
-                f'{endpoints[index]!r} nor the stated hypothesis '
-                f'{hypothesis!r} of its case; the union may only restate '
-                'what the cases recorded')
-        dsym, dnotation = parse_latex(disjunct)
-        foreign = free_symbols(dsym, dnotation) - target_vars
+        for member in members:
+            if not (_same_relation(member, endpoints[index])
+                    or _same_relation(member, hypothesis)):
+                return _error(
+                    'cases_assemble', args,
+                    f'member {member!r} of disjunct {disjunct!r} is neither '
+                    f'the recorded endpoint {endpoints[index]!r} nor the '
+                    f'stated hypothesis {hypothesis!r} of its case; the '
+                    'union may only restate what the cases recorded')
+        foreign = free_symbols(
+            _unwrap_logic(root_items[index], unotation), unotation
+        ) - target_vars
         if foreign:
             return _error(
                 'cases_assemble', args,
@@ -615,7 +668,13 @@ def cases_assemble(target, union, endpoints, hypotheses):
             f'{check["holds"]["union"]}; a disjunct that outgrew its '
             'hypothesis must contribute the hypothesis instead (or the '
             'endpoint, in the opposite direction)')
-    result = write_latex(usym, unotation)
+    # Conjunction binds more tightly than disjunction, so the presentation
+    # groups peeled above are redundant in the result too. Rebuilding from
+    # the isolated, reparsable disjunct spellings also avoids the raw
+    # writer's non-round-tripping (-{2}...) spelling inside a parenthesis.
+    result = r' \lor '.join(disjuncts)
+    rsym, rnotation = parse_latex(result)
+    result = write_latex(rsym, rnotation)
     return _result('cases_assemble', args, target, result, check=check)
 
 

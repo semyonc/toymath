@@ -48,6 +48,7 @@ Two layers coexist:
 | `engine/LatexWriter.py` | Notation → LaTeX |
 | `engine/comparer.py` | Structural pattern matching (used by lemmas/rewrite) |
 | `engine/cmd_mul.py`, `engine/cmd_add.py` | Legacy rewrite commands: fraction/power rules |
+| `engine/classic_canonical.py` | Bounded adapter letting `mul!`/`add!` share `polyrat`'s canonical forms on their commutative rational fragment; unsupported notation falls back to the procedural path |
 | `engine/frac_utils.py`, `engine/value.py` | Fraction utilities; IntegerValue/FracValue/FloatValue |
 | `engine/prolog.py` | Legacy logic layer — do not build new features on it |
 | `engine/mathShell.py` | Kernel shell: cell dispatch (`do!`, notebook commands, math cells) |
@@ -69,6 +70,19 @@ Two layers coexist:
   regression.
 - The numeric oracle must share **nothing** with the symbolic code path —
   the two independent trust legs are the design.
+- A `disagree` verdict needs evidence too. It is a positive claim that two
+  expressions differ and it bars the step from the ledger permanently, so
+  `numeric_spot_check` first measures its own noise at the sample point
+  (`_eval_noise`: how far the evaluation moves under a one-ULP nudge, which
+  the same intermediate magnitudes amplify as they amplify round-off) and
+  leaves a gap it cannot resolve undecided. LANDMINE: without this, a
+  transformation the engine produced ITSELF was refused — `expand` of
+  `(x+y)^{16}` disagreed with its own canonical output because the
+  intermediate terms exceed the result by eighteen orders of magnitude, and
+  the agent was told to "correct the arguments" it could not correct. The
+  guard is deliberately not a hiding place: measured separation is 0.8 for
+  that false accusation against 10^12 and up for genuine differences,
+  including one corrupted coefficient inside a degree-16 expansion.
 - Never mutate an input notation; build results into fresh/cloned ones.
 - Say "mechanically checked", never "proved".
 - Skill Markdown guides tactic choice; it never grants execution authority.
@@ -96,6 +110,14 @@ Two layers coexist:
 Never give a `commands/*.md` file the same name as a registered `cmd_*`
 action (e.g. `mul`) — it would silently reroute every cell containing that
 command away from the fixed-point engine.
+
+Committed notebook commands declare parser-owned `input`/`output` types in
+frontmatter. `expr: true` controls whether the RESULT may be spliced;
+compatible expression-producing commands may also appear inside the typed
+input of a non-inline derivation command (`solve! {expand! ...}=...`). The
+resolver checks the assembled glue before the outer agent runs. `derivation`
+is output-only and never spliceable; command types do not create new
+mathematical judgment semantics.
 
 ## Extending the Verified Tactic Layer
 
@@ -148,8 +170,18 @@ pytest engine/unittests.py                          # legacy core
 pytest engine/unittests_frac.py                     # fractions
 pytest engine/unittests_primitives.py               # verified-derivation primitives
 pytest engine/unittests_do.py                       # do! endpoint (offline scripted agent)
+pytest engine/unittests_tactics.py                  # registry/CLI/skill-gating surface
+pytest engine/unittests_cell_input.py               # cell readings and rendered input
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```
+
+Live tests pin their own backend, model (`gpt-5.6-luna`), tracing, and
+sandbox state, so a developer's `.env` cannot change what they measure; only
+the provider credential comes from the environment.
+
+`python_files` in `pyproject.toml` is an explicit allowlist: a new
+`unittests_*.py` runs only once it is added there, so add it in the same
+commit that creates it.
 
 ## Legacy Engine: Fixed-Point Iteration
 
@@ -266,6 +298,36 @@ if isinstance(n, IntegerValue): ...
 - Use `primitives.write_latex` for user-visible verified results and notebook
   history/backreferences. Direct `LaTexWriter` is the raw/debug spelling and
   accumulates transparent INDEX brace groups across repeated parse/write hops.
+  It validates each candidate spelling against the SOURCE graph, not merely
+  against the other candidate — comparing the two to each other assumes at
+  least one round-trips, and that is measurably false: `LaTexWriter` spells
+  `\sin 2x` as `\sin {2}x`, whose integer value repr closes the argument span,
+  so the string re-reads as `sin(2) x`. It also drops delimiter-redundant
+  brackets (`\sqrt{\left(x^2+1\right)}` → `\sqrt{x^2+1}`), which is safe only
+  inside a `{}` slot; see the capture landmine below.
+- `differentiate` re-spells a quotient's canonical denominator as a power of
+  the base the INPUT wrote (`d/dx x/(x^2+1)^3` gives `(x^2+1)^4`, not a
+  degree-8 polynomial). This is not the banned general `factor`: the base is
+  READ off the input, never searched for, and a denominator the input did not
+  write as a sum is left expanded. It runs AFTER canonicalization, so every
+  cancellation has already happened (`d/dx x^2/x` is still `1`), and it is
+  admitted only on the exact sparse-polynomial identity `base**k == den`.
+  The result is deliberately NOT polyrat-canonical; `expand` converges it back
+  and `equal_exprs` equates the spellings, so composite glue, chain linkage,
+  the FTC door's re-differentiation, and replay of older ledgers are all
+  unaffected (each measured, not inherited).
+- LANDMINE: function application is a READING CONVENTION over a flat P_LIST,
+  not a DAG node, so an argument's grouping is the ONLY thing separating
+  `\cos(x) y` from `\cos x y` (which evaluate to 0.449 and 0.990 at x=0.3,
+  y=0.47 — the argument captures rightward). Stripping brackets for a normal
+  form therefore erased a real boundary, and `same_expression`, `_chain_links`,
+  `_same_spelling` and ledger duplicate detection all read the two as one
+  expression. `_GroupStripper` now re-encodes every function-argument span
+  explicitly, taking the span from the oracle's own `_func_arg_span` so the
+  boundary can never disagree with the leg that checks it. Sum/product
+  boundaries were never affected (the writer braces composite operands itself,
+  so `(a+b)c` prints `{a+b}c`). Never peel a bracket that follows a function
+  head without re-asking that question.
 - Use `primitives.display_latex` when rich-rendering an already-recorded LaTeX
   string. It derives display-only `*` → `\cdot` spelling behind a structural
   parse check; never rewrite the persisted ledger input/result or its hash.

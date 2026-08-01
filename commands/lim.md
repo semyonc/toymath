@@ -2,6 +2,8 @@
 name: lim
 description: Evaluate the limit move by move via the verified limit tactics
 expr: true
+input: expression
+output: expression
 ---
 Evaluate the limit $ARGUMENTS using the verified limit tactics only.
 
