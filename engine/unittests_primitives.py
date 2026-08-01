@@ -859,8 +859,11 @@ class TestDifferentiate(unittest.TestCase):
         )
 
     def test_chain_exp(self):
+        # the rule builder parenthesizes its chain factor for syntax
+        # protection; inside the exponent's braces that wrapper is
+        # delimiter-redundant, so it does not survive into the artifact
         r = self.check('e^{x^2}')
-        self.assertEqual(r['result'], '2xe^{\\left (x^{2}\\right )}')
+        self.assertEqual(r['result'], '2xe^{x^{2}}')
 
     def test_chain_ln(self):
         self.check('\\ln(x^2 + 1)')
@@ -5655,6 +5658,148 @@ class TestEstablishesGoalCoverage(unittest.TestCase):
         self.assertFalse(P.covers_goal(
             '\\int_0^1 x^{2} \\, dx', '\\int_0^2 x^{2} \\, dx',
             establishes=True))
+
+
+class TestFunctionArgumentSpanIsNotErasedByStripping(unittest.TestCase):
+    # Function application is a READING CONVENTION over a flat P_LIST, not a
+    # DAG node, so the argument's grouping is the ONLY thing distinguishing
+    # `\cos(x) y` from `\cos x y`. Stripping it made both normal forms print
+    # `\cos xy`, and every consumer of a normal form read one expression
+    # where there are two -- with the numeric legs disagreeing (0.449 vs
+    # 0.990). Spans come from the oracle's own _func_arg_span, so what the
+    # normal form re-encodes is the reading the numeric leg checks against.
+
+    CAPTURE_PAIRS = [
+        ('\\cos\\left(x\\right) y', '\\cos x y'),
+        ('\\cos{x} y', '\\cos x y'),
+        ('\\ln\\left(x\\right)x', '\\ln x x'),
+        ('\\sin\\left(t\\right)b', '\\sin t b'),
+    ]
+
+    RESPELLINGS = [
+        ('\\cos x', '\\cos{x}'),
+        ('\\cos x', '\\cos\\left(x\\right)'),
+        ('\\sin x \\cos x', '\\sin\\left(x\\right)\\cos\\left(x\\right)'),
+        ('2 \\sin x \\cos x', '2 \\sin(x)\\cos(x)'),
+        ('\\sin 2x', '\\sin(2x)'),
+    ]
+
+    def test_capture_is_not_the_same_expression(self):
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(P.same_expression(a, b), f'{a} vs {b}')
+
+    def test_capture_does_not_chain_link(self):
+        from ledger import _chain_links
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(_chain_links(a, b), f'{a} vs {b}')
+
+    def test_capture_is_not_the_same_spelling(self):
+        # the provenance comparator behind the endpoint-limit door
+        from tactic_registry import _same_spelling
+        for a, b in self.CAPTURE_PAIRS:
+            self.assertFalse(_same_spelling(a, b), f'{a} vs {b}')
+
+    def test_the_capture_pairs_really_do_differ_numerically(self):
+        # the whole point: these are not two spellings of one expression
+        for a, b in self.CAPTURE_PAIRS:
+            env = {'x': 0.3, 'y': 0.47, 't': 0.3, 'b': 0.47}
+            sa, na = P.parse_latex(a)
+            sb, nb = P.parse_latex(b)
+            self.assertNotAlmostEqual(P.numeric_eval(sa, na, env),
+                                      P.numeric_eval(sb, nb, env),
+                                      places=6, msg=f'{a} vs {b}')
+
+    def test_honest_respellings_still_compare_equal(self):
+        # the comparator exists to tolerate agents retyping without the
+        # decorative wrappers; that must keep working
+        for a, b in self.RESPELLINGS:
+            self.assertEqual(P._all_bracket_normal_form(a),
+                             P._all_bracket_normal_form(b), f'{a} vs {b}')
+
+    def test_sum_boundaries_were_never_affected(self):
+        from ledger import _chain_links
+        self.assertFalse(_chain_links('(a+b)c', 'a+bc'))
+        self.assertEqual(P._all_bracket_normal_form('(a+b)c'),
+                         P._all_bracket_normal_form('\\left(a+b\\right)c'))
+
+
+class TestWrittenLatexReadsBackAsItsSource(unittest.TestCase):
+    # write_latex used to compare its two candidate spellings only against
+    # each other, which assumes at least one of them round-trips. Measured
+    # false: the raw writer spells `\sin 2x` as `\sin {2}x`, whose integer
+    # value repr closes the argument span, so the string re-reads as
+    # `sin(2) x`. Each candidate is now compared against the SOURCE graph.
+
+    ROUND_TRIP = ['\\sin 2x', '\\cos 3y', '\\sin 2x \\cos x',
+                  '2 \\sin x \\cos x', '\\sin(2x)', '\\ln 2x']
+
+    def test_output_reads_back_as_the_expression_written(self):
+        for latex in self.ROUND_TRIP:
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            self.assertEqual(P._normal_form(out),
+                             P._dag_normal_form(sym, notation), latex)
+
+    def test_numeric_agreement_after_a_write_hop(self):
+        env = {'x': 0.4, 'y': 0.4}
+        for latex in self.ROUND_TRIP:
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            sym2, notation2 = P.parse_latex(out)
+            self.assertAlmostEqual(P.numeric_eval(sym, notation, env),
+                                   P.numeric_eval(sym2, notation2, env),
+                                   places=12, msg=latex)
+
+    def test_the_numeric_leading_argument_keeps_its_span(self):
+        sym, notation = P.parse_latex('\\sin 2x')
+        self.assertEqual(P.write_latex(sym, notation), '\\sin 2x')
+
+
+class TestDelimiterRedundantBracketsAreDropped(unittest.TestCase):
+    # The rule builders parenthesize their factors for syntax protection.
+    # Inside a {} slot -- a \sqrt argument, an INDEX dimension, a \frac or
+    # \binom argument -- the braces already bound the span, so the wrapper
+    # cannot be doing work and does not belong in the ledger artifact.
+
+    def written(self, latex):
+        sym, notation = P.parse_latex(latex)
+        return P.write_latex(sym, notation)
+
+    def test_sqrt_argument(self):
+        self.assertEqual(self.written('\\sqrt{\\left(x^{2}+1\\right)}'),
+                         '\\sqrt{x^{2}+1}')
+
+    def test_index_dimension(self):
+        self.assertEqual(self.written('e^{\\left(2x\\right)}'), 'e^{2x}')
+
+    def test_fraction_argument(self):
+        self.assertEqual(self.written('\\frac{\\left(x+1\\right)}{2}'),
+                         '\\frac {x+1} {2}')
+
+    def test_a_function_argument_is_NOT_peeled(self):
+        # `\cos(x)` is the capture-prone case: a following ordinary factor
+        # joins the argument span, so `\cos(x) y` is not `\cos x y`
+        # (MEASURED: they evaluate to 0.449 and 0.990). Only the delimited
+        # slots above are provably safe.
+        self.assertEqual(self.written('\\cos\\left(x\\right) y'),
+                         '\\cos\\left (x \\right )y')
+
+    def test_semantic_brackets_survive(self):
+        for latex in ('\\sqrt{\\left|x\\right|}', '\\frac{|x|}{2}'):
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            self.assertIn('|', out, latex)
+
+    def test_peeling_preserves_the_expression(self):
+        env = {'x': 0.6}
+        for latex in ('\\sqrt{\\left(x^{2}+1\\right)}', 'e^{\\left(2x\\right)}',
+                      '\\frac{\\left(x+1\\right)}{2}', '\\sqrt{\\left|x\\right|}'):
+            sym, notation = P.parse_latex(latex)
+            out = P.write_latex(sym, notation)
+            sym2, notation2 = P.parse_latex(out)
+            self.assertAlmostEqual(P.numeric_eval(sym, notation, env),
+                                   P.numeric_eval(sym2, notation2, env),
+                                   places=12, msg=latex)
 
 
 if __name__ == '__main__':

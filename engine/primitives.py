@@ -185,6 +185,11 @@ class _GroupStripper(Replicator):
         # explicit-\cdot marking is presentation only (the structural
         # comparer ignores it); the comparison normal form must too, or
         # linkage refuses honest respellings of one product
+        spans = self._explicit_func_spans(list(f.args))
+        if spans is not None:
+            props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            return self.output_notation.repf(
+                self.mapsym(sym), Func(Notation.P_LIST, spans, **props))
         if 'cdot' in f.props:
             args = self.build_list(f, self.enter_expr)
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
@@ -192,13 +197,126 @@ class _GroupStripper(Replicator):
                 self.mapsym(sym), Func(Notation.P_LIST, args, **props))
         return super(_GroupStripper, self).enter_plist(sym, f)
 
+    def _explicit_func_spans(self, args):
+        """Rebuild a product with every function-argument span explicitly
+        grouped, or None when the product applies no function.
+
+        Function application is a READING CONVENTION over a flat P_LIST,
+        not a DAG node: `\\cos(x) y` and `\\cos x y` differ only by the
+        group, and stripping it made both print `\\cos xy` — one string
+        for two expressions that evaluate to 0.449 and 0.990 (MEASURED).
+        Every consumer of a normal form therefore read a false identity:
+        `same_expression` (provenance linkage), `_chain_links`, the
+        endpoint-limit provenance door, and ledger duplicate detection.
+        Sum/product boundaries were never affected, because the writer
+        braces a composite operand itself (`(a+b)c` prints `{a+b}c`) —
+        which is why the hole was function application only.
+
+        The span comes from the ORACLE's own `_func_arg_span`, so the
+        boundary this re-encodes is by construction the one the numeric
+        leg checks against (the `_PoweredHeadNormalizer` precedent).
+        Emitting exactly one transparent group per span keeps the honest
+        respellings equal (`\\cos x`, `\\cos{x}` and `\\cos(x)` all become
+        `\\cos{x}`) while separating the capture (`\\cos{x}y` from
+        `\\cos{xy}`)."""
+        kept = [a for a in args
+                if not (isinstance(a, Symbol) and a.name in Notation.styles)]
+
+        def is_head(a):
+            return (_is_func_name(a, self.notation)
+                    or _func_power(a, self.notation) is not None)
+
+        if not any(is_head(a) for a in kept):
+            return None
+        out = []
+        i = 0
+        while i < len(kept):
+            a = kept[i]
+            if not is_head(a):
+                out.append(self.enter_expr(a))
+                i += 1
+                continue
+            span, j = _func_arg_span(kept, i, self.notation, is_head)
+            out.append(self.enter_expr(a))
+            if span:
+                inner = [self.enter_expr(s) for s in span]
+                payload = inner[0] if len(inner) == 1 else \
+                    self.output_notation.setf(Notation.P_LIST, tuple(inner))
+                out.append(self.output_notation.setf(
+                    Notation.GROUP, (payload,), br='{}'))
+            i = j
+        return tuple(out)
+
+
+class _RedundantBracketPeeler(Replicator):
+    """Drop a bracket wrapper that an enclosing ``{}`` already delimits.
+
+    A ``{}`` group is exactly the parser's delimiter: whatever slot it
+    fills — a `\\sqrt` argument, an INDEX dimension, a `\\frac` or
+    `\\binom` argument — its braces bound the span on both sides. So a
+    `()` or `\\left(...\\right)` wrapper immediately inside one cannot be
+    doing any work, and `{(X)}` is `{X}` for every X. That is what makes
+    this peel safe where a bare function argument is NOT: nothing can
+    capture across the braces, so the rightward-capture rule that governs
+    products (a following ordinary factor joins the argument span) has
+    nothing to say here.
+
+    Semantic brackets are preserved — `\\lfloor`, `\\lceil` and `|...|`
+    are bracket OPERATORS, not grouping, and peeling one would drop the
+    operator in both trust legs at once."""
+
+    def enter_group(self, sym, f):
+        if f.props.get('br') == '{}' and 'quoted' not in f.props:
+            inner = f.args[0]
+            while True:
+                g = self.notation.vgetf(inner, [Notation.GROUP,
+                                                Notation.V_GROUP])
+                if (g is None or Notation.is_semantic_bracket(g)
+                        or 'quoted' in g.props
+                        or g.props.get('br') not in ('()', '{}')):
+                    break
+                inner = g.args[0]
+            if inner is not f.args[0]:
+                return self.output_notation.repf(
+                    self.mapsym(sym),
+                    Func(Notation.GROUP, (self.enter_formula(inner),),
+                         **f.props))
+        return super(_RedundantBracketPeeler, self).enter_group(sym, f)
+
+
+def _peel_redundant_brackets(sym, notation):
+    """(sym, notation) with delimiter-redundant bracket wrappers dropped.
+
+    Falls back to the input unchanged unless the peeled graph is the same
+    expression modulo bracket respelling — the all-bracket normal form is
+    the right question here precisely because a redundant bracket is the
+    only thing being removed, and that form now keeps function-argument
+    spans apart."""
+    try:
+        out = Notation()
+        peeled = _RedundantBracketPeeler(notation, out)(sym)
+        if (_dag_normal_form(peeled, out, all_brackets=True)
+                == _dag_normal_form(sym, notation, all_brackets=True)):
+            return peeled, out
+    except Exception:
+        pass
+    return sym, notation
+
 
 def _normal_form(latex, allow_ellipsis=False):
     """Parse and print with {}-groups stripped: two strings with equal
     normal forms parse to the same expression."""
     sym, notation = parse_latex(latex, allow_ellipsis=allow_ellipsis)
+    return _dag_normal_form(sym, notation)
+
+
+def _dag_normal_form(sym, notation, all_brackets=False):
+    """The normal form of a graph we already hold, with no parse hop.
+    Lets a candidate spelling be compared against the expression it is
+    meant to spell, rather than only against another spelling of it."""
     out = Notation()
-    return _write_std(_GroupStripper(notation, out)(sym), out)
+    return _write_std(
+        _GroupStripper(notation, out, all_brackets=all_brackets)(sym), out)
 
 
 def same_expression(latex1, latex2):
@@ -480,8 +598,23 @@ def _all_bracket_normal_form(latex):
 
 
 def write_latex(sym, notation):
-    """Readable LaTeX with a safety net: the pretty form is used only if it
-    parses back to the same normal form as the standard output."""
+    """Readable LaTeX with a safety net: a candidate spelling is used only
+    if it reads back as the expression it was asked to write.
+
+    The two candidates used to be compared only against EACH OTHER, which
+    silently assumed at least one of them round-trips. Once the normal
+    form learned to keep function-argument spans apart, that assumption
+    was measurably false: the raw writer spells `\\sin 2x` as
+    `\\sin {2}x` — the integer value repr's braces close the argument
+    span, so the string re-reads as `sin(2) x` (0.364 where the
+    expression is 0.717). The pretty form was right and was being kept
+    for the wrong reason. Comparing each candidate against the SOURCE
+    graph instead names which one is faithful.
+
+    Delimiter-redundant brackets are dropped first, so a rule-built
+    formula's syntax-protection wrappers do not survive into the ledger
+    artifact (`\\sqrt{\\left(x^{2}+1\\right)}`, `e^{\\left(2x\\right)}`)."""
+    sym, notation = _peel_redundant_brackets(sym, notation)
     std = _write_std(sym, notation)
     try:
         pretty = ' '.join(PrettyWriter(notation)(sym).split())
@@ -491,6 +624,13 @@ def write_latex(sym, notation):
         return std
     try:
         if _normal_form(pretty) == _normal_form(std):
+            return pretty
+    except PrimitiveError:
+        pass
+    # the candidates disagree, so at most one of them re-reads correctly
+    try:
+        source = _dag_normal_form(sym, notation)
+        if _normal_form(pretty) == source:
             return pretty
     except PrimitiveError:
         pass

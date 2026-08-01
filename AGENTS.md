@@ -273,6 +273,25 @@ if isinstance(n, IntegerValue): ...
 - Use `primitives.write_latex` for user-visible verified results and notebook
   history/backreferences. Direct `LaTexWriter` is the raw/debug spelling and
   accumulates transparent INDEX brace groups across repeated parse/write hops.
+  It validates each candidate spelling against the SOURCE graph, not merely
+  against the other candidate — comparing the two to each other assumes at
+  least one round-trips, and that is measurably false: `LaTexWriter` spells
+  `\sin 2x` as `\sin {2}x`, whose integer value repr closes the argument span,
+  so the string re-reads as `sin(2) x`. It also drops delimiter-redundant
+  brackets (`\sqrt{\left(x^2+1\right)}` → `\sqrt{x^2+1}`), which is safe only
+  inside a `{}` slot; see the capture landmine below.
+- LANDMINE: function application is a READING CONVENTION over a flat P_LIST,
+  not a DAG node, so an argument's grouping is the ONLY thing separating
+  `\cos(x) y` from `\cos x y` (which evaluate to 0.449 and 0.990 at x=0.3,
+  y=0.47 — the argument captures rightward). Stripping brackets for a normal
+  form therefore erased a real boundary, and `same_expression`, `_chain_links`,
+  `_same_spelling` and ledger duplicate detection all read the two as one
+  expression. `_GroupStripper` now re-encodes every function-argument span
+  explicitly, taking the span from the oracle's own `_func_arg_span` so the
+  boundary can never disagree with the leg that checks it. Sum/product
+  boundaries were never affected (the writer braces composite operands itself,
+  so `(a+b)c` prints `{a+b}c`). Never peel a bracket that follows a function
+  head without re-asking that question.
 - Use `primitives.display_latex` when rich-rendering an already-recorded LaTeX
   string. It derives display-only `*` → `\cdot` spelling behind a structural
   parse check; never rewrite the persisted ledger input/result or its hash.
