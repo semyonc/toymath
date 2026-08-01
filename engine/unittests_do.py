@@ -5111,6 +5111,20 @@ class TestPromptCommandModel(unittest.TestCase):
                 self.assertTrue(command.input_types)
                 self.assertTrue(command.output_types)
 
+    def test_factor_command_boundary(self):
+        # factor! is a whole-cell derivation command like simplify!: the
+        # agent chooses the factors, so it must never be inline-spliceable,
+        # and its typed boundary refuses relation input before any agent run.
+        import prompt_commands as pc
+        cmd = pc.load_commands().get('factor')
+        self.assertIsNotNone(cmd)
+        self.assertFalse(cmd.expr)
+        self.assertIsNone(cmd.direct)
+        self.assertEqual(cmd.input_types, ('expression', 'relation'))
+        self.assertEqual(cmd.output_types, ('derivation',))
+        self.assertEqual(pc.signature(cmd),
+                         'expression|relation -> derivation')
+
     def test_prove_mode_parsed_and_cannot_compose(self):
         import prompt_commands as pc
         cmd = pc.parse_command(
@@ -5264,6 +5278,20 @@ class TestPromptCommandDispatch(unittest.TestCase):
             self.shell.exec('simplify! {expand! x=1}', 1,
                             add_to_history=True)
         self.assertIn('expected expression input, got relation', self._html())
+
+    def test_factor_command_dispatches_and_types_its_input(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('factor! x^3-3x^2+4', 1, add_to_history=True)
+        self.assertIn('Factor x^3-3x^2+4', box['instruction'])
+        # the typed boundary refuses a shape no factoring works on,
+        # before any agent run
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('agent must not run')):
+            self.shell.exec('factor! \\{1,2\\}', 2, add_to_history=True)
+        self.assertIn('expected expression or relation input, got collection',
+                      self._html())
 
     def test_unregistered_prefix_is_not_a_command(self):
         # `n!` (factorial) must fall through to the math path
