@@ -307,6 +307,8 @@ Saved notebook commands are Markdown templates in `commands/`:
 name: int
 description: Apply symbolic integration step by step
 expr: true
+input: expression
+output: expression
 ---
 Apply symbolic integration for $ARGUMENTS ...
 ```
@@ -322,9 +324,12 @@ They form three execution tiers:
    `prove!` adds the claim-closure requirement.
 
 Tier 1 is set by `direct: <primitive>` in the command's front matter (which
-also implies `expr: true`); tier 3's `prove!` by `mode: prove`. Everything
-else is a tier-2 template, so the list above is what `commands/` currently
-ships rather than a closed set.
+also implies `expr: true`); tier 3's `prove!` by `mode: prove`. `input` and
+`output` declare the command boundary using parser-owned shapes such as
+`expression`, `relation`, `relation-list`, `pair`, and `collection`, with
+`derivation` marking a command whose checked chain is the artifact rather
+than an inline value. Everything else is a tier-2 template, so the list above
+is what `commands/` currently ships rather than a closed set.
 
 Expression-capable commands compose inline:
 
@@ -337,6 +342,18 @@ The resolver works inside-out, splices only verified results with safe
 grouping, and sends the combined expression through `expand` so the glue gets
 its own oracle check. Certificates compose locally: each sub-command keeps its
 own steps, while the final check certifies only the splice arithmetic.
+
+Typed inputs also compose into whole-derivation commands without making those
+commands inline values. For example,
+
+```text
+solve! {expand! (x+1)^2} = 4
+```
+
+first records the inner expansion and a checked relation-side splice, then
+hands `x^2+2x+1=4` to `solve!`. An incompatible boundary—such as a relation
+fed to `int!`—is refused before an agent run. Personal command files that omit
+the type fields retain the earlier permissive behavior for compatibility.
 
 ## Command-line interface
 

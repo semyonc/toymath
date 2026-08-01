@@ -39,6 +39,78 @@ class ExprCommandError(Exception):
     failed/empty agent sub-run. Surfaced to the cell as a do! error."""
 
 
+def _type_root(sym, notation):
+    """Peel presentation-only groups for command-boundary classification."""
+    while True:
+        f = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if f is None or Notation.is_semantic_bracket(f):
+            return sym
+        sym = f.args[0]
+
+
+def _is_relation_tree(sym, notation):
+    sym = _type_root(sym, notation)
+    f = notation.get(sym)
+    if f is None:
+        return False
+    if f.sym == Notation.COMP:
+        return True
+    if f.sym in (Notation.C_LIST, Notation.A_LIST, Notation.O_LIST):
+        return bool(f.args) and all(
+            _is_relation_tree(item, notation) for item in f.args)
+    return False
+
+
+def math_type(sym, notation):
+    """Top-level parser-owned type used at a notebook-command boundary.
+
+    This deliberately does not infer mathematical meaning.  It distinguishes
+    the notation shapes the parser already owns so, for example, a relation
+    produced by an inner command cannot be fed to an integration command.
+    """
+    sym = _type_root(sym, notation)
+    f = notation.get(sym)
+    if f is None:
+        return 'expression'
+    if f.sym == Notation.COMP:
+        return 'relation'
+    if f.sym in (Notation.C_LIST, Notation.A_LIST, Notation.O_LIST):
+        return 'relation-list' if _is_relation_tree(sym, notation) else 'list'
+    if f.sym == Notation.PAIR:
+        return 'pair'
+    if f.sym == Notation.COLLECTION:
+        return 'collection'
+    return 'expression'
+
+
+def latex_type(latex):
+    """Parse and classify one command input/output LaTeX string."""
+    import primitives
+    sym, notation = primitives.parse_latex(latex, allow_ellipsis=True)
+    return math_type(sym, notation)
+
+
+def _validate_declared_type(cmd, latex, declared, boundary):
+    if not declared:             # legacy personal command: old permissive path
+        return None
+    actual = latex_type(latex)
+    if actual not in declared:
+        expected = ' or '.join(declared)
+        raise ExprCommandError(
+            f'{cmd.name}!: expected {expected} {boundary}, got {actual}')
+    return actual
+
+
+def validate_command_input(cmd, latex):
+    return _validate_declared_type(
+        cmd, latex, getattr(cmd, 'input_types', ()), 'input')
+
+
+def validate_command_output(cmd, latex):
+    return _validate_declared_type(
+        cmd, latex, getattr(cmd, 'output_types', ()), 'output')
+
+
 def _split_side_condition(arg_latex):
     """(core_latex, condition_latex or None): a TRAILING bracketed
     relation in a command argument is a stated side condition, not a
@@ -150,6 +222,7 @@ class ExprResolver(Replicator):
         # so evaluation is naturally inner-to-outer
         arg_sym = self.enter_or_expr_list(args[0])
         arg_latex = LaTexWriter(self.output_notation)(arg_sym).strip()
+        validate_command_input(cmd, arg_latex)
         return self._splice(cmd, arg_sym, self._run(cmd, arg_latex, var))
 
     def _param_var(self, cmd, params):
@@ -177,6 +250,7 @@ class ExprResolver(Replicator):
             return self.cache[key]        # identical sub-expression: no re-call
         if getattr(cmd, 'direct', None):
             result = self._run_direct(cmd, arg_latex, var)
+            validate_command_output(cmd, result)
             self.cache[key] = result
             return result
         if self.calls >= self.max_calls:
@@ -213,6 +287,7 @@ class ExprResolver(Replicator):
                 f'{cmd.name}! did not close: its final value comes from a '
                 'verified step that is not connected to the requested '
                 'expression by a checked chain', res))
+        validate_command_output(cmd, result)
         self.cache[key] = result
         return result
 

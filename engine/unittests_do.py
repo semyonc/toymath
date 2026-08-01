@@ -5077,6 +5077,40 @@ class TestPromptCommandModel(unittest.TestCase):
             '---\nname: b\ndescription: d\nexpr: true\n---\n$ARGUMENTS', 'b')
         self.assertTrue(inline.expr)
 
+    def test_command_input_output_types_parsed(self):
+        import prompt_commands as pc
+        cmd = pc.parse_command(
+            '---\nname: typed\ndescription: d\n'
+            'input: [expression, relation]\noutput: derivation\n'
+            '---\n$ARGUMENTS', 'typed')
+        self.assertEqual(cmd.input_types, ('expression', 'relation'))
+        self.assertEqual(cmd.output_types, ('derivation',))
+        self.assertEqual(pc.signature(cmd),
+                         'expression|relation -> derivation')
+
+    def test_unknown_command_type_rejected(self):
+        import prompt_commands as pc
+        with self.assertRaisesRegex(ValueError, 'unknown command input type'):
+            pc.parse_command(
+                '---\nname: typed\ndescription: d\ninput: theorem\n'
+                '---\n$ARGUMENTS', 'typed')
+
+    def test_inline_command_cannot_return_derivation(self):
+        import prompt_commands as pc
+        with self.assertRaisesRegex(ValueError, 'cannot return a derivation'):
+            pc.parse_command(
+                '---\nname: typed\ndescription: d\nexpr: true\n'
+                'output: derivation\n---\n$ARGUMENTS', 'typed')
+
+    def test_committed_commands_declare_both_type_boundaries(self):
+        import prompt_commands as pc
+        commands = pc.load_commands()
+        self.assertTrue(commands)
+        for command in commands.values():
+            with self.subTest(command=command.name):
+                self.assertTrue(command.input_types)
+                self.assertTrue(command.output_types)
+
     def test_prove_mode_parsed_and_cannot_compose(self):
         import prompt_commands as pc
         cmd = pc.parse_command(
@@ -5198,6 +5232,39 @@ class TestPromptCommandDispatch(unittest.TestCase):
         self.assertIn('5', box['instruction'])
         self.assertNotIn('[[1]]', box['instruction'])
 
+    def test_plain_command_resolves_typed_inline_input_before_agent(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec(
+                'solve! {expand! (x+1)^2}=4', 1, add_to_history=True)
+        self.assertNotIn('expand!', box['instruction'])
+        self.assertIn('x^{2}+2x+1 = 4', box['instruction'])
+        # One checked step produces the inner value; another checks its
+        # placement on the relation side before solve! sees the input.
+        self.assertEqual([s['op'] for s in self.shell.ledger.steps],
+                         ['expand', 'expand'])
+        self.assertEqual(self.shell.ledger.steps[-1]['result'],
+                         'x^{2}+2x+1 = 4')
+        self.assertEqual(self.shell.ledger.replay()['status'], 'verified')
+
+    def test_prove_goal_uses_the_resolved_typed_input(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec(
+                'prove! {expand! (x-1)^2}=x^2-2x+1', 1,
+                add_to_history=True)
+        self.assertNotIn('expand!', box['kwargs']['proof_goal'])
+        self.assertEqual(box['kwargs']['proof_goal'],
+                         'x^{2}-2x+1 = x^{2}-2x+1')
+
+    def test_plain_command_refuses_incompatible_resolved_input(self):
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('outer agent must not run')):
+            self.shell.exec('simplify! {expand! x=1}', 1,
+                            add_to_history=True)
+        self.assertIn('expected expression input, got relation', self._html())
+
     def test_unregistered_prefix_is_not_a_command(self):
         # `n!` (factorial) must fall through to the math path
         called = []
@@ -5220,6 +5287,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
         out = self._html()
         self.assertIn('notebook commands', out)
         self.assertIn('int', out)
+        self.assertIn('expression -&gt; expression', out)
         self.assertIn('model!', out)
 
     def test_model_command_sets_configured_routing_for_later_runs(self):
@@ -5806,6 +5874,41 @@ class TestDirectCommands(unittest.TestCase):
             self.shell.exec('{expand! {diff! x^3} x}', 1, add_to_history=True)
         final = self.shell.ledger.steps[-1]
         self.assertEqual(final['result'].replace(' ', ''), '3x^{3}')
+
+    def test_typed_outer_expr_refuses_relation_input_before_agent(self):
+        with mock.patch.object(
+                agent_do, 'run_instruction',
+                lambda *a, **k: self.fail('integration agent must not run')):
+            self.shell.exec('{int! {expand! x=1}}', 1,
+                            add_to_history=True)
+        self.assertIn('expected expression input, got relation', self._html())
+
+    def test_declared_output_type_is_checked_before_splicing(self):
+        import expr_commands
+        import primitives
+        import prompt_commands as pc
+        from notation import Notation
+        cmd = pc.parse_command(
+            '---\nname: ev\ndescription: d\ndirect: evaluate\n'
+            'input: expression\noutput: relation\n---\ndocs', 'ev')
+        sym, notation = primitives.parse_latex(
+            '{ev! 2^{3}}', command_names={'ev': cmd})
+        resolver = expr_commands.ExprResolver(
+            notation, Notation(), {'ev': cmd}, None, None, _never)
+        with self.assertRaisesRegex(
+                expr_commands.ExprCommandError,
+                'expected relation output, got expression'):
+            resolver(sym)
+
+    def test_command_type_distinguishes_judgment_from_relation_list(self):
+        # Arithmetic evidence plus an unknown prose-like predicate is not a
+        # typed classification judgment.  The command boundary must not call
+        # it a relation list merely because it uses \land syntax.
+        import expr_commands
+        self.assertEqual(
+            expr_commands.latex_type(
+                r'x=-1 \land \operatorname{maximum}(x)'),
+            'list')
 
     def test_minted_constant_excluded_from_var_inference(self):
         # {diff! {int! x^3}}: the inner splice contains the minted C; the

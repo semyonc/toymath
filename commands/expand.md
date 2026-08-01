@@ -2,6 +2,8 @@
 name: expand
 description: Expand/normalize the argument (zero-token, verified expand primitive)
 direct: expand
+input: [expression, relation]
+output: [expression, relation]
 ---
 Expand $ARGUMENTS.
 

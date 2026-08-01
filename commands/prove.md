@@ -2,6 +2,8 @@
 name: prove
 description: Establish the claim through a connected chain of verified steps, reporting any gap honestly
 mode: prove
+input: relation
+output: derivation
 ---
 Prove $ARGUMENTS — that is, connect the claim to checked ledger steps.
 

@@ -111,6 +111,14 @@ Never give a `commands/*.md` file the same name as a registered `cmd_*`
 action (e.g. `mul`) — it would silently reroute every cell containing that
 command away from the fixed-point engine.
 
+Committed notebook commands declare parser-owned `input`/`output` types in
+frontmatter. `expr: true` controls whether the RESULT may be spliced;
+compatible expression-producing commands may also appear inside the typed
+input of a non-inline derivation command (`solve! {expand! ...}=...`). The
+resolver checks the assembled glue before the outer agent runs. `derivation`
+is output-only and never spliceable; command types do not create new
+mathematical judgment semantics.
+
 ## Extending the Verified Tactic Layer
 
 Do not add another function tool to `engine/agent_do.py`, another handwritten

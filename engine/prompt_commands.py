@@ -43,8 +43,19 @@ _COMMANDS_DIR = os.path.join(
 
 PromptCommand = namedtuple('PromptCommand',
                            ('name', 'description', 'template', 'expr',
-                            'fresh', 'direct', 'mode'),
-                           defaults=((), None, None))
+                            'fresh', 'direct', 'mode', 'input_types',
+                            'output_types'),
+                           defaults=((), None, None, (), ()))
+
+# These are command-boundary types, not a second mathematical type system.
+# They name the top-level notation shapes that the parser already owns.  A
+# command may accept more than one shape (``solve!`` accepts an expression to
+# be set to zero as well as a written relation), while ``derivation`` is an
+# output-only marker for commands whose chain is the artifact and therefore
+# cannot be spliced as a value.
+MATH_TYPES = frozenset(('expression', 'relation', 'relation-list', 'list',
+                        'pair', 'collection'))
+OUTPUT_TYPES = MATH_TYPES | frozenset(('derivation',))
 
 
 def _split_frontmatter(text):
@@ -99,6 +110,10 @@ def parse_command(text, fallback_name):
         if expr:
             raise ValueError('prove-mode commands cannot be expression '
                              'commands')
+    input_types = _parse_types(meta, 'input', MATH_TYPES)
+    output_types = _parse_types(meta, 'output', OUTPUT_TYPES)
+    if expr and 'derivation' in output_types:
+        raise ValueError('an inline expr command cannot return a derivation')
     if _PLACEHOLDER not in body and direct is None:
         raise ValueError(f'template body does not contain {_PLACEHOLDER}')
     # fresh: symbols the command MINTS (an integration constant C). The
@@ -114,7 +129,43 @@ def parse_command(text, fallback_name):
         if not _NAME_RE.match(n):
             raise ValueError(f'invalid fresh symbol name {n!r}')
     return PromptCommand(name, description, body.strip(), expr, fresh,
-                         direct, mode)
+                         direct, mode, input_types, output_types)
+
+
+def _parse_types(meta, field, allowed):
+    """Normalize one optional frontmatter type to an ordered tuple.
+
+    Missing fields stay empty for compatibility with existing personal
+    command files.  Committed commands declare both sides explicitly; an
+    empty tuple means the old permissive boundary rather than a guessed type.
+    """
+    raw = meta.get(field)
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError(f'frontmatter {field} must be a type name or a '
+                         'non-empty list of type names')
+    result = []
+    for value in raw:
+        name = str(value).strip().lower()
+        if name not in allowed:
+            choices = ', '.join(sorted(allowed))
+            raise ValueError(f'unknown command {field} type {name!r} '
+                             f'(available: {choices})')
+        if name not in result:
+            result.append(name)
+    return tuple(result)
+
+
+def signature(cmd):
+    """Compact public spelling of a command's declared type boundary."""
+    if not cmd.input_types and not cmd.output_types:
+        return None
+    left = '|'.join(cmd.input_types) if cmd.input_types else '?'
+    right = '|'.join(cmd.output_types) if cmd.output_types else '?'
+    return f'{left} -> {right}'
 
 
 def load_commands(directory=_COMMANDS_DIR):

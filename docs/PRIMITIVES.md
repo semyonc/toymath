@@ -247,6 +247,17 @@ The final glue check certifies only the expression assembled from already
 recorded sub-results. Composition depth does not turn prose or retyped values
 into evidence.
 
+Notebook commands declare parser-owned `input`/`output` types in their
+frontmatter. This separates two questions the older `expr: true` flag
+conflated: whether a command returns a spliceable mathematical value, and
+whether a whole-derivation command may consume an input containing such
+values. A compatible nested input is resolved inside-out and gets the same
+oracle-checked glue before the outer command runs; a top-level type mismatch
+is refused. The special output type `derivation` means the checked chain is
+the artifact and cannot be spliced as a value. These boundary types do not
+invent new mathematical judgments—a classification such as maximum/minimum
+still requires its own notation and mechanically checked tactic.
+
 ## Mathematical representation
 
 The parser produces a notation DAG rather than a conventional syntax tree.

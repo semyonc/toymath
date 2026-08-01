@@ -1,6 +1,8 @@
 ---
 name: simplify
 description: Find a simpler equal form, every move mechanically checked
+input: expression
+output: derivation
 ---
 Find a simpler form of $ARGUMENTS. Every move must be a verified step; the
 final form is the answer, and it is only worth having if the chain that

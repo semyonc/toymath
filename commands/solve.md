@@ -1,6 +1,8 @@
 ---
 name: solve
 description: Solve the equation move by move, recording every assumption
+input: [expression, relation, relation-list]
+output: derivation
 ---
 Solve $ARGUMENTS, showing every algebraic move as a separate verified step.
 
