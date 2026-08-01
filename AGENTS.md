@@ -48,6 +48,7 @@ Two layers coexist:
 | `engine/LatexWriter.py` | Notation → LaTeX |
 | `engine/comparer.py` | Structural pattern matching (used by lemmas/rewrite) |
 | `engine/cmd_mul.py`, `engine/cmd_add.py` | Legacy rewrite commands: fraction/power rules |
+| `engine/classic_canonical.py` | Bounded adapter letting `mul!`/`add!` share `polyrat`'s canonical forms on their commutative rational fragment; unsupported notation falls back to the procedural path |
 | `engine/frac_utils.py`, `engine/value.py` | Fraction utilities; IntegerValue/FracValue/FloatValue |
 | `engine/prolog.py` | Legacy logic layer — do not build new features on it |
 | `engine/mathShell.py` | Kernel shell: cell dispatch (`do!`, notebook commands, math cells) |
@@ -148,8 +149,14 @@ pytest engine/unittests.py                          # legacy core
 pytest engine/unittests_frac.py                     # fractions
 pytest engine/unittests_primitives.py               # verified-derivation primitives
 pytest engine/unittests_do.py                       # do! endpoint (offline scripted agent)
+pytest engine/unittests_tactics.py                  # registry/CLI/skill-gating surface
+pytest engine/unittests_cell_input.py               # cell readings and rendered input
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```
+
+`python_files` in `pyproject.toml` is an explicit allowlist: a new
+`unittests_*.py` runs only once it is added there, so add it in the same
+commit that creates it.
 
 ## Legacy Engine: Fixed-Point Iteration
 

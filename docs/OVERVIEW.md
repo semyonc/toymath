@@ -266,9 +266,10 @@ the account's own default rather than a model id hard-coded into ToyMath.
 A cell holds LaTeX, and a dense formula is hard to read as source. In
 JupyterLab, a ToyMath cell shows its formula typeset while it is not being
 edited, and its source the moment it is — the bargain a markdown cell makes,
-applied to code cells. Double-click (or <kbd>Enter</kbd>) opens the source;
-leaving the cell renders it again. *Render ToyMath Cell Input* in the command
-palette turns this off for a notebook.
+applied to code cells. One click (or <kbd>Enter</kbd>) opens the source, with
+the cursor placed where you clicked; leaving the cell renders it again.
+*Render ToyMath Cell Input* in the command palette turns this off for a
+notebook.
 
 The kernel decides what a cell renders as, because the kernel owns the
 parser: the rendered formula is what the engine understood, not a second
@@ -314,10 +315,16 @@ They form three execution tiers:
 
 1. **Direct primitive:** `expand!` and `diff!` run one verified operation with
    no model call.
-2. **Tactic template:** `int!`, `lim!`, and `solve!` seed a focused agent run;
-   the agent loads the relevant skill and records each move.
+2. **Tactic template:** `int!`, `lim!`, `solve!`, `conv!`, and `simplify!` seed
+   a focused agent run; the agent loads the relevant skill and records each
+   move.
 3. **Whole derivation:** `do!` accepts an unrestricted natural-language goal;
    `prove!` adds the claim-closure requirement.
+
+Tier 1 is set by `direct: <primitive>` in the command's front matter (which
+also implies `expr: true`); tier 3's `prove!` by `mode: prove`. Everything
+else is a tier-2 template, so the list above is what `commands/` currently
+ships rather than a closed set.
 
 Expression-capable commands compose inline:
 
@@ -351,8 +358,10 @@ python toymath_cli.py tactics --skill integration
 python toymath_cli.py describe integrate_by_parts
 ```
 
-Ledger-control commands (`claim`, `conclude`, `branch`, `show`, `replay`)
-remain explicit CLI operations rather than math tactics.
+Ledger-control commands (`claim`, `conclude`, `open`, `branch`, `show`,
+`replay`) remain explicit CLI operations rather than math tactics. `open`
+records a run-level open outcome — the honest "no certified result, and here
+is the exact missing move" ending.
 
 ## Plotting
 
@@ -503,6 +512,7 @@ labextension/              committed prebuilt JupyterLab extension
 engine/polyrat.py          canonical rational-function core
 engine/expr_commands.py    inline command composition
 engine/prompt_commands.py  commands/*.md discovery
+engine/cell_input.py       cell readings: statements and rendered input
 engine/plot_sandbox.py     figure backend seam (Pyodide plots, TikZ SVG)
 engine/processor.py        classic fixed-point engine
 toymath_cli.py             generated tactic CLI + ledger controls
