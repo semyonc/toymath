@@ -5755,6 +5755,55 @@ class TestWrittenLatexReadsBackAsItsSource(unittest.TestCase):
         self.assertEqual(P.write_latex(sym, notation), '\\sin 2x')
 
 
+class TestChainedComparison(unittest.TestCase):
+    # gen 70 (contrarian): the "between" answer a solve! run needs to state
+    # is spelled `-1 < x < 1` by every user and every textbook, and that was
+    # a SYNTAX ERROR. The backlog item asking for conjunction solutions
+    # proposed C_LIST-inside-O_LIST and never noticed that the parser
+    # already speaks \land natively, nor that the user's own spelling did
+    # not parse at all. A chain desugars to the A_LIST the parser has, so
+    # no new node, writer, or Replicator dispatch is involved.
+
+    def chain(self, latex):
+        sym, notation = P.parse_latex(latex)
+        return P.write_latex(sym, notation)
+
+    def test_the_spelling_a_user_writes_parses(self):
+        self.assertEqual(self.chain('-1 \\lt x \\lt 1'),
+                         '-1 \\lt x \\land x \\lt 1')
+        self.assertEqual(self.chain('-1 < x < 1'),
+                         '-1 \\lt x \\land x \\lt 1')
+
+    def test_mixed_strictness(self):
+        self.assertEqual(self.chain('0 \\le x \\lt 5'),
+                         '0 \\le x \\land x \\lt 5')
+
+    def test_it_is_an_a_list_of_two_relations(self):
+        sym, notation = P.parse_latex('-1 \\lt x \\lt 1')
+        f = notation.getf(sym, Notation.A_LIST)
+        self.assertIsNotNone(f)
+        self.assertEqual(len(f.args), 2)
+        for member in f.args:
+            self.assertIsNotNone(notation.getf(member, Notation.COMP))
+
+    def test_non_inequality_comparers_chain_too(self):
+        self.assertEqual(self.chain('a = b = c'), 'a=b \\land b=c')
+
+    def test_binder_arrows_are_untouched(self):
+        # `\to` is a comparer, so the limit binder is the case that would
+        # break if the chain rule reached inside a subscript
+        r = Limits.limit_table('\\lim_{x \\to 0} \\frac{\\sin x}{x}')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], '1')
+
+    def test_the_union_oracle_still_cannot_take_one(self):
+        # PARSING is necessary and NOT sufficient: assembling a between
+        # answer still needs the conjunction-disjunct mechanism. Pinning
+        # this keeps the two halves of that backlog item honestly apart.
+        r = P.numeric_union_check('x^2 \\lt 1', ['-1 \\lt x \\lt 1'])
+        self.assertEqual(r['status'], 'skipped')
+
+
 class TestDerivativeKeepsTheDenominatorAsWritten(unittest.TestCase):
     # The quotient rule knows its denominator is a power of the one it was
     # handed; canonicalizing expanded that away, so d/dx x/(x^2+1)^3 printed
