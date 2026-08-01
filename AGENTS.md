@@ -280,6 +280,17 @@ if isinstance(n, IntegerValue): ...
   so the string re-reads as `sin(2) x`. It also drops delimiter-redundant
   brackets (`\sqrt{\left(x^2+1\right)}` → `\sqrt{x^2+1}`), which is safe only
   inside a `{}` slot; see the capture landmine below.
+- `differentiate` re-spells a quotient's canonical denominator as a power of
+  the base the INPUT wrote (`d/dx x/(x^2+1)^3` gives `(x^2+1)^4`, not a
+  degree-8 polynomial). This is not the banned general `factor`: the base is
+  READ off the input, never searched for, and a denominator the input did not
+  write as a sum is left expanded. It runs AFTER canonicalization, so every
+  cancellation has already happened (`d/dx x^2/x` is still `1`), and it is
+  admitted only on the exact sparse-polynomial identity `base**k == den`.
+  The result is deliberately NOT polyrat-canonical; `expand` converges it back
+  and `equal_exprs` equates the spellings, so composite glue, chain linkage,
+  the FTC door's re-differentiation, and replay of older ledgers are all
+  unaffected (each measured, not inherited).
 - LANDMINE: function application is a READING CONVENTION over a flat P_LIST,
   not a DAG node, so an argument's grouping is the ONLY thing separating
   `\cos(x) y` from `\cos x y` (which evaluate to 0.449 and 0.990 at x=0.3,

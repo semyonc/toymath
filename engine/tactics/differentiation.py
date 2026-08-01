@@ -267,6 +267,97 @@ def _diff_power(f, notation, var):
     return expr, _d_mul(expr, _paren(inner))
 
 
+def _written_denominator_base(expr):
+    """The base the INPUT wrote its denominator with, or None.
+
+    `\\frac{x}{(x^2+1)^3}` gives `x^2+1`. Deliberately a READING of the
+    input, never a discovery: the base is not searched for, so nothing
+    here is the general `factor` the primitives layer does not have.
+    Monomial denominators return None — `x^2` is already both canonical
+    and the shorter spelling, so re-presenting it as `(x)^2` is a loss."""
+    try:
+        sym, notation = parse_latex(expr)
+    except PrimitiveError:
+        return None
+    f = notation.get(sym)
+    if f is None or f.sym.name not in FRAC_NAMES or len(f.args) != 2:
+        return None
+    den = _peel_wrappers(f.args[1], notation)
+    index = notation.getf(den, Notation.INDEX)
+    if index is not None:
+        den = _peel_wrappers(index.args[0], notation)
+    inner = notation.get(den)
+    if inner is None or inner.sym != Notation.S_LIST:
+        return None
+    return write_latex(den, notation)
+
+
+def _peel_wrappers(sym, notation):
+    """Drop grouping wrappers, keeping bracket OPERATORS intact."""
+    for _ in range(8):
+        g = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if g is None or Notation.is_semantic_bracket(g):
+            break
+        sym = g.args[0]
+    return sym
+
+
+def _refactor_denominator(expr, result):
+    """Re-spell a canonical derivative denominator as a power of the base
+    the input wrote, or return the result unchanged.
+
+    The quotient rule KNOWS the denominator is a power of the one it was
+    handed; canonicalizing expands that away, so `d/dx x/(x^2+1)^3`
+    printed a degree-8 polynomial where the textbook keeps `(x^2+1)^4`.
+    This runs AFTER canonicalization, so every cancellation has already
+    happened correctly and only the SPELLING of the surviving denominator
+    changes — `d/dx x^2/x` still returns 1, not a fraction.
+
+    The re-spelling is admitted only on an EXACT algebraic identity
+    (`base**k == den` as sparse polynomials, no sampling), and the
+    finished result is still independently re-checked against the source
+    by the central-difference oracle."""
+    base_latex = _written_denominator_base(expr)
+    if base_latex is None:
+        return result
+    try:
+        rsym, rnot = parse_latex(result)
+    except PrimitiveError:
+        return result
+    rf_node = rnot.get(rsym)
+    if rf_node is None or rf_node.sym.name not in FRAC_NAMES \
+            or len(rf_node.args) != 2:
+        return result
+    try:
+        base_rf = to_ratfunc(*parse_latex(base_latex))
+        den_rf = to_ratfunc(rf_node.args[1], rnot)
+    except (PrimitiveError, NotInFragment, ZeroDivisionError):
+        return result
+    if not (base_rf.den.is_const() and den_rf.den.is_const()):
+        return result
+    base, den = base_rf.num, den_rf.num
+    base_deg, den_deg = base.degree(), den.degree()
+    if base_deg <= 0 or den_deg <= 0 or den_deg % base_deg:
+        return result
+    k = den_deg // base_deg
+    if k < 2:
+        return result                     # nothing compressed
+    try:
+        if not (base ** k == den):
+            return result
+    except (ArithmeticError, TypeError):
+        return result
+    # the parser wraps each \frac argument in a transparent group; writing
+    # that node directly would nest it inside the braces added below
+    num_latex = write_latex(_peel_wrappers(rf_node.args[0], rnot), rnot)
+    candidate = f'\\frac{{{num_latex}}}{{\\left({base_latex}\\right)^{{{k}}}}}'
+    try:
+        csym, cnot = parse_latex(candidate)
+    except PrimitiveError:
+        return result
+    return write_latex(csym, cnot)
+
+
 def differentiate(expr, var):
     """d/d(var) with ~20 mechanical rules; canonicalizes rational results."""
     args = {'expr': expr, 'var': var}
@@ -281,8 +372,12 @@ def differentiate(expr, var):
         drf = RatFunc(dnum, rf.den * rf.den)
         out_n = Notation()
         result = write_latex(ratfunc_to_notation(drf, out_n), out_n)
-        rec = _result('differentiate', args, expr, result,
-                      extra={'method': 'polyrat'})
+        extra = {'method': 'polyrat'}
+        refactored = _refactor_denominator(expr, result)
+        if refactored != result:
+            result = refactored
+            extra['denominator'] = 'as written'
+        rec = _result('differentiate', args, expr, result, extra=extra)
         rec['check'] = _derivative_check(expr, result, var)
         return rec
     except (NotInFragment, ZeroDivisionError):
@@ -314,6 +409,10 @@ def differentiate(expr, var):
     extra = {'method': 'rules'}
     if cleanup_check is not None:
         extra['cleanup'] = 'expand'
+    refactored = _refactor_denominator(expr, result)
+    if refactored != result:
+        result = refactored
+        extra['denominator'] = 'as written'
     rec = _result('differentiate', args, expr, result,
                   assumptions=assumptions, extra=extra)
     derivative_check = _derivative_check(expr, result, var)

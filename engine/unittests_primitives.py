@@ -5755,6 +5755,86 @@ class TestWrittenLatexReadsBackAsItsSource(unittest.TestCase):
         self.assertEqual(P.write_latex(sym, notation), '\\sin 2x')
 
 
+class TestDerivativeKeepsTheDenominatorAsWritten(unittest.TestCase):
+    # The quotient rule knows its denominator is a power of the one it was
+    # handed; canonicalizing expanded that away, so d/dx x/(x^2+1)^3 printed
+    # a degree-8 polynomial where the textbook keeps (x^2+1)^4. The
+    # re-spelling runs AFTER canonicalization (so cancellation has already
+    # happened) and is admitted only on the EXACT identity base**k == den.
+    # Nothing is factored: the base is READ off the input, never discovered.
+
+    def d(self, expr, var='x'):
+        r = Differentiation.differentiate(expr, var)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree', expr)
+        return r['result']
+
+    def test_polyrat_path_keeps_the_base(self):
+        self.assertEqual(self.d('\\frac{x}{x^2+1}'),
+                         '\\frac {-x^{2}+1} {\\left (x^{2}+1 \\right )^{2}}')
+
+    def test_power_denominator_gains_exactly_one(self):
+        self.assertEqual(self.d('\\frac{x}{(x^2+1)^3}'),
+                         '\\frac {-5x^{2}+1} {\\left (x^{2}+1 \\right )^{4}}')
+        self.assertEqual(self.d('\\frac{1}{(x+1)^2}'),
+                         '\\frac {-2} {\\left (x+1 \\right )^{3}}')
+
+    def test_rules_path_gets_it_too(self):
+        # the rules path canonicalizes through core.expand, so it had the
+        # same expanded denominator -- one mechanism has to serve both
+        self.assertEqual(self.d('\\frac{e^x}{x^2+1}'),
+                         '\\frac {x^{2}e^x-2xe^x+e^x} '
+                         '{\\left (x^{2}+1 \\right )^{2}}')
+
+    def test_symbolic_coefficients(self):
+        self.assertEqual(self.d('\\frac{a}{bx+c}'),
+                         '\\frac {-ab} {\\left (bx+c \\right )^{2}}')
+
+    def test_a_monomial_denominator_is_left_alone(self):
+        # x^2 is both canonical and the shorter spelling; (x)^2 is a loss
+        self.assertTrue(self.d('\\frac{\\sin x}{x}').endswith('{x^{2}}'))
+
+    def test_cancellation_still_wins(self):
+        # runs after canonicalization, so a derivative that collapses to a
+        # non-fraction is never dressed back up as one
+        self.assertEqual(self.d('\\frac{x^2}{x}'), '1')
+        self.assertEqual(self.d('\\frac{x^2-1}{x-1}'), '1')
+
+    def test_a_non_sum_base_is_not_invented(self):
+        # (x+1)(x+2) would need factor tracking to re-present; refusing to
+        # guess is the invariant (no general `factor`)
+        self.assertTrue(
+            self.d('\\frac{x}{(x+1)(x+2)}').endswith(
+                '{x^{4}+6x^{3}+13x^{2}+12x+4}'))
+
+    def test_both_spellings_are_the_same_expression(self):
+        new = self.d('\\frac{x}{x^2+1}')
+        old = '\\frac {-x^{2}+1} {x^{4}+2x^{2}+1}'
+        eq = Core.equal_exprs(new, old)
+        self.assertEqual(eq.get('verdict'), 'yes')
+        # and expand still converges them onto one canonical form, so the
+        # composite glue and chain linkage are unaffected
+        self.assertEqual(Core.expand(new)['result'],
+                         Core.expand(old)['result'])
+
+    def test_recorded_form_is_flagged(self):
+        r = Differentiation.differentiate('\\frac{x}{x^2+1}', 'x')
+        self.assertEqual(r.get('denominator'), 'as written')
+        plain = Differentiation.differentiate('\\frac{\\sin x}{x}', 'x')
+        self.assertIsNone(plain.get('denominator'))
+
+    def test_the_ftc_door_still_matches_the_integrand(self):
+        # integrate_definite re-differentiates the antiderivative and
+        # compares by equal_exprs; that comparison must survive the new
+        # spelling in BOTH directions
+        for integrand in ('\\frac{-x^{2}+1}{\\left(x^{2}+1\\right)^{2}}',
+                          '\\frac{-x^{2}+1}{x^{4}+2x^{2}+1}'):
+            r = Integration.integrate_definite(
+                f'\\int_0^1 {integrand} \\, dx', 'x', '\\frac{x}{x^{2}+1}')
+            self.assertTrue(r['ok'], integrand)
+            self.assertEqual(r['check']['status'], 'agree', integrand)
+
+
 class TestDelimiterRedundantBracketsAreDropped(unittest.TestCase):
     # The rule builders parenthesize their factors for syntax protection.
     # Inside a {} slot -- a \sqrt argument, an INDEX dimension, a \frac or
