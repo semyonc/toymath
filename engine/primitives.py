@@ -1388,6 +1388,35 @@ def _relation_parts(latex):
     return comp.args[0], comp.args[1], rel, notation
 
 
+def _conjunction_parts(latex):
+    """Oracle-owned relation parts for one disjunct.
+
+    A plain relation is a one-member conjunction.  An ``A_LIST`` is the
+    first-class ``\\land`` shape (including a chained comparison lowered by
+    the parser), and every member must independently be a supported relation.
+    This parsing stays on the numeric leg; it deliberately does not reuse the
+    tactic-side case/provenance helpers.
+    """
+    sym, notation = parse_latex(latex)
+    while True:
+        wrapper = notation.vgetf(sym, [Notation.GROUP, Notation.V_GROUP])
+        if wrapper is None:
+            break
+        sym = wrapper.args[0]
+    head = notation.getf(sym, Notation.A_LIST)
+    members = list(head.args) if head is not None else [sym]
+    parts = []
+    for member in members:
+        comp = notation.getf(member, Notation.COMP)
+        if comp is None:
+            return None
+        rel = comp.sym.props.get('op')
+        if rel not in _ORACLE_REL:
+            return None
+        parts.append((comp.args[0], comp.args[1], rel, notation))
+    return parts
+
+
 def hypothesis_parts(assumption):
     """(lhs, rhs, direction) for an assumption that states a strict
     hypothesis, else None. direction is -1 for '<' and +1 for '>'."""
@@ -1647,14 +1676,21 @@ def _union_truths_at(env, tparts, dparts, tol):
     try:
         t = _relation_truth(numeric_eval(tl, tn, env),
                             numeric_eval(tr, tn, env), trel, tol)
-        truths = [_relation_truth(numeric_eval(dl, dn, env),
-                                  numeric_eval(dr, dn, env), drel, tol)
-                  for dl, dr, drel, dn in dparts]
+        conjunctions = []
+        for group in dparts:
+            truths = [
+                _relation_truth(numeric_eval(dl, dn, env),
+                                numeric_eval(dr, dn, env), drel, tol)
+                for dl, dr, drel, dn in group
+            ]
+            if any(truth is None for truth in truths):
+                return None
+            conjunctions.append(all(truths))
     except (EvalError, ZeroDivisionError, ValueError, OverflowError):
         return None
-    if t is None or any(d is None for d in truths):
+    if t is None:
         return None
-    return t, any(truths)
+    return t, any(conjunctions)
 
 
 def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
@@ -1771,11 +1807,13 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
                         tol=1e-6):
-    """Independently check that a disjunction of relations holds exactly
-    where the target relation holds.
+    """Independently check that a disjunction of relation conjunctions holds
+    exactly where the target relation holds.
 
-    An assembled union claims a biconditional: some disjunct is true at a
-    point if and only if the target is. The mismatch region of a wrong
+    A disjunct may be one relation or an ``A_LIST`` conjunction; its truth is
+    the AND of its member truths, and the union is the OR of the disjuncts.
+    An assembled union claims a biconditional: some complete disjunct is true
+    at a point if and only if the target is. The mismatch region of a wrong
     union is typically a bounded interval between roots, which a handful
     of random points can miss entirely — so the one-variable case also
     walks a fine deterministic sweep (uniform steps plus pole-clustered
@@ -1784,15 +1822,16 @@ def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
     one-sided evidence and reports `skipped`, not `agree`."""
     try:
         tparts = _relation_parts(target)
-        dparts = [_relation_parts(d) for d in disjuncts]
+        dparts = [_conjunction_parts(d) for d in disjuncts]
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
     if tparts is None or not dparts or any(p is None for p in dparts):
         return {'status': 'skipped', 'reason': 'not a supported relation'}
     tl, tr, trel, tn = tparts
     variables = free_symbols(tl, tn) | free_symbols(tr, tn)
-    for dl, dr, _drel, dn in dparts:
-        variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
+    for group in dparts:
+        for dl, dr, _drel, dn in group:
+            variables |= free_symbols(dl, dn) | free_symbols(dr, dn)
     agreed = 0
     holding = 0
     if len(variables) == 1:

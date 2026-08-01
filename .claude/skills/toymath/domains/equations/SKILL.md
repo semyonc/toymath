@@ -106,19 +106,25 @@ once: a claim whose chain mixes them is refused, and the ledger lists such
 hypotheses as alternatives rather than as one condition. When the cases end in
 different answers, finish with `cases_assemble`: propose their union as a
 `\lor` disjunction and pass the endpoint step of each case, in the order the
-union writes them. State each hypothesis in the spelling the answer should
-read — `x \gt 3`, not `x - 3 \gt 0` (both pin the factor's sign) — because a
-disjunct may only restate the endpoint or the hypothesis exactly as recorded. Each disjunct must restate what its case recorded — the
-endpoint when it stayed inside its hypothesis, or the hypothesis itself when
-the endpoint outgrew it (deriving `x \lt \frac{1}{2}` under `x \lt 0` solves
-that case as `x \lt 0`; assembling the raw endpoint there is a coverage error
-the check reports with a witness point). The union is checked to hold at
-exactly the points the stated relation does, and a successful assembly
-discharges the case hypotheses: the union is unconditional, and it is the
-step to designate with `set_result`. Only when no union can be recorded (a
-case whose solution needs two relations at once, such as `-1 \lt x \lt 1`)
-close the run with the open outcome rather than passing one case off as the
-result.
+union writes them. A disjunct may itself be a `\land` conjunction when one
+case needs both its hypothesis and endpoint; write the textbook chained form
+when possible (`-1 \lt x \lt 1`) and pass that case's one endpoint step. Each
+conjunction member is checked separately against that recorded endpoint or
+hypothesis. A lone conjunction is still an assembly even though there is no
+`\lor`: it combines two recorded relations into one bounded answer.
+
+State each hypothesis in the spelling the answer should read — `x \gt 3`,
+not `x - 3 \gt 0` (both pin the factor's sign) — because a disjunct may only
+restate the endpoint or the hypothesis exactly as recorded. Use the endpoint
+when it stayed inside its hypothesis, or the hypothesis when the endpoint
+outgrew it (deriving `x \lt \frac{1}{2}` under `x \lt 0` solves that case as
+`x \lt 0`; assembling the raw endpoint there is a coverage error the check
+reports with a witness point). The union is checked to hold at exactly the
+points the stated relation does, and a successful assembly discharges the case
+hypotheses: the union is unconditional, and it is the step to designate with
+`set_result`. If the available checked cases still cannot express the complete
+answer, close the run with the open outcome rather than passing one case off as
+the result.
 
 Feed `quadratic_roots` the established quadratic expression verbatim; a plain
 expression means `expr = 0`. It also accepts an equality and moves its sides

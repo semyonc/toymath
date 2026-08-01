@@ -1574,6 +1574,32 @@ class TestNumericUnionCheck(unittest.TestCase):
         self.assertGreater(check['holding_points'], 0)
         self.assertLess(check['holding_points'], check['samples'])
 
+    def test_a_conjunction_disjunct_is_and_of_its_members(self):
+        check = P.numeric_union_check(
+            r'x^2 \lt 1', [r'-1 \lt x \lt 1'])
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['holding_points'], 0)
+        self.assertLess(check['holding_points'], check['samples'])
+
+    def test_wrong_conjunction_member_has_a_witness(self):
+        check = P.numeric_union_check(
+            r'x^2 \lt 1', [r'-1 \lt x \lt 2'])
+        self.assertEqual(check['status'], 'disagree')
+        self.assertGreaterEqual(check['point']['x'], 1)
+        self.assertEqual(check['holds'], {'target': False, 'union': True})
+
+    def test_union_of_two_conjunctions(self):
+        check = P.numeric_union_check(
+            r'(x^2-1)(x^2-4) \lt 0',
+            [r'-2 \lt x \lt -1', r'1 \lt x \lt 2'])
+        self.assertEqual(check['status'], 'agree')
+
+    def test_parenthesized_conjunction_disjuncts(self):
+        check = P.numeric_union_check(
+            r'(x^2-1)(x^2-4) \lt 0',
+            [r'(-2 \lt x \lt -1)', r'\left(1 \lt x \lt 2\right)'])
+        self.assertEqual(check['status'], 'agree')
+
 
 class TestCasesAssemble(unittest.TestCase):
     TARGET = r'\frac{1}{x} \lt 2'
@@ -1602,6 +1628,42 @@ class TestCasesAssemble(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('does not hold at exactly the points', r['error'])
         self.assertIn('hypothesis instead', r['error'])
+
+    def test_assembles_a_bounded_answer_from_one_case(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1', r'-1 \lt x \lt 1',
+            [r'x \lt 1'], [r'x \gt -1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'], r'-1 \lt x \land x \lt 1')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_parenthesized_conjunctions_in_a_union(self):
+        r = Equations.cases_assemble(
+            r'(x^2-1)(x^2-4) \lt 0',
+            r'(-2 \lt x \lt -1) \lor \left(1 \lt x \lt 2\right)',
+            [r'x \lt -1', r'x \lt 2'], [r'x \gt -2', r'x \gt 1'])
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+        P.parse_latex(r['result'])
+        self.assertEqual(
+            r['result'],
+            r'-2 \lt x \land x \lt -1 \lor 1 \lt x \land x \lt 2')
+
+    def test_every_conjunction_member_must_come_from_the_case(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1', r'-2 \lt x \lt 1',
+            [r'x \lt 1'], [r'x \gt -1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('member', r['error'])
+        self.assertIn('neither the recorded endpoint', r['error'])
+
+    def test_reordered_duplicate_conjunctions_are_refused(self):
+        r = Equations.cases_assemble(
+            r'x^2 \lt 1',
+            r'-1 \lt x \lt 1 \lor x \lt 1 \land x \gt -1',
+            [r'x \lt 1', r'x \lt 1'], [r'x \gt -1', r'x \gt -1'])
+        self.assertFalse(r['ok'])
+        self.assertIn('same relation(s)', r['error'])
 
     def test_invented_disjunct_is_refused(self):
         r = Equations.cases_assemble(
@@ -5796,12 +5858,11 @@ class TestChainedComparison(unittest.TestCase):
         self.assertTrue(r['ok'], r.get('error'))
         self.assertEqual(r['result'], '1')
 
-    def test_the_union_oracle_still_cannot_take_one(self):
-        # PARSING is necessary and NOT sufficient: assembling a between
-        # answer still needs the conjunction-disjunct mechanism. Pinning
-        # this keeps the two halves of that backlog item honestly apart.
+    def test_the_union_oracle_takes_the_conjunction_shape(self):
+        # Gen 71 supplies the mechanism half after gen 70 supplied the
+        # user's chained-comparison spelling: a disjunct is AND of members.
         r = P.numeric_union_check('x^2 \\lt 1', ['-1 \\lt x \\lt 1'])
-        self.assertEqual(r['status'], 'skipped')
+        self.assertEqual(r['status'], 'agree')
 
 
 class TestDerivativeKeepsTheDenominatorAsWritten(unittest.TestCase):

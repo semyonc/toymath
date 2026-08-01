@@ -226,6 +226,37 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(rec['check']['status'], 'agree')
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
+    def test_cli_cases_assemble_accepts_one_conjunction_case(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'between.json')
+        ledger = Ledger(path)
+        target = r'x^2 \lt 1'
+        moved = ledger.record(core.apply_both_sides(target, '-', '1'))
+        expanded = ledger.record(core.expand(moved['result']))
+        factored = ledger.record(core.factor_quadratic(
+            expanded['result'], 'x'))
+        divided = ledger.record(core.apply_both_sides(
+            factored['result'], '/', 'x+1', assuming=r'x \gt -1'))
+        cancelled = ledger.record(core.expand(divided['result']))
+        shifted = ledger.record(core.apply_both_sides(
+            cancelled['result'], '+', '1'))
+        endpoint = ledger.record(core.expand(shifted['result']))
+        ledger.save()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'cases_assemble', target, r'-1 \lt x \lt 1',
+                endpoint['id'], '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['sources'], {'cases': [endpoint['id']]})
+        self.assertEqual(rec['result'], r'-1 \lt x \land x \lt 1')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
     def test_cli_cases_assemble_without_session_refuses(self):
         output = io.StringIO()
         with redirect_stdout(output):

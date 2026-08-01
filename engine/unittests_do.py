@@ -851,6 +851,36 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(selected['provenance']['step'], rec['step']['id'])
         self.assertEqual(session.ledger.replay()['status'], 'verified')
 
+    def test_cases_assemble_closes_the_between_workflow(self):
+        # Realistic sign-case path: the endpoint x<1 remains conditioned on
+        # x>-1 until the assembly combines both into one bounded answer.
+        target = r'x^2 \lt 1'
+        session = DoSession()
+        api = make_api(session)
+        api['load_skill']('equations')
+        moved = json.loads(api['apply'](target, '-', '1'))
+        expanded = json.loads(api['expand'](moved['result']))
+        factored = json.loads(api['run_tactic'](
+            'factor_quadratic', [expanded['result'], 'x']))
+        divided = json.loads(api['apply'](
+            factored['result'], '/', 'x+1', r'x \gt -1'))
+        cancelled = json.loads(api['expand'](divided['result']))
+        shifted = json.loads(api['apply'](cancelled['result'], '+', '1'))
+        endpoint = json.loads(api['expand'](shifted['result']))
+
+        rec = json.loads(api['run_tactic'](
+            'cases_assemble',
+            [target, r'-1 \lt x \lt 1', endpoint['step']['id']]))
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], r'-1 \lt x \land x \lt 1')
+        self.assertEqual(rec['sources'],
+                         {'cases': [endpoint['step']['id']]})
+        selected = json.loads(api['set_result'](rec['result']))
+        self.assertTrue(selected['ok'], selected.get('error'))
+        self.assertEqual(
+            session.ledger.presentation_topology()['spine_assumptions'], [])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
     def test_cases_assemble_discharges_the_case_hypotheses(self):
         # the union was checked unconditionally across all cases, so the
         # mutually exclusive hypotheses stop conditioning the endpoint;
