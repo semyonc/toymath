@@ -136,6 +136,8 @@ plotting fails, continue the derivation without it.
 - The code runs through `exec`, so top-level `await` is a syntax error.
   Never call `micropip.install` yourself: your imports are installed for
   you before the code runs.
+- Redrawing a figure you already drew? Pass its `figure` id as `replaces`,
+  or the cell shows both the draft and the correction.
 """
 
 _TIKZ_RULES = """
@@ -260,6 +262,9 @@ class DoSession(object):
         # them after the provider returns, on the kernel thread. They remain
         # illustrations only: none of this enters the ledger or replay.
         self._figure_events = []
+        #: ids are issued per session, so a `replaces` can only ever name a
+        #: figure from the run that is speaking
+        self._figure_seq = 0
         self.closed = False
         self.close_reason = None
         # the SDK executes sync tools on a thread pool, so parallel tool
@@ -282,13 +287,26 @@ class DoSession(object):
             f'this run was stopped ({self.close_reason}); the session is '
             'closed and the steps already recorded are final')
 
-    def deliver_figure(self, caption, figures):
+    def deliver_figure(self, caption, figures, replaces=None):
         """Accept one successful figure, or refuse it because the run is over.
 
         A figure is cell output, so it needs the same boundary the ledger
         has. The durable-for-this-run copy is what the notebook renders on
         its kernel thread; `on_plot` remains an optional best-effort streaming
-        seam for non-notebook callers. Returns whether the figure was accepted.
+        seam for non-notebook callers.
+
+        Returns `{'id', 'replaced'}` for an accepted figure, or False when
+        the run is over.
+
+        `replaces` supersedes an earlier figure IN PLACE, keeping its
+        position, so a corrected render shows once where the first one
+        appeared instead of the cell carrying both. Measured: a model whose
+        own post-processing failed re-rendered the same number line and the
+        notebook showed it twice. An id this run never issued is not
+        something the figure should die of - the picture rendered - so it is
+        appended and reported instead. Ids are per session: `replaces` can
+        reach no other run's figures. Streaming cannot be unsent, so a
+        replacement streams too; the buffer is the authoritative copy.
         """
         figures = [dict(figure) for figure in (figures or [])
                    if isinstance(figure, dict)]
@@ -297,9 +315,17 @@ class DoSession(object):
         with self._lock:
             if self.closed:
                 return False
-            self._figure_events.append({
-                'status': 'ok', 'kind': 'figure',
-                'caption': str(caption or ''), 'figures': figures})
+            self._figure_seq += 1
+            event = {'status': 'ok', 'kind': 'figure',
+                     'id': f'f{self._figure_seq}',
+                     'caption': str(caption or ''), 'figures': figures}
+            index = self._figure_position(replaces)
+            replaced = None
+            if index is None:
+                self._figure_events.append(event)
+            else:
+                replaced = self._figure_events[index]['id']
+                self._figure_events[index] = event
             if self.on_plot is not None:
                 try:
                     self.on_plot(caption, [dict(figure)
@@ -309,7 +335,18 @@ class DoSession(object):
                     # reaches the caller, so a display-handler fault may not
                     # turn a successfully rendered plot into a tool failure.
                     pass
-            return True
+            return {'id': event['id'], 'replaced': replaced}
+
+    def _figure_position(self, figure_id):
+        """Where a delivered figure of this run sits, or None. Caller holds
+        the lock. Only successful figures have ids; a failure notice is not
+        something a later render supersedes by id."""
+        figure_id = (figure_id or '').strip()
+        if not figure_id:
+            return None
+        return next((index for index, event
+                     in enumerate(self._figure_events)
+                     if event.get('id') == figure_id), None)
 
     def record_figure_failure(self, kind, caption, error):
         """Keep one failed render attempt for an end-of-run notebook notice.
@@ -559,6 +596,26 @@ def _closed_reply(op, session):
     }, ensure_ascii=False)
 
 
+def _with_figure_id(reply, delivery, replaces):
+    """Tell the model which figure it just drew, and what it superseded.
+
+    The id is what a later corrected render passes back as `replaces`, so
+    the notebook shows one figure instead of a retry's duplicate. A
+    `replaces` naming nothing in this run is reported rather than failed:
+    the figure did render, and dropping it over a bookkeeping mistake would
+    lose the picture the user asked for.
+    """
+    if not isinstance(delivery, dict):
+        return reply
+    reply['figure'] = delivery['id']
+    if delivery['replaced']:
+        reply['replaced'] = delivery['replaced']
+    elif (replaces or '').strip():
+        reply['note'] = (f"no figure {str(replaces).strip()!r} in this run; "
+                         'shown as a new figure')
+    return reply
+
+
 def _equivalent(left, right):
     try:
         if primitives.same_expression(left, right):
@@ -753,12 +810,19 @@ def make_api(session):
                            'selection': selection['id']},
                           ensure_ascii=False)
 
-    def plot(code: str, caption: str) -> str:
+    def plot(code: str, caption: str, replaces: str = '') -> str:
         """Render an unverified matplotlib/seaborn/plotly illustration.
+
+        The figure goes to the user's notebook, not back to you: this call
+        answers {"ok", "plots", "figure"}, plus "error" when it failed.
 
         Args:
             code: self-contained Python that builds a figure.
             caption: one-line description displayed under the figure.
+            replaces: the "figure" id of an earlier figure THIS RUN drew
+                that this call corrects or redraws. The notebook then shows
+                the corrected figure once, in the original's place, instead
+                of both. Leave empty for a new figure.
         """
         if session.closed:
             return _closed_reply('plot', session)
@@ -770,7 +834,8 @@ def make_api(session):
         ok = bool(result.get('ok')) and bool(figures)
         error = (result.get('error')
                  or 'the code produced no figure')[-1200:]
-        accepted = (session.deliver_figure(caption, figures) if ok else
+        accepted = (session.deliver_figure(caption, figures,
+                                           replaces=replaces) if ok else
                     session.record_figure_failure('plot', caption, error))
         if not accepted and session.closed:
             return _closed_reply('plot', session)
@@ -778,10 +843,14 @@ def make_api(session):
                  'stdout': (result.get('stdout') or '')[-800:]}
         if not reply['ok']:
             reply['error'] = error
-        return json.dumps(reply, ensure_ascii=False)
+        return json.dumps(_with_figure_id(reply, accepted, replaces),
+                          ensure_ascii=False)
 
-    def tikz(code: str, caption: str) -> str:
+    def tikz(code: str, caption: str, replaces: str = '') -> str:
         """Render an unverified TikZ illustration.
+
+        The figure goes to the user's notebook, not back to you: this call
+        answers {"ok", "plots", "figure"}, plus "error" when it failed.
 
         Args:
             code: preamble then body — any \\usepackage /
@@ -790,6 +859,10 @@ def make_api(session):
                 \\documentclass; the engine supplies it. tikz-cd is
                 available, so use tikzcd for commutative diagrams.
             caption: one-line description displayed under the figure.
+            replaces: the "figure" id of an earlier figure THIS RUN drew
+                that this call corrects or redraws. The notebook then shows
+                the corrected figure once, in the original's place, instead
+                of both. Leave empty for a new figure.
         """
         if session.closed:
             return _closed_reply('tikz', session)
@@ -797,7 +870,7 @@ def make_api(session):
         svg = result.get('svg') if result.get('ok') else None
         if svg:
             accepted = session.deliver_figure(
-                caption, [{'kind': 'svg', 'data': svg}])
+                caption, [{'kind': 'svg', 'data': svg}], replaces=replaces)
         else:
             error = (result.get('error')
                      or 'the source produced no figure')[-1200:]
@@ -808,7 +881,8 @@ def make_api(session):
         if not reply['ok']:
             # keep the tail: that is where the TeX log's `!` lines are
             reply['error'] = error
-        return json.dumps(reply, ensure_ascii=False)
+        return json.dumps(_with_figure_id(reply, accepted, replaces),
+                          ensure_ascii=False)
 
     api = {
         'load_skill': load_skill,
@@ -1147,7 +1221,7 @@ def finalize_session(session, outcome, max_turns=None):
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
     final_premises = session.ledger.premises(spine or run_ids or None)
     figure_events = session.figure_events()
-    figures = [{'caption': event['caption'],
+    figures = [{'id': event['id'], 'caption': event['caption'],
                 'figures': event['figures']}
                for event in figure_events if event['status'] == 'ok']
     last_figure = figure_events[-1] if figure_events else None

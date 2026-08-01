@@ -1682,6 +1682,40 @@ class TestCanonicalToolBindings(unittest.TestCase):
             self.assertEqual(binding.input_schema,
                              derived.params_json_schema, binding.name)
 
+    def test_a_figure_binding_states_what_it_returns(self):
+        # LANDMINE (measured on the Codex path): a figure tool whose
+        # description only says "render an illustration" leaves the model
+        # to guess the reply. One run drove `tikz` from the runtime's
+        # scripting tool, iterated the reply as `r.content` (an MCP shape
+        # it never had), and then passed it to the script helper
+        # `image(...)`; the appended `image_url` was
+        # `{"ok": true, "plots": 1}`, and the provider refused the next
+        # request outright - `Invalid 'input[0].output[1].image_url'` -
+        # killing a run whose figures had already rendered.
+        #
+        # The scripts are authored BEFORE any result exists, so the field
+        # names are the part the model cannot observe; where the figure
+        # went, it can never observe. Keep those two, here, where they ship
+        # only with the tool - not the prohibition, which is one backend's
+        # scripting layer and belongs in that backend's policy.
+        bindings = {b.name: b for b in agent_do.make_tool_bindings(
+            DoSession(plot_backend=FakePlotBackend(),
+                      tikz_backend=FakeTikzBackend()))}
+        for name in ('plot', 'tikz'):
+            # the docstring wraps, so read it the way the model does
+            description = ' '.join(bindings[name].description.split())
+            self.assertIn('not back to you', description, name)
+            self.assertIn('{"ok", "plots", "figure"}', description, name)
+            # backend-neutral: no Codex scripting helper in the canonical
+            # surface, which OpenRouter advertises verbatim
+            self.assertNotIn('image(', description, name)
+            self.assertNotIn('generatedImage', description, name)
+        # the Args block still parses: the contract is in the summary, and
+        # `_parse_docstring` folds anything after `Args:` into an argument
+        self.assertNotIn('not back to you',
+                         bindings['tikz'].input_schema
+                         ['properties']['caption']['description'])
+
     def test_figure_bindings_appear_only_with_their_backends(self):
         names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
         self.assertNotIn('plot', names)
@@ -2069,6 +2103,41 @@ class TestCodexExecution(unittest.TestCase):
             repository))
         self.assertNotIn('model', params)      # the account's own default
 
+    def test_a_refused_request_is_explained_rather_than_dumped(self):
+        # Measured (Into.ipynb, `do! plot interval [[2]]`): the model drove
+        # `tikz` from the runtime's scripting tool and passed the reply to
+        # the script helper `image(...)`. The appended `image_url` was our
+        # status JSON, so the provider refused the NEXT request and the
+        # cell showed the raw 400 - a message about `input[0].output[1]`
+        # that tells a mathematician nothing about what to do.
+        refusal = json.dumps({'type': 'error', 'error': {
+            'type': 'invalid_request_error', 'code': 'invalid_value',
+            'message': ("Invalid 'input[0].output[1].image_url'. Expected a "
+                        'valid URL, but got a value with an invalid '
+                        'format.'),
+            'param': 'input[0].output[1].image_url'}, 'status': 400})
+        res = run_instruction(
+            'draw the interval', tikz_backend=FakeTikzBackend(),
+            backend=self._backend([
+                {'tool': 'tikz', 'arguments': {'code': '\\draw (0,0);',
+                                               'caption': 'interval'}},
+                {'fail': refusal}]))
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('attached a ToyMath tool result', res['error'])
+        self.assertIn('never returned to the model', res['error'])
+        self.assertIn('re-run the cell', res['error'])
+        # the provider's own words survive: this is a translation, not a
+        # replacement, and the raw cause is what a bug report needs
+        self.assertIn('image_url', res['error'])
+
+    def test_an_unrelated_refusal_keeps_its_own_words(self):
+        # a wrong guess about why a run died is worse than the raw message
+        for error in ('the Codex turn failed',
+                      json.dumps({'error': {'message': 'context too long',
+                                            'code': 'context_length'}}),
+                      '', None):
+            self.assertEqual(codex_backend.explain_turn_failure(error), error)
+
     def test_tool_dispatch_is_serialized_on_the_codex_path(self):
         seen = {}
         original = agent_base.ToolDispatcher.__init__
@@ -2314,6 +2383,27 @@ class TestCodexHomeAndPolicy(unittest.TestCase):
         # project AGENTS.md can join the instruction chain
         self.assertEqual(os.listdir(workdir), [])
         self.assertTrue(workdir.startswith(home))
+
+    def test_both_policy_forms_state_what_attaching_a_result_costs(self):
+        # The Codex path does not hand the model our tools directly: it
+        # reaches them through the runtime's scripting tool, whose helpers
+        # can append images to the conversation. A model that reads `tikz`
+        # as "returns a picture" writes `image(r)`, and the provider then
+        # refuses the whole turn. This text is always-on, so it carries
+        # only what the model cannot see for itself: the reply's shape it
+        # observes on the first call, but the refused turn never reaches
+        # it, and neither does the fact that the user already has the
+        # figure. Neither varies with the session, so both forms carry it.
+        for policy in (codex_backend.role_policy(),
+                       codex_backend.role_policy(self.names)):
+            self.assertIn("reach the user's notebook", policy)
+            self.assertIn('image, generatedImage', policy)
+            self.assertIn('refuses the whole turn', policy)
+        # ... and naming those helpers must not smuggle the session's own
+        # figure tools into the durable form, which outlives the session
+        durable = codex_backend.role_policy()
+        self.assertNotIn('plot', durable)
+        self.assertNotIn('tikz', durable)
 
     def test_the_durable_policy_defers_to_the_threads_list(self):
         # the two reach the model together, so the durable one must not
@@ -4166,9 +4256,14 @@ class TestPlotTool(unittest.TestCase):
         self.assertEqual(shown[0][0], 'a parabola')
         self.assertEqual(shown[0][1], [{'kind': 'png', 'data': FAKE_PNG_B64}])
         self.assertEqual(session.figure_events(), [{
-            'status': 'ok', 'kind': 'figure', 'caption': 'a parabola',
+            'status': 'ok', 'kind': 'figure', 'id': 'f1',
+            'caption': 'a parabola',
             'figures': [{'kind': 'png', 'data': FAKE_PNG_B64}],
         }])
+        # the model is told which figure it drew, so a corrected render can
+        # supersede it instead of adding a second one
+        self.assertEqual(reply['figure'], 'f1')
+        self.assertNotIn('replaced', reply)
         # never a ledger step
         self.assertEqual(session.new_steps(), [])
 
@@ -4215,6 +4310,64 @@ class TestPlotTool(unittest.TestCase):
             'status': 'error', 'kind': 'plot', 'caption': 'partial',
             'error': 'RuntimeError: failed after drawing',
         }])
+
+    def test_a_corrected_figure_supersedes_the_one_it_redraws(self):
+        # Measured (Into.ipynb, `do! plot interval [[2]]`): the model's own
+        # post-processing failed after a successful render, so it re-ran the
+        # same tikz and the cell showed the number line twice. The redraw
+        # now names the figure it replaces and lands in its place.
+        session = DoSession(plot_backend=FakePlotBackend(),
+                            tikz_backend=FakeTikzBackend())
+        api = make_api(session)
+        first = json.loads(api['plot']('plt.plot([1])', 'draft'))
+        other = json.loads(api['tikz']('\\draw (0,0);', 'a diagram'))
+        fixed = json.loads(api['plot']('plt.plot([2])', 'corrected',
+                                       first['figure']))
+        self.assertEqual(fixed['replaced'], first['figure'])
+        self.assertNotIn('note', fixed)
+        events = session.figure_events()
+        # replaced in place: two figures, the correction where the draft was
+        self.assertEqual([e['caption'] for e in events],
+                         ['corrected', 'a diagram'])
+        self.assertEqual([e['id'] for e in events],
+                         [fixed['figure'], other['figure']])
+        self.assertNotEqual(fixed['figure'], first['figure'])
+        # omitting it is the normal case: the canonical validator restores
+        # the default rather than the model having to send an empty string
+        schema = {b.name: b.input_schema for b in
+                  agent_do.make_tool_bindings(session)}['plot']
+        self.assertEqual(
+            agent_base.validate_arguments(
+                schema, {'code': 'plt.plot([1])', 'caption': 'c'}),
+            {'code': 'plt.plot([1])', 'caption': 'c', 'replaces': ''})
+
+    def test_replacing_a_figure_this_run_never_drew_keeps_the_picture(self):
+        # a bookkeeping mistake must not cost the user the figure that
+        # rendered, and ids are per session: no run can reach another's
+        session = DoSession(plot_backend=FakePlotBackend())
+        api = make_api(session)
+        drawn = json.loads(api['plot']('plt.plot([1])', 'first'))
+        for stale in ('f9', drawn['figure'] + 'x', '   '):
+            session_before = len(session.figure_events())
+            reply = json.loads(api['plot']('plt.plot([2])', 'second', stale))
+            self.assertTrue(reply['ok'])
+            self.assertNotIn('replaced', reply)
+            self.assertEqual(len(session.figure_events()), session_before + 1)
+        self.assertIn('f9', json.loads(
+            api['plot']('plt.plot([3])', 'third', 'f9'))['note'])
+
+    def test_a_replacement_after_the_run_is_stopped_is_still_refused(self):
+        session = DoSession(plot_backend=FakePlotBackend())
+        api = make_api(session)
+        first = json.loads(api['plot']('plt.plot([1])', 'kept'))
+        session.close('user')
+        reply = json.loads(api['plot']('plt.plot([2])', 'late',
+                                       first['figure']))
+        self.assertFalse(reply['ok'])
+        self.assertTrue(reply['cancelled'])
+        # the committed figure is untouched: a stopped run rewrites nothing
+        self.assertEqual([e['caption'] for e in session.figure_events()],
+                         ['kept'])
 
     def test_streaming_callback_failure_does_not_lose_buffered_figure(self):
         def broken_callback(*_args):

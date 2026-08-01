@@ -808,6 +808,7 @@ class TranscriptTransport(CodexTransport):
     - `{'tool': NAME, 'arguments': {...}}`  - a dynamic tool call;
     - `{'native': NAME}`                    - a residual native tool call;
     - `{'message': TEXT}`                   - the final agent message;
+    - `{'fail': TEXT}`                      - the provider refuses the turn;
     - `{'block': True}`                     - wait here until interrupted.
     """
 
@@ -893,6 +894,13 @@ class TranscriptTransport(CodexTransport):
                         turn_id=self.turn_id, tool_calls=tuple(called),
                         native_tool_calls=tuple(native))
                 continue
+            if 'fail' in entry:
+                # a turn the provider refused mid-flight: the tool calls
+                # that already ran still happened
+                return CodexTurnOutcome(
+                    status=TURN_FAILED, thread_id=self.thread_id,
+                    turn_id=self.turn_id, tool_calls=tuple(called),
+                    native_tool_calls=tuple(native), error=entry['fail'])
             if 'tool' in entry:
                 called.append(entry['tool'])
                 on_tool_call({'tool': entry['tool'],
