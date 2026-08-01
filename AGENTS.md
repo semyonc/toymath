@@ -70,6 +70,19 @@ Two layers coexist:
   regression.
 - The numeric oracle must share **nothing** with the symbolic code path —
   the two independent trust legs are the design.
+- A `disagree` verdict needs evidence too. It is a positive claim that two
+  expressions differ and it bars the step from the ledger permanently, so
+  `numeric_spot_check` first measures its own noise at the sample point
+  (`_eval_noise`: how far the evaluation moves under a one-ULP nudge, which
+  the same intermediate magnitudes amplify as they amplify round-off) and
+  leaves a gap it cannot resolve undecided. LANDMINE: without this, a
+  transformation the engine produced ITSELF was refused — `expand` of
+  `(x+y)^{16}` disagreed with its own canonical output because the
+  intermediate terms exceed the result by eighteen orders of magnitude, and
+  the agent was told to "correct the arguments" it could not correct. The
+  guard is deliberately not a hiding place: measured separation is 0.8 for
+  that false accusation against 10^12 and up for genuine differences,
+  including one corrupted coefficient inside a degree-16 expansion.
 - Never mutate an input notation; build results into fresh/cloned ones.
 - Say "mechanically checked", never "proved".
 - Skill Markdown guides tactic choice; it never grants execution authority.

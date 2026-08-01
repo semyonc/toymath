@@ -985,6 +985,12 @@ _ARRAY_EVAL_NAMES = (
     '\\vmatrix', '\\Vmatrix', '\\smallmatrix',
 )
 
+# How far a gap must clear the oracle's own noise before it counts as
+# evidence of a difference. Measured separation is wide: a correct
+# expansion whose digits were lost to cancellation sits at ratio 0.8,
+# while genuinely different expressions sit above 10^12.
+_RESOLUTION_MARGIN = 8.0
+
 
 def _num_shape(m):
     return (len(m), len(m[0]) if m else 0)
@@ -1045,6 +1051,72 @@ def _num_abs(v):
     if isinstance(v, list):
         return max((abs(x) for row in v for x in row), default=0.0)
     return abs(v)
+
+
+def _num_gap(v1, v2):
+    """Distance between two oracle values, or None when the two are not
+    numerically comparable at all — a shape mismatch is structural
+    evidence, never a rounding artifact."""
+    m1, m2 = isinstance(v1, list), isinstance(v2, list)
+    if m1 != m2:
+        return None
+    if m1:
+        if _num_shape(v1) != _num_shape(v2):
+            return None
+        return max((abs(x - y) for r1, r2 in zip(v1, v2)
+                    for x, y in zip(r1, r2)), default=0.0)
+    return abs(v1 - v2)
+
+
+def _eval_noise(sym, notation, env, value):
+    """How far this evaluation moves when one coordinate is nudged by a
+    single ULP, or None when no nudge could be evaluated.
+
+    Large intermediate terms amplify an input perturbation exactly as they
+    amplify round-off, so this is a proxy for the oracle's own numerical
+    noise at ``env`` — and it reuses the SAME evaluator, so a node type the
+    oracle gains later is covered without touching this code."""
+    worst = 0.0
+    probed = False
+    for key, coord in env.items():
+        if not isinstance(coord, float):
+            continue
+        for toward in (math.inf, -math.inf):
+            nudged = dict(env)
+            nudged[key] = math.nextafter(coord, toward)
+            try:
+                moved = numeric_eval(sym, notation, nudged)
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                continue
+            gap = _num_gap(value, moved)
+            if gap is None:
+                continue
+            probed = True
+            worst = max(worst, gap)
+    if env and not probed:
+        return None
+    return worst
+
+
+def _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
+    """Whether the values at ``env`` lie far enough apart to be evidence.
+
+    ``disagree`` is a positive claim that two expressions differ, and it
+    bars the step from the ledger for good. A float evaluation whose
+    significant digits were consumed by cancellation cannot support that
+    claim: ``(x+y)^{16}`` and its own canonical expansion land 6% apart at
+    a sample point where the intermediate terms exceed the result by
+    eighteen orders of magnitude. Unsupported numeric evaluation is honest
+    ignorance, not evidence against a transformation, so a gap the oracle
+    cannot resolve leaves the point undecided instead of accusing."""
+    gap = _num_gap(v1, v2)
+    if gap is None:
+        return True
+    noise1 = _eval_noise(s1, n1, env, v1)
+    noise2 = _eval_noise(s2, n2, env, v2)
+    if noise1 is None or noise2 is None:
+        return False
+    return gap > _RESOLUTION_MARGIN * max(noise1, noise2)
 
 
 def _num_agree(v1, v2, tol):
@@ -1573,6 +1645,7 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     agreed = 0
     tried = 0
     undefined_both = 0
+    unresolved = 0
     mismatches = 0
     mismatch = None
     budget = _sample_budget(samples, guards)
@@ -1598,6 +1671,9 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         if agree is None:
             continue
         if not agree:
+            if not _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
+                unresolved += 1
+                continue
             return {'status': 'disagree', 'point': env,
                     'lhs': v1, 'rhs': v2}
         agreed += 1
@@ -1605,11 +1681,18 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         return {'status': 'domain-differs', 'mismatches': mismatches,
                 'common_samples': agreed, **mismatch}
     if agreed == 0:
+        if unresolved:
+            return {'status': 'skipped', 'unresolved_points': unresolved,
+                    'reason': 'every sample point lost its significant '
+                              'digits to cancellation; the comparison is '
+                              'undecided, not disproved'}
         return {'status': 'skipped',
                 'reason': 'no evaluable sample points'}
     result = {'status': 'agree', 'samples': agreed}
     if undefined_both:
         result['undefined_points'] = undefined_both
+    if unresolved:
+        result['unresolved_points'] = unresolved
     return result
 
 

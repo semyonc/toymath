@@ -2897,6 +2897,95 @@ class TestOracleCatchesLies(unittest.TestCase):
         self.assertEqual(c['status'], 'agree')
 
 
+class TestDisagreementNeedsEvidence(unittest.TestCase):
+    # A `disagree` verdict is a positive claim that two expressions differ,
+    # and it bars the step from the ledger for good. Float evaluation whose
+    # significant digits were consumed by cancellation cannot support that
+    # claim: expand's own canonical output for (x+y)^16 landed 6% from the
+    # compact form at a point where the intermediate terms exceed the
+    # result by eighteen orders of magnitude, so the engine refused an
+    # expansion it had produced itself and told the agent to "correct the
+    # arguments". Unsupported numeric evaluation is honest ignorance, not
+    # evidence against a transformation.
+
+    CANCELLING = [
+        '(x+y)^{16}', '(x+1)^{26}', '(x+1)^{28}', '(x+1)^{30}',
+    ]
+
+    def test_expand_is_not_refused_by_its_own_oracle(self):
+        for expr in self.CANCELLING:
+            rec = Core.expand(expr)
+            self.assertTrue(rec['ok'], expr)
+            self.assertNotEqual(rec['check']['status'], 'disagree', expr)
+
+    def test_the_ledger_accepts_the_expansion(self):
+        led = Ledger()
+        step = led.record(Core.expand('(x+y)^{16}'))
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_a_real_error_inside_a_cancelling_shape_still_disagrees(self):
+        # the guard must not become a hiding place: each pair is WRONG and
+        # each sits inside the same catastrophic-cancellation shape that
+        # motivated the guard
+        for lhs, rhs in [('(x+y)^{16}', '(x+y)^{16}+1'),
+                         ('(x+1)^{30}', '(x+1)^{30}+x'),
+                         ('(x+y)^{12}', '(x-y)^{12}')]:
+            self.assertEqual(
+                P.numeric_spot_check(lhs, rhs)['status'], 'disagree',
+                f'{lhs} vs {rhs}')
+
+    def test_one_corrupted_coefficient_still_disagrees(self):
+        # 12871 where the binomial coefficient is 12870, buried in the
+        # middle of a degree-16 expansion
+        good = ('x^{16}+16x^{15}+120x^{14}+560x^{13}+1820x^{12}+4368x^{11}'
+                '+8008x^{10}+11440x^9+12870x^8+11440x^7+8008x^6+4368x^5'
+                '+1820x^4+560x^3+120x^2+16x+1')
+        self.assertEqual(
+            P.numeric_spot_check('(x+1)^{16}', good)['status'], 'agree')
+        self.assertEqual(
+            P.numeric_spot_check('(x+1)^{16}',
+                                 good.replace('12870', '12871'))['status'],
+            'disagree')
+
+    def test_ordinary_wrong_algebra_is_untouched(self):
+        for lhs, rhs in [('(x+1)^2', 'x^2+1'),
+                         ('\\sin(x+y)', '\\sin x + \\sin y'),
+                         ('x^2+2x+1', 'x^2+2.000001x+1'),
+                         ('\\lfloor x \\rfloor', 'x'),
+                         ('|x|', 'x')]:
+            self.assertEqual(P.numeric_spot_check(lhs, rhs)['status'],
+                             'disagree', f'{lhs} vs {rhs}')
+
+    def test_resolution_compares_the_gap_against_the_oracles_own_noise(self):
+        s1, n1 = P.parse_latex('x^2-1')
+        s2, n2 = P.parse_latex('x^2+1')
+        env = {'x': 2.0006072315296617}
+        v1 = P.numeric_eval(s1, n1, env)
+        v2 = P.numeric_eval(s2, n2, env)
+        # a benign point: the gap of 2 dwarfs a one-ULP nudge
+        self.assertTrue(
+            P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
+        # the same comparison where one side has lost its digits
+        s3, n3 = P.parse_latex('(x+y)^{16}')
+        s4, n4 = P.parse_latex(Core.expand('(x+y)^{16}')['result'])
+        env2 = {'x': 2.0006072315296617, 'y': -2.33288936992431}
+        v3 = P.numeric_eval(s3, n3, env2)
+        v4 = P.numeric_eval(s4, n4, env2)
+        self.assertFalse(P._num_agree(v3, v4, 1e-6))     # the raw floats differ
+        self.assertFalse(
+            P._disagreement_resolves(s3, n3, s4, n4, env2, v3, v4))
+
+    def test_a_shape_mismatch_is_structural_not_numeric(self):
+        # noise can never explain away a matrix that changed shape
+        s1, n1 = P.parse_latex('\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}')
+        s2, n2 = P.parse_latex('\\begin{pmatrix}1&2&3\\end{pmatrix}')
+        env = {}
+        v1 = P.numeric_eval(s1, n1, env)
+        v2 = P.numeric_eval(s2, n2, env)
+        self.assertTrue(
+            P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
+
+
 class TestAbsoluteValue(unittest.TestCase):
     # gen 12: |...| was parsed as a transparent bracket, so BOTH the
     # symbolic path AND the oracle silently read |x| as x — a soundness
