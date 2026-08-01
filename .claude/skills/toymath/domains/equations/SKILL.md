@@ -126,6 +126,12 @@ hypotheses: the union is unconditional, and it is the step to designate with
 answer, close the run with the open outcome rather than passing one case off as
 the result.
 
+For the bounded prototype “(x-1)(x+1) < 0”, state the useful case as
+“assuming x < 1” before dividing by x-1, not as “x-1 < 0”. Its endpoint is
+“x > -1”, so those two recorded relations assemble directly as the textbook
+answer “-1 < x < 1”. Call cases_assemble once and designate that step; spot
+checks afterward are optional illustrations, not a reason to assemble again.
+
 Feed `quadratic_roots` the established quadratic expression verbatim; a plain
 expression means `expr = 0`. It also accepts an equality and moves its sides
 together internally. The result records every rational root and checks both
