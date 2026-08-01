@@ -3,8 +3,10 @@
 """Tests for the do! agent endpoint (agent_do.py + MathShell integration).
 
 Everything here runs offline: the agent loop is exercised with a scripted
-fake Model. Set TOYMATH_LIVE_TESTS=1 to also run one real OpenRouter
-round-trip (requires OPEN_ROUTER in the environment/.env).
+fake Model. Set TOYMATH_LIVE_TESTS=1 to also run real OpenRouter
+round-trips (the OPEN_ROUTER credential is the one thing they still take
+from the environment/.env; backend, model, tracing, and figure sandboxes
+are pinned by the live classes themselves - see LIVE_MODEL).
 """
 import _thread
 import base64
@@ -49,6 +51,10 @@ from openai.types.responses import (ResponseFunctionToolCall,
 _NO_BROWSER = None
 _SANDBOX_HOME = None
 _CLEARED_ENV = None
+#: Whatever `TOYMATH_CODEX_HOME` said before the throwaway home replaced it.
+#: The live Codex class is the one place that must see the developer's own
+#: signed-in home again; everything else keeps the sandbox.
+_REAL_CODEX_HOME = None
 
 #: Notebook-default routing this module must decide for itself. ToyMath loads
 #: `.env`, so leaving these set makes the suite assert against whatever the
@@ -80,10 +86,11 @@ def setUpModule():
     Environment: `.env` is loaded for real runs, so the routing defaults are
     cleared here and reinstated afterwards.
     """
-    global _NO_BROWSER, _SANDBOX_HOME, _CLEARED_ENV
+    global _NO_BROWSER, _SANDBOX_HOME, _CLEARED_ENV, _REAL_CODEX_HOME
     _NO_BROWSER = mock.patch('webbrowser.open', return_value=False)
     _NO_BROWSER.start()
     _SANDBOX_HOME = tempfile.mkdtemp(prefix='toymath-test-codex-home-')
+    _REAL_CODEX_HOME = os.environ.get(codex_backend.HOME_VAR)
     os.environ[codex_backend.HOME_VAR] = _SANDBOX_HOME
     # `load_dotenv()` runs at import of each module that needs it, and
     # `toymathkernel` is imported lazily inside tests - late enough to put a
@@ -94,12 +101,25 @@ def setUpModule():
                     for name in _ENV_DEFAULTS if name in os.environ}
 
 
+def _set_codex_home(home):
+    """Point `TOYMATH_CODEX_HOME` at `home`, or unset it when None.
+
+    A plain assignment cannot express "unset", and the difference matters:
+    an unset variable means the default `~/.toymath/codex-home`, which is
+    exactly the authenticated home the offline suite must stay out of.
+    """
+    if home is None:
+        os.environ.pop(codex_backend.HOME_VAR, None)
+    else:
+        os.environ[codex_backend.HOME_VAR] = home
+
+
 def tearDownModule():
     if _NO_BROWSER is not None:
         _NO_BROWSER.stop()
     codex_backend.close_runtime()
     if _SANDBOX_HOME is not None:
-        os.environ.pop(codex_backend.HOME_VAR, None)
+        _set_codex_home(_REAL_CODEX_HOME)
         shutil.rmtree(_SANDBOX_HOME, True)
     os.environ.update(_CLEARED_ENV or {})
 
@@ -6262,13 +6282,88 @@ def _interrupt_after(seconds):
     threading.Timer(seconds, _thread.interrupt_main).start()
 
 
+#: The model every live test runs on, whatever the developer's `.env` says.
+#: ToyMath loads `.env` at import, so an unpinned live run measures whichever
+#: model, backend, and sandbox configuration that machine happens to carry -
+#: and a red live test then says nothing about ToyMath. `TestLiveDefaults`
+#: below checks this pinning offline, including that the id is still one of
+#: the configured endpoints.
+LIVE_MODEL = 'openai/gpt-5.6-luna'
+LIVE_CODEX_MODEL = 'gpt-5.6-luna'
+
+#: Routing is explicit for the same reason: `route` carries backend and model
+#: together, so neither `OPENROUTER_MODEL` nor `TOYMATH_AGENT_BACKEND` can
+#: redirect a live run - a Codex entry in `.env` must not turn "the live
+#: OpenRouter test" into a run against someone's ChatGPT allowance.
+LIVE_ROUTE = agent_config.AgentRoute(backend=agent_config.OPENROUTER,
+                                     model=LIVE_MODEL)
+LIVE_CODEX_ROUTE = agent_config.AgentRoute(backend=agent_config.CODEX,
+                                           model=LIVE_CODEX_MODEL)
+
+#: The two process-wide switches that have no argument form. Tracing off: a
+#: test run is not a derivation anyone wants in Langfuse (the module already
+#: forces this at import; the live classes state their own configuration
+#: rather than inherit it). Sandboxes off: whether Deno is installed here
+#: would otherwise decide whether the live model sees 7 tools or 9, and
+#: these derivations are algebra.
+LIVE_ENV = {'TOYMATH_OBSERVABILITY': 'off', 'TOYMATH_SANDBOX': 'off'}
+
+
+class LiveRun(object):
+    """One live class's pinned configuration, held for each test."""
+
+    ROUTE = None
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, LIVE_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def live(self, instruction, **kwargs):
+        return run_instruction(instruction, route=self.ROUTE, **kwargs)
+
+
+class TestLiveDefaults(unittest.TestCase):
+    """What the live classes pin, checked without spending anything."""
+
+    @mock.patch.dict(os.environ,
+                     {'OPENROUTER_MODEL': 'google/gemini-3.6-flash',
+                      'TOYMATH_AGENT_BACKEND': 'codex',
+                      'TOYMATH_CODEX_MODEL': 'gpt-5.6-terra'})
+    def test_a_developers_env_cannot_redirect_a_live_run(self):
+        for route, name, model in (
+                (LIVE_ROUTE, 'openrouter', LIVE_MODEL),
+                (LIVE_CODEX_ROUTE, 'codex', LIVE_CODEX_MODEL)):
+            backend = agent_do.resolve_backend(backend=route.backend,
+                                               model_name=route.model)
+            self.assertEqual(backend.name, name)
+            self.assertEqual(backend.describe_model(), model)
+
+    @mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'auto',
+                                  'TOYMATH_OBSERVABILITY': 'on'})
+    def test_the_pinned_env_switches_figures_and_tracing_off(self):
+        with mock.patch.dict(os.environ, LIVE_ENV):
+            self.assertIsNone(plot_sandbox.get_backend())
+            self.assertIsNone(plot_sandbox.get_tikz_backend())
+            self.assertFalse(observability.active())
+
+    def test_the_pinned_model_is_still_a_configured_endpoint(self):
+        # a retired id must fail here, offline, not against the provider
+        import model_config
+        endpoints = model_config.load_model_config()
+        self.assertIsNotNone(model_config.find_model(endpoints, LIVE_MODEL))
+
+
 @unittest.skipUnless(os.environ.get('TOYMATH_LIVE_TESTS') == '1',
                      'set TOYMATH_LIVE_TESTS=1 for a live OpenRouter test')
-class TestLiveOpenRouter(unittest.TestCase):
+class TestLiveOpenRouter(LiveRun, unittest.TestCase):
+    """Runs on LIVE_MODEL; only the OPEN_ROUTER key comes from `.env`."""
+
+    ROUTE = LIVE_ROUTE
+
     def test_solve_linear_equation(self):
         ledger = Ledger()
-        res = run_instruction('Solve 2x + 3 = 7 for x, step by step.',
-                              ledger=ledger)
+        res = self.live('Solve 2x + 3 = 7 for x, step by step.', ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
         self.assertGreaterEqual(len(res['steps']), 2)
         self.assertEqual(ledger.replay()['status'], 'verified')
@@ -6279,7 +6374,7 @@ class TestLiveOpenRouter(unittest.TestCase):
         ledger = Ledger()
         _interrupt_after(3.0)
         started = time.monotonic()
-        res = run_instruction(
+        res = self.live(
             'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
             'every intermediate result.', ledger=ledger)
         self.assertEqual(res['status'], 'interrupted')
@@ -6291,27 +6386,64 @@ class TestLiveOpenRouter(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('TOYMATH_CODEX_LIVE_TESTS') == '1',
                      'set TOYMATH_CODEX_LIVE_TESTS=1 for a live personal '
                      'Codex test (requires an already authenticated account)')
-class TestLiveCodex(unittest.TestCase):
-    """Requires a signed-in local Codex account; never starts a login."""
+class TestLiveCodex(LiveRun, unittest.TestCase):
+    """Requires a signed-in local Codex account; never starts a login.
+
+    Pinned to the same model as the OpenRouter class, under that account's
+    own id for it, rather than to whatever `TOYMATH_CODEX_MODEL` holds here.
+    """
+
+    ROUTE = LIVE_CODEX_ROUTE
+    _sandbox_home = None
 
     @classmethod
     def setUpClass(cls):
         if not codex_backend.available():
             raise unittest.SkipTest('the Codex extra is not installed')
-        names = [b.name for b in agent_do.make_tool_bindings(DoSession())]
-        if not codex_backend.account_status().logged_in:
-            raise unittest.SkipTest(
-                'no Codex account is signed in; run login! first')
+        # The module runs against a throwaway Codex home so no offline test
+        # can read or rewrite the developer's authenticated one. This class
+        # is the exception: the account IS what it measures, so without the
+        # real home back it skips as "not signed in" on every machine,
+        # including a correctly signed-in one. The runtime caches its home,
+        # so whatever the sandbox started has to go first.
+        codex_backend.close_runtime()
+        cls._enter_real_home()
+        try:
+            # `usable`, not `logged_in`: an API-key or Bedrock account bills
+            # a different credential, and this gate leads to spending
+            if not codex_backend.account_status().usable:
+                raise unittest.SkipTest(
+                    'no managed ChatGPT Codex account is signed in; run '
+                    'login! first')
+            models = {model.id for model in codex_backend.list_models()}
+            if LIVE_CODEX_MODEL not in models:
+                raise unittest.SkipTest(
+                    f'this Codex account does not offer {LIVE_CODEX_MODEL}')
+        except BaseException:
+            # a skip raised here means tearDownClass never runs, and the
+            # rest of the module would keep talking to the real home
+            cls._leave_real_home()
+            raise
 
     @classmethod
     def tearDownClass(cls):
-        codex_backend.close_runtime()
+        cls._leave_real_home()
+
+    @classmethod
+    def _enter_real_home(cls):
+        cls._sandbox_home = os.environ.get(codex_backend.HOME_VAR)
+        _set_codex_home(_REAL_CODEX_HOME)
+
+    @classmethod
+    def _leave_real_home(cls):
+        codex_backend.close_runtime()   # never outlive the home it opened
+        _set_codex_home(cls._sandbox_home)
 
     def test_a_short_derivation_is_verified_and_replays(self):
         ledger = Ledger()
-        res = run_instruction(
+        res = self.live(
             'Expand (x+1)^2 with one tactic call, then set_result.',
-            ledger=ledger, backend='codex')
+            ledger=ledger)
         self.assertTrue(res['ok'], res.get('error'))
         self.assertGreaterEqual(len(res['steps']), 1)
         self.assertTrue(res['final_result'])
@@ -6324,9 +6456,9 @@ class TestLiveCodex(unittest.TestCase):
     def test_stop_interrupts_a_live_turn_and_chains_nothing(self):
         ledger = Ledger()
         _interrupt_after(4.0)
-        res = run_instruction(
+        res = self.live(
             'Integrate x^5 e^{x} dx by parts, one step at a time, showing '
-            'every intermediate result.', ledger=ledger, backend='codex')
+            'every intermediate result.', ledger=ledger)
         self.assertEqual(res['status'], 'interrupted')
         self.assertIsNone(res['final_result'])
         committed = len(ledger.steps)

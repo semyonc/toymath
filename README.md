@@ -280,4 +280,11 @@ cell says so instead of guessing.
 | `TOYMATH_CODEX_LIVE_TESTS=1` | Adds a live Codex derivation test (needs `login!` first). |
 | `TOYMATH_PLOT_TESTS=1` | Adds the Deno figure-sandbox probes. |
 
+A live test decides its own configuration: it always runs on
+`gpt-5.6-luna`, on the backend its class names, with tracing and the figure
+sandboxes off. `OPENROUTER_MODEL`, `TOYMATH_CODEX_MODEL`,
+`TOYMATH_AGENT_BACKEND`, `TOYMATH_OBSERVABILITY`, and `TOYMATH_SANDBOX` in
+your `.env` change what `do!` does, never what a live test measures — only
+the credential is taken from the environment.
+
 MIT License · Semyon C

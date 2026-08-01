@@ -175,6 +175,10 @@ pytest engine/unittests_cell_input.py               # cell readings and rendered
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```
 
+Live tests pin their own backend, model (`gpt-5.6-luna`), tracing, and
+sandbox state, so a developer's `.env` cannot change what they measure; only
+the provider credential comes from the environment.
+
 `python_files` in `pyproject.toml` is an explicit allowlist: a new
 `unittests_*.py` runs only once it is added there, so add it in the same
 commit that creates it.

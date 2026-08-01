@@ -506,8 +506,17 @@ TOYMATH_CODEX_LIVE_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 TOYMATH_PLOT_TESTS=1 .venv/bin/python -m pytest engine/unittests_do.py -q
 ```
 
+A live test is independent of the developer's `.env`: backend and model
+travel together in a pinned `AgentRoute` (`gpt-5.6-luna` on either backend),
+and tracing and the figure sandboxes are pinned off, so neither
+`OPENROUTER_MODEL` nor `TOYMATH_AGENT_BACKEND` can redirect the run and the
+model sees the same tool set on every machine. Only the credential comes
+from the environment. `TestLiveDefaults` checks that pinning offline,
+including that the model id is still a configured endpoint.
+
 The Codex live tests require an already authenticated account and skip rather
-than starting an interactive login. The tool-set contract test needs only the
+than starting an interactive login. They also skip when that account does not
+offer the pinned model. The tool-set contract test needs only the
 installed runtime: it captures the real outgoing request against a loopback
 server, with no account and no network.
 
