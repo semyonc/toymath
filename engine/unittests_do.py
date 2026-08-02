@@ -2882,7 +2882,8 @@ class TestBackendResolution(unittest.TestCase):
     def _env(self, **overrides):
         env = {key: value for key, value in os.environ.items()
                if key not in (agent_config.BACKEND_VAR,
-                              agent_config.OPENROUTER_KEY_VAR)}
+                              agent_config.OPENROUTER_KEY_VAR,
+                              openrouter_backend.BASE_URL_VAR)}
         env.update(overrides)
         return mock.patch.dict(os.environ, env, clear=True)
 
@@ -2908,6 +2909,34 @@ class TestBackendResolution(unittest.TestCase):
                                    side_effect=AssertionError('probed')):
                 resolution = agent_config.resolve(agent_config.AgentRoute())
         self.assertEqual(resolution.backend, 'openrouter')
+
+    def test_a_redirected_endpoint_selects_the_openai_compatible_backend(self):
+        # no OpenRouter key, no Codex login: pointing the base URL at a local
+        # server is itself a complete configuration
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1'}):
+            with mock.patch.object(agent_config, '_codex_usable',
+                                   side_effect=AssertionError('probed')):
+                resolution = agent_config.resolve(agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'openrouter')
+        self.assertIn('localhost:11434', resolution.reason)
+
+    def test_a_redirected_endpoint_outranks_a_leftover_openrouter_key(self):
+        # the reason must name where the run actually goes, not a key that
+        # sits unused in .env
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1',
+                          agent_config.OPENROUTER_KEY_VAR: 'sk-secret'}):
+            resolution = agent_config.resolve(agent_config.AgentRoute())
+            routing = agent_config.describe(agent_config.AgentRoute())
+        self.assertEqual(resolution.backend, 'openrouter')
+        self.assertNotIn(agent_config.OPENROUTER_KEY_VAR, resolution.reason)
+        self.assertEqual(routing['endpoint'], 'http://localhost:11434/v1')
+
+    def test_plain_openrouter_reports_no_redirected_endpoint(self):
+        with self._env(**{agent_config.OPENROUTER_KEY_VAR: 'sk-test'}):
+            routing = agent_config.describe(agent_config.AgentRoute())
+        self.assertIsNone(routing['endpoint'])
 
     def test_codex_is_chosen_only_when_signed_in(self):
         with self._env():
@@ -3888,6 +3917,94 @@ class TestOpenRouterBackendCancellation(unittest.TestCase):
         self.assertEqual(outcome.status, agent_base.INTERRUPTED)
 
 
+class TestOpenAICompatibleEndpoint(unittest.TestCase):
+    """The transport is chat-completions; only the endpoint is OpenRouter's.
+
+    `TOYMATH_OPENAI_BASE_URL` points the same backend at Ollama, vLLM, or any
+    other OpenAI-compatible server. Nothing here contacts a network: building
+    the client is enough to see where it would go, and with which credential.
+    """
+
+    def _env(self, **overrides):
+        env = {key: value for key, value in os.environ.items()
+               if key not in (openrouter_backend.API_KEY_VAR,
+                              openrouter_backend.BASE_URL_VAR,
+                              openrouter_backend.ENDPOINT_KEY_VAR)}
+        env.update(overrides)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def _build(self, model_name=None):
+        # the tracing global is process-wide; this test is about the endpoint
+        with mock.patch('agents.set_tracing_disabled'):
+            return openrouter_backend.build_model(model_name)
+
+    def test_the_default_endpoint_is_openrouter_and_needs_its_key(self):
+        with self._env(**{openrouter_backend.API_KEY_VAR: 'sk-or-test'}):
+            built = self._build()
+        client = built.toymath_client
+        self.assertEqual(str(client.base_url).rstrip('/'),
+                         openrouter_backend.OPENROUTER_BASE_URL)
+        self.assertEqual(client.api_key, 'sk-or-test')
+        with self._env():
+            with self.assertRaises(agent_do.DoAgentError) as caught:
+                openrouter_backend.build_model()
+        self.assertIn(openrouter_backend.API_KEY_VAR, str(caught.exception))
+        self.assertIn(openrouter_backend.BASE_URL_VAR, str(caught.exception))
+
+    def test_a_redirected_endpoint_builds_a_client_there_without_a_key(self):
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1'}):
+            built = self._build('qwen3:14b')
+        self.assertEqual(built.model, 'qwen3:14b')
+        self.assertEqual(str(built.toymath_client.base_url).rstrip('/'),
+                         'http://localhost:11434/v1')
+
+    def test_the_openrouter_key_never_reaches_a_redirected_endpoint(self):
+        # THE landmine: an .env holding OPEN_ROUTER is the normal case, so a
+        # generic key fallback would post a paid credential to whatever host
+        # the base URL names. OPENAI_API_KEY must not leak in either - the
+        # client would read it from the environment if we passed None.
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1',
+                          openrouter_backend.API_KEY_VAR: 'sk-or-secret',
+                          'OPENAI_API_KEY': 'sk-openai-secret'}):
+            built = self._build()
+        self.assertEqual(built.toymath_client.api_key,
+                         openrouter_backend.PLACEHOLDER_KEY)
+
+    def test_a_redirected_endpoint_may_carry_its_own_credential(self):
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'https://gateway.example/v1',
+                          openrouter_backend.ENDPOINT_KEY_VAR: 'sk-gateway'}):
+            built = self._build()
+        self.assertEqual(built.toymath_client.api_key, 'sk-gateway')
+
+    def test_a_trailing_slash_still_reads_as_the_same_endpoint(self):
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          openrouter_backend.OPENROUTER_BASE_URL + '/'}):
+            self.assertIsNone(openrouter_backend.custom_base_url())
+
+    def test_provider_order_is_not_sent_to_a_redirected_endpoint(self):
+        # `provider` is an OpenRouter routing extension, not chat-completions
+        settings = []
+
+        class RecordingModel(ScriptedModel):
+            async def get_response(self, system_instructions, input,
+                                   model_settings, *args, **kwargs):
+                settings.append(model_settings)
+                return await super().get_response(
+                    system_instructions, input, model_settings,
+                    *args, **kwargs)
+
+        with self._env(**{openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1'}):
+            res = run_instruction(
+                'say hello', model=RecordingModel([[message('hello')]]),
+                providers=('Cerebras', 'Fireworks'))
+        self.assertTrue(res['ok'])
+        self.assertIsNone(getattr(settings[0], 'extra_body', None))
+
+
 class TestObservability(unittest.TestCase):
     """Langfuse tracing is opt-in, non-fatal, and never touches the ledger.
 
@@ -4662,10 +4779,16 @@ class TestFigureHtml(unittest.TestCase):
         html = self.render({'kind': 'png', 'data': FAKE_PNG_B64})
         self.assertIn(f'src="data:image/png;base64,{FAKE_PNG_B64}"', html)
 
-    def test_svg_dropped_in_and_hidden_from_mathjax(self):
+    def test_svg_delivered_as_image_not_inline_markup(self):
+        # inline <svg> does not survive an untrusted notebook: JupyterLab
+        # sanitizes text/html outputs and strips the tag, leaving the glyph
+        # text as debris. A data-URI <img> is allowlisted, so the figure
+        # renders with no trust signature, and image context cannot script.
+        import base64
         html = self.render({'kind': 'svg', 'data': FAKE_SVG})
-        self.assertIn(FAKE_SVG, html)       # inert markup, no iframe needed
-        self.assertIn('tex2jax_ignore', html)
+        payload = base64.b64encode(FAKE_SVG.encode()).decode()
+        self.assertIn(f'src="data:image/svg+xml;base64,{payload}"', html)
+        self.assertNotIn('<svg', html)
 
     def test_html_iframed_and_escaped(self):
         # JupyterLab strips <script> from cell output, so plotly only runs
@@ -5000,7 +5123,8 @@ class TestMathShellDo(unittest.TestCase):
 
     def test_do_missing_key_reports_cleanly(self):
         env = {k: v for k, v in os.environ.items()
-               if k != openrouter_backend.API_KEY_VAR}
+               if k not in (openrouter_backend.API_KEY_VAR,
+                            openrouter_backend.BASE_URL_VAR)}
         with mock.patch.dict(os.environ, env, clear=True):
             self.shell.exec('do! solve 2x = 4', 4, add_to_history=True)
         self.assertIn(openrouter_backend.API_KEY_VAR, self._html())
@@ -6459,7 +6583,12 @@ LIVE_CODEX_ROUTE = agent_config.AgentRoute(backend=agent_config.CODEX,
 #: rather than inherit it). Sandboxes off: whether Deno is installed here
 #: would otherwise decide whether the live model sees 7 tools or 9, and
 #: these derivations are algebra.
-LIVE_ENV = {'TOYMATH_OBSERVABILITY': 'off', 'TOYMATH_SANDBOX': 'off'}
+#: The base URL is pinned for the same reason as the model: a developer who
+#: points ToyMath at a local server must not thereby turn "the live
+#: OpenRouter test" into a run against their own machine.
+LIVE_ENV = {'TOYMATH_OBSERVABILITY': 'off', 'TOYMATH_SANDBOX': 'off',
+            openrouter_backend.BASE_URL_VAR:
+                openrouter_backend.OPENROUTER_BASE_URL}
 
 
 class LiveRun(object):
@@ -6482,7 +6611,9 @@ class TestLiveDefaults(unittest.TestCase):
     @mock.patch.dict(os.environ,
                      {'OPENROUTER_MODEL': 'google/gemini-3.6-flash',
                       'TOYMATH_AGENT_BACKEND': 'codex',
-                      'TOYMATH_CODEX_MODEL': 'gpt-5.6-terra'})
+                      'TOYMATH_CODEX_MODEL': 'gpt-5.6-terra',
+                      openrouter_backend.BASE_URL_VAR:
+                          'http://localhost:11434/v1'})
     def test_a_developers_env_cannot_redirect_a_live_run(self):
         for route, name, model in (
                 (LIVE_ROUTE, 'openrouter', LIVE_MODEL),
@@ -6491,6 +6622,11 @@ class TestLiveDefaults(unittest.TestCase):
                                                model_name=route.model)
             self.assertEqual(backend.name, name)
             self.assertEqual(backend.describe_model(), model)
+        # the endpoint travels with the model: a local base URL in .env must
+        # not turn the live OpenRouter test into a run against localhost
+        self.assertIsNotNone(openrouter_backend.custom_base_url())
+        with mock.patch.dict(os.environ, LIVE_ENV):
+            self.assertIsNone(openrouter_backend.custom_base_url())
 
     @mock.patch.dict(os.environ, {'TOYMATH_SANDBOX': 'auto',
                                   'TOYMATH_OBSERVABILITY': 'on'})

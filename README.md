@@ -245,16 +245,30 @@ written into a notebook, a ledger, or a trace.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPEN_ROUTER` | — | OpenRouter API key *(secret)*. Enables the OpenRouter backend, and selects it under `backend! auto`. |
-| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Default OpenRouter model. `model!` overrides it per notebook. |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Default model for this backend. `model!` overrides it per notebook — set it when the endpoint below is not OpenRouter. |
+| `TOYMATH_OPENAI_BASE_URL` | OpenRouter | Points the same backend at any OpenAI-compatible endpoint — Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, a gateway. Also selects the backend under `backend! auto`. Provider order does not apply there. |
+| `TOYMATH_OPENAI_API_KEY` | a placeholder | That endpoint's own credential *(secret)*, if it wants one. `OPEN_ROUTER` is never sent to a redirected endpoint. |
 | `TOYMATH_AGENT_BACKEND` | unset | Forces `openrouter` or `codex`. Outranked only by an explicit `backend!` in the notebook. |
 | `TOYMATH_CODEX_MODEL` | the account's own default | Default model for the Codex backend. ToyMath hardcodes none — the runtime chooses (`gpt-5.6-sol` with the currently pinned one). `model!` overrides it per notebook. |
 | `TOYMATH_CODEX_HOME` | `~/.toymath/codex-home` | ToyMath's dedicated Codex home. Must not be the general one; a directory ToyMath did not create is refused rather than overwritten. |
 | `CODEX_HOME` | `~/.codex` | Read only to know which home to stay out of. ToyMath never reads its contents or its `auth.json`. |
 
 Backend resolution under `backend! auto`, in order: an explicit `backend!` in
-this notebook → `TOYMATH_AGENT_BACKEND` → OpenRouter if `OPEN_ROUTER` is set →
-Codex if a managed ChatGPT account is signed in. If nothing is configured, the
-cell says so instead of guessing.
+this notebook → `TOYMATH_AGENT_BACKEND` → the OpenAI-compatible backend if
+`TOYMATH_OPENAI_BASE_URL` or `OPEN_ROUTER` is set → Codex if a managed ChatGPT
+account is signed in. If nothing is configured, the cell says so instead of
+guessing.
+
+Running a local model, for example, is two variables and a `model!`:
+
+```bash
+echo 'TOYMATH_OPENAI_BASE_URL=http://localhost:11434/v1' >> .env
+echo 'OPENROUTER_MODEL=qwen3:14b' >> .env      # or `model! qwen3:14b`
+```
+
+`do!` asks for 7–9 tools and a multi-turn tactic sequence, so a local model
+needs solid tool-calling and a context window that fits ~4k tokens of prompt
+and schemas before a skill is even loaded — with Ollama, raise `num_ctx`.
 
 ### Figure sandboxes
 

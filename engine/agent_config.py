@@ -180,6 +180,16 @@ def _complete_words(code, cursor_pos, pattern, options):
     }
 
 
+def openai_endpoint():
+    """`(url, variable)` for a redirected OpenAI-compatible endpoint.
+
+    `url` is None when this installation talks to OpenRouter. Costs one
+    environment lookup, never a provider call, so display may ask freely.
+    """
+    from agent_backends import openrouter
+    return openrouter.custom_base_url(), openrouter.BASE_URL_VAR
+
+
 def codex_models():
     """The models this Codex account offers.
 
@@ -199,6 +209,12 @@ def resolve(route, probe=True):
     configured = (os.environ.get(BACKEND_VAR) or '').strip().lower()
     if configured in SELECTABLE:
         return Resolution(configured, f'{BACKEND_VAR} is set to {configured}')
+    endpoint, endpoint_var = openai_endpoint()
+    if endpoint is not None:
+        # ahead of the key check on purpose: a redirected endpoint is where
+        # the run would actually go, and reporting a leftover OPEN_ROUTER as
+        # the reason would name a service this notebook never contacts
+        return Resolution(OPENROUTER, f'{endpoint_var} points at {endpoint}')
     if os.environ.get(OPENROUTER_KEY_VAR):
         # existing installations keep working exactly as before
         return Resolution(OPENROUTER,
@@ -208,8 +224,9 @@ def resolve(route, probe=True):
                                  'machine')
     raise DoAgentError(
         'no agent backend is configured: run `login!` to use your own Codex '
-        f'account (experimental), or put an OpenRouter key in '
-        f'.env as {OPENROUTER_KEY_VAR}')
+        f'account (experimental), put an OpenRouter key in .env as '
+        f'{OPENROUTER_KEY_VAR}, or point {endpoint_var} at an '
+        'OpenAI-compatible endpoint')
 
 
 def preview(route):
@@ -229,10 +246,14 @@ def describe(route):
     """A short, honest routing summary: backend, why, model."""
     resolution = preview(route)
     model = route.model or default_model(resolution.backend)
+    endpoint, _ = openai_endpoint()
     return {
         'backend': resolution.backend,
         'reason': resolution.reason,
         'model': model,
         'providers': tuple(route.providers),
         'experimental': resolution.backend in EXPERIMENTAL,
+        # only meaningful for the OpenAI-compatible backend; Codex has an
+        # endpoint of its own that this variable does not touch
+        'endpoint': endpoint if resolution.backend == OPENROUTER else None,
     }
