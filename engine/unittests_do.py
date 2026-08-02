@@ -4779,10 +4779,16 @@ class TestFigureHtml(unittest.TestCase):
         html = self.render({'kind': 'png', 'data': FAKE_PNG_B64})
         self.assertIn(f'src="data:image/png;base64,{FAKE_PNG_B64}"', html)
 
-    def test_svg_dropped_in_and_hidden_from_mathjax(self):
+    def test_svg_delivered_as_image_not_inline_markup(self):
+        # inline <svg> does not survive an untrusted notebook: JupyterLab
+        # sanitizes text/html outputs and strips the tag, leaving the glyph
+        # text as debris. A data-URI <img> is allowlisted, so the figure
+        # renders with no trust signature, and image context cannot script.
+        import base64
         html = self.render({'kind': 'svg', 'data': FAKE_SVG})
-        self.assertIn(FAKE_SVG, html)       # inert markup, no iframe needed
-        self.assertIn('tex2jax_ignore', html)
+        payload = base64.b64encode(FAKE_SVG.encode()).decode()
+        self.assertIn(f'src="data:image/svg+xml;base64,{payload}"', html)
+        self.assertNotIn('<svg', html)
 
     def test_html_iframed_and_escaped(self):
         # JupyterLab strips <script> from cell output, so plotly only runs

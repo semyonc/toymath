@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import base64
 import html as _html
 import inspect
 import re
@@ -748,8 +749,13 @@ class MathShell(object):
         """One sandbox figure as HTML, by kind.
 
         png  - a raster, inlined as a data URI.
-        svg  - TikZ output: inert markup with its fonts already inlined,
-               so it drops straight in and still renders offline.
+        svg  - TikZ output: fonts already inlined, so it still renders
+               offline. Delivered as a data-URI <img>, never as inline
+               markup: an untrusted notebook's text/html outputs go
+               through JupyterLab's sanitizer, which strips <svg> and
+               leaves the glyph text as debris, while a data-URI <img>
+               is allowlisted. Image context also means the SVG cannot
+               script or fetch, in trusted notebooks too.
         html - plotly, which needs its own <script> to run. JupyterLab
                strips scripts from cell output, so it only survives inside
                an iframe, which is a separate browsing context. srcdoc is
@@ -759,10 +765,10 @@ class MathShell(object):
         kind = figure.get('kind', 'png')
         data = figure.get('data') or ''
         if kind == 'svg':
-            # tex2jax_ignore: the glyphs are already typeset, MathJax must
-            # not re-scan them for $...$ delimiters
-            return (f'<div class="tex2jax_ignore" '
-                    f'style="max-width:640px;overflow-x:auto">{data}</div>')
+            payload = base64.b64encode(data.encode('utf-8')).decode('ascii')
+            return (f'<div style="max-width:640px;overflow-x:auto">'
+                    f'<img src="data:image/svg+xml;base64,{payload}" '
+                    f'style="max-width:640px"/></div>')
         if kind == 'html':
             height = int(figure.get('height') or 520)
             return (f'<iframe sandbox="allow-scripts" '
