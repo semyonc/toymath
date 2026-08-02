@@ -10,6 +10,13 @@ its loop are reachable from the run handle, so Jupyter Stop can actually stop
 the provider call instead of leaving a daemon thread talking to OpenRouter
 after the cell has ended.
 
+The transport is plain OpenAI chat-completions, so `TOYMATH_OPENAI_BASE_URL`
+points the same backend at any endpoint that speaks it - Ollama, vLLM, LM
+Studio, a gateway. OpenRouter stays the default and the name; only the
+endpoint moves. Exactly two things here are OpenRouter's own: the default
+base URL and the `provider` routing block, and the second is not sent
+anywhere else.
+
 LANDMINE (see AGENTS.md): the OpenInference instrumentor rides the Agents-SDK
 tracing pipeline, so `build_model` may only disable that pipeline when
 observability is inactive. That coupling lives here and nowhere else.
@@ -29,10 +36,62 @@ log = logging.getLogger('toymath.agent.openrouter')
 
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 API_KEY_VAR = 'OPEN_ROUTER'
+#: Redirects this backend to another OpenAI-compatible endpoint.
+BASE_URL_VAR = 'TOYMATH_OPENAI_BASE_URL'
+#: That endpoint's own credential, if it wants one.
+ENDPOINT_KEY_VAR = 'TOYMATH_OPENAI_API_KEY'
+#: A local server needs no credential, but the OpenAI client refuses an
+#: empty one, so a redirected endpoint gets a placeholder rather than
+#: whatever key happens to be lying around in the environment.
+PLACEHOLDER_KEY = 'toymath-local'
 DEFAULT_MAX_TURNS = 64
 # providers intermittently return a zero-token, empty assistant message;
 # ask again rather than let it end the derivation
 EMPTY_RESPONSE_RETRIES = 3
+
+
+# ---------------------------------------------------------------------------
+# endpoint
+# ---------------------------------------------------------------------------
+
+def base_url():
+    """The OpenAI-compatible endpoint this installation talks to."""
+    configured = (os.environ.get(BASE_URL_VAR) or '').strip().rstrip('/')
+    return configured or OPENROUTER_BASE_URL
+
+
+def custom_base_url():
+    """The redirected endpoint, or None when this is plain OpenRouter.
+
+    Read by anything that must not assume OpenRouter semantics: provider
+    ordering, and the notebook's routing display.
+    """
+    url = base_url()
+    return None if url == OPENROUTER_BASE_URL else url
+
+
+def resolve_endpoint():
+    """`(base_url, api_key)` for the configured endpoint.
+
+    LANDMINE: the OpenRouter key must never travel to a redirected endpoint.
+    A `.env` holding `OPEN_ROUTER` is the normal case, and reusing that value
+    as a generic default would post a paid credential to whatever host
+    `TOYMATH_OPENAI_BASE_URL` names - a localhost port, a colleague's
+    gateway. A redirected endpoint reads its own variable or gets a
+    placeholder, and the same rule keeps `OPENAI_API_KEY` out of it: the key
+    is always passed explicitly, so the OpenAI client never falls back to
+    reading the environment itself.
+    """
+    url = base_url()
+    if url == OPENROUTER_BASE_URL:
+        key = os.environ.get(API_KEY_VAR)
+        if not key:
+            raise DoAgentError(
+                f'{API_KEY_VAR} is not set - put the OpenRouter key in .env, '
+                f'or point {BASE_URL_VAR} at an OpenAI-compatible endpoint')
+        return url, key
+    return url, ((os.environ.get(ENDPOINT_KEY_VAR) or '').strip()
+                 or PLACEHOLDER_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +142,8 @@ def _retrying_model(base_cls):
 
 
 def build_model(model_name=None):
-    """OpenRouter-backed chat-completions model for the Agents SDK."""
-    key = os.environ.get(API_KEY_VAR)
-    if not key:
-        raise DoAgentError(
-            f'{API_KEY_VAR} is not set - put the OpenRouter key in .env')
+    """Chat-completions model for the Agents SDK, on the configured endpoint."""
+    url, key = resolve_endpoint()
     from openai import AsyncOpenAI
     from agents import OpenAIChatCompletionsModel, set_tracing_disabled
     # Leave the Agents SDK tracing ENABLED only while the OpenInference
@@ -96,7 +152,7 @@ def build_model(model_name=None):
     # shipped to OpenAI's backend - including the case where Langfuse is
     # active but the instrumentor could not attach.
     set_tracing_disabled(not observability.instrumented())
-    client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
+    client = AsyncOpenAI(base_url=url, api_key=key)
     model = _retrying_model(OpenAIChatCompletionsModel)(
         model=model_name or os.environ.get(MODEL_VAR, DEFAULT_MODEL),
         openai_client=client)
@@ -268,7 +324,10 @@ class OpenRouterRunHandle(ThreadedRunHandle):
     def _run_config(self):
         from agents import ModelSettings, RunConfig
         settings = None
-        if self.providers:
+        # `provider` is an OpenRouter routing extension, not part of the
+        # chat-completions wire format: a redirected endpoint has no provider
+        # fleet to order and would be handed a body field it never asked for.
+        if self.providers and custom_base_url() is None:
             settings = ModelSettings(extra_body={
                 'provider': {
                     'order': list(self.providers),

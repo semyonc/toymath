@@ -275,6 +275,14 @@ class MathShell(object):
         model = routing['model'] or f'{routing["backend"]} default'
         if routing['backend'] == agent_config.CODEX:
             detail = 'your own Codex account'
+        elif routing['endpoint']:
+            # ahead of the provider branch: provider order is an OpenRouter
+            # extension and is not sent here, so advertising it would
+            # describe routing this run does not get
+            detail = ('OpenAI-compatible endpoint <code>'
+                      + _html.escape(routing['endpoint']) + '</code>')
+            if routing['providers']:
+                detail += ' &mdash; provider order does not apply here'
         elif routing['providers']:
             detail = ('providers <code>'
                       + _html.escape(', '.join(routing['providers']))

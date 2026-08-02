@@ -374,6 +374,21 @@ if isinstance(n, IntegerValue): ...
   and `login!`. Backends convert
   representation only — names, descriptions, schemas, and handlers come from
   `make_tool_bindings`, and a parity test fails if the two adapters differ.
+- The `openrouter` backend is an OpenAI **chat-completions** backend whose
+  default endpoint is OpenRouter; `TOYMATH_OPENAI_BASE_URL` moves it to any
+  server speaking that protocol (Ollama, vLLM, a gateway), and
+  `agent_config.resolve` treats that redirect as a complete configuration,
+  ahead of `OPEN_ROUTER`. Only two things are OpenRouter's own: the default
+  base URL, and the `provider` order block in `_run_config` — which is a
+  vendor routing extension, so it is withheld from a redirected endpoint
+  rather than sent as an unknown body field. LANDMINE: `resolve_endpoint`
+  must never hand `OPEN_ROUTER` (or let the client read `OPENAI_API_KEY`)
+  to a redirected endpoint — a `.env` holding a paid key is the normal
+  case, and a generic fallback would post that credential to whatever host
+  the base URL names. A redirected endpoint reads `TOYMATH_OPENAI_API_KEY`
+  or gets a placeholder. Do not rename the backend to match: the name
+  reaches `backend!` completion, the lexer parity test, trace metadata, and
+  the ledger's provenance story.
 - Cancellation is load-bearing, not polish. `DoSession.close(reason)` under
   the session lock is the ledger mutation boundary: a record that wins the
   lock commits atomically, everything later is refused. An interrupted cell
