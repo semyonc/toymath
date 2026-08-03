@@ -1824,6 +1824,38 @@ class TestParsingEdges(unittest.TestCase):
         sym, n = P.parse_latex('1 \\cdot 2')
         self.assertIn('\\cdot', P.write_latex(sym, n))
 
+    def test_spacing_tokens_are_presentation_only_in_normal_forms(self):
+        # \, \; \quad are the same class as the \cdot prop: every reader
+        # convention filters them, so comparison must too (live: an int!
+        # chain root spelled `\int ... \, dt` could not cover its own
+        # goal spelled `\int ... dt`, and the verified FTC result was
+        # refused at admission)
+        self.assertTrue(P.same_expression('2 \\, x', '2 x'))
+        self.assertTrue(P.same_expression('x \\; + 1', 'x + 1'))
+        self.assertTrue(P.same_expression(
+            '\\int x^{2} \\, dx', '\\int x^{2} dx'))
+        self.assertTrue(P.same_expression(
+            '\\frac{d}{dx}\\int_{0}^{x^{2}}\\sqrt{1+t^{2}}\\,dt',
+            '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'))
+        # the gen-68 capture boundary must survive style-blindness
+        self.assertFalse(P.same_expression('\\cos(x) y', '\\cos(x y)'))
+        self.assertTrue(P.same_expression('\\cos x \\, y', '\\cos x y'))
+
+    def test_leibniz_chain_root_covers_the_rendered_goal(self):
+        # the live trace's exact admission shape: the agent fed the full
+        # Leibniz spelling verbatim (with the textbook \,) and the goal
+        # was the instruction's rendered spelling (without); the chain
+        # must cover
+        from expr_commands import _chains_to_goal
+        rec = Differentiation.differentiate(
+            '\\frac{d}{dx}\\int_{0}^{x^{2}}\\sqrt{1+t^{2}}\\,dt', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        book = ledger_module.Ledger()
+        step = book.record(rec)
+        self.assertTrue(_chains_to_goal(
+            book.steps, step['id'],
+            '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'))
+
     def test_display_latex_prettifies_only_structural_product_stars(self):
         cases = {
             '3*x': '3 \\cdot x',

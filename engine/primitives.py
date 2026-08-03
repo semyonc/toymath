@@ -182,17 +182,26 @@ class _GroupStripper(Replicator):
         return super(_GroupStripper, self).enter_oper(sym, f)
 
     def enter_plist(self, sym, f):
-        # explicit-\cdot marking is presentation only (the structural
-        # comparer ignores it); the comparison normal form must too, or
-        # linkage refuses honest respellings of one product
+        # explicit-\cdot marking and spacing tokens (\, \; \quad ...) are
+        # presentation only — every reader convention filters them, so the
+        # comparison normal form must too, or linkage refuses honest
+        # respellings of one product (live: a chain root spelled
+        # `\int ... \, dt` could not cover its own goal spelled
+        # `\int ... dt`, and the verified result was refused at admission)
         spans = self._explicit_func_spans(list(f.args))
         if spans is not None:
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
             return self.output_notation.repf(
                 self.mapsym(sym), Func(Notation.P_LIST, spans, **props))
-        if 'cdot' in f.props:
-            args = self.build_list(f, self.enter_expr)
+        kept = [a for a in f.args
+                if not (isinstance(a, Symbol) and a.name in Notation.styles)]
+        if len(kept) != len(f.args) or 'cdot' in f.props:
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            if len(kept) == 1:
+                # a product reduced to one factor is that factor, exactly
+                # as enter_group unwraps a transparent group
+                return self.enter_formula(kept[0])
+            args = tuple(self.enter_expr(a) for a in (kept or f.args))
             return self.output_notation.repf(
                 self.mapsym(sym), Func(Notation.P_LIST, args, **props))
         return super(_GroupStripper, self).enter_plist(sym, f)
