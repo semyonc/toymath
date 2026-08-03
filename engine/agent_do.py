@@ -1063,6 +1063,22 @@ def resolve_backend(backend=None, model=None, model_name=None, providers=(),
                              providers=providers, max_turns=max_turns)
 
 
+def _stated_premises(premises, chain_goal):
+    """Premises worth naming beside the result.
+
+    A premise that merely restates the requested expression — or a piece
+    the goal itself wraps, like the integrand of the goal integral —
+    names nothing the reader must grant beyond the cell they typed: the
+    task is not a given (live: a one-step FTC cell reported "rests on 1
+    stated premise" naming its own d/dx input). Typed coefficients and
+    other genuine givens never cover the goal, so they always survive;
+    with no goal to compare (plain do!), every premise stands."""
+    if chain_goal is None:
+        return premises
+    return [p for p in premises
+            if not primitives.covers_goal(p['input'], chain_goal)]
+
+
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
                     plot_backend=None, proof_goal=None, tikz_backend=None,
@@ -1219,7 +1235,9 @@ def finalize_session(session, outcome, max_turns=None):
     # ledger does not re-attribute an earlier cell's givens to this one.
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
-    final_premises = session.ledger.premises(spine or run_ids or None)
+    final_premises = _stated_premises(
+        session.ledger.premises(spine or run_ids or None),
+        session.chain_goal)
     figure_events = session.figure_events()
     figures = [{'id': event['id'], 'caption': event['caption'],
                 'figures': event['figures']}

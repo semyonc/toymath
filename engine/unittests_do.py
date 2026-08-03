@@ -5172,7 +5172,7 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('literal * prose', mixed)
         self.assertIn('$x \\cdot y$', mixed)
 
-    def test_chain_table_skips_comments_and_short_runs(self):
+    def test_chain_table_skips_runs_with_nothing_checked(self):
         comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
                    'args': {'text': 'strategy note'}, 'input': None,
                    'result': None, 'check': {'status': 'note'},
@@ -5182,8 +5182,37 @@ class TestMathShellDo(unittest.TestCase):
                   'input': None, 'result': None,
                   'check': {'status': 'note'}, 'assumptions': []}
         self.assertIsNone(self.shell.render_do_chain([]))
-        self.assertIsNone(self.shell.render_do_chain(
-            [comment, branch, self._chain_step('s3', 'expand', '5')]))
+        self.assertIsNone(self.shell.render_do_chain([comment, branch]))
+
+    def test_single_step_run_renders_its_receipt(self):
+        # a one-step derivation still shows the kernel-rendered check
+        # verdict: without its row, the only on-screen "verified" is
+        # agent prose — exactly what the table exists to replace (live:
+        # the one-step FTC cell showed its result with no receipt)
+        html = self.shell.render_do_chain(
+            [self._chain_step('s1', 'differentiate',
+                              '2x \\sqrt{x^{4}+1}')])
+        self.assertIn('verified chain', html)
+        self.assertIn('<code>s1</code>', html)
+        self.assertIn('<code>differentiate</code>', html)
+        self.assertIn('agree', html)
+
+    def test_goal_restatement_is_not_a_stated_premise(self):
+        # the task is not a given: a premise naming the requested
+        # expression (or a piece the goal wraps) says nothing beyond the
+        # cell the reader typed; genuine givens never cover the goal
+        premises = [
+            {'step': 's1',
+             'input': '\\frac{d}{dx}\\int_{0}^{x^{2}}'
+                      '\\sqrt{1+t^{2}}\\,dt'},
+            {'step': 's2', 'input': 'A = 3'},
+        ]
+        goal = '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'
+        kept = agent_do._stated_premises(premises, goal)
+        self.assertEqual([p['step'] for p in kept], ['s2'])
+        # with no goal to compare (plain do!), every premise stands
+        self.assertEqual(agent_do._stated_premises(premises, None),
+                         premises)
 
     def test_branch_marker_stream_render_is_plain_annotation(self):
         html = self.shell.render_do_step({

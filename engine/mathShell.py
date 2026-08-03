@@ -627,16 +627,23 @@ class MathShell(object):
     def render_do_chain(self, steps, topology=None, all_steps=None):
         """End-of-run summary table of a run's verified chain, generated
         from the ledger records themselves — the agent is told never to
-        retype it. Returns None when a table would add nothing (fewer
-        than two transforming steps). Marker-classified dead paths become
-        collapsed, expandable rows instead of bare branch labels."""
+        retype it. Returns None only when there is nothing checked to
+        show (no transforming steps): a single-step run still renders its
+        one-row table, because that row is the only kernel-rendered place
+        the check verdict appears — without it, "verified" is agent
+        prose, which is exactly what this table exists to replace (live:
+        a one-step FTC cell showed its result with no receipt).
+        Marker-classified dead paths become collapsed, expandable rows
+        instead of bare branch labels."""
         transforming = [s for s in steps if s.get('result') is not None]
         all_transforming = [
             s for s in (all_steps if all_steps is not None else steps)
             if s.get('result') is not None]
 
         def result_cells(step, nested=False):
-            check = step['check'].get('status', '?')
+            # tolerate minimal step dicts: rendering must never fail a
+            # derivation (real recorded steps always carry check/assumptions)
+            check = (step.get('check') or {}).get('status', '?')
             color = self._CHECK_COLORS.get(check, '#c00')
             edge = step.get('exploration') or {}
             if edge:
@@ -658,7 +665,7 @@ class MathShell(object):
                 a = step['args']
                 note = ' ' + _html.escape(a['op'] + ' ' + a['arg'])
             assum = ''
-            if step['assumptions']:
+            if step.get('assumptions'):
                 assum = (f' <span style="color:#888">+'
                          f'{len(step["assumptions"])} assum.</span>')
             cell = 'padding:2px 12px 2px 0;text-align:left;' \
@@ -700,7 +707,7 @@ class MathShell(object):
             paths_by_insertion.setdefault(insertion, []).append(
                 dict(path, steps=ids))
             folded.update(sid for sid in ids if sid in current_ids)
-        if len(transforming) < 2 and not paths_by_insertion:
+        if not transforming and not paths_by_insertion:
             return None
         by_id = {s['id']: s for s in all_transforming}
         rows = []
