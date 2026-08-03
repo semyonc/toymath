@@ -347,6 +347,17 @@ writer, comparer, and replicator landmines.
   an interior/endpoint singularity) have no closing tactic. A chain rooted
   at the bare integrand — or the bare body of any value-bearing binder,
   such as a limit — is never accepted as the bounded expression's value.
+- In the other direction, `differentiate` closes the derivative of a
+  variable-bound definite integral through the FTC bound rule
+  (`f(b(x)) b'(x) - f(a(x)) a'(x)`), recording continuity of the integrand
+  between the bounds; the check leg evaluates the integral as a function
+  by quadrature and central-differences it. An integrand that itself
+  depends on the differentiation variable is refused — differentiation
+  under the integral sign is not in the rule set — as is an unevaluated
+  indefinite integral, which the derivative rules never reach across. The
+  Leibniz operator spelling `\frac{d}{d x} (...)` is a reading convention
+  at the differentiate boundary (and diff! variable inference), not a
+  notation node; elsewhere it remains an ordinary fraction.
 - Matrix arithmetic is literal-only and cell-wise: the named tactics add,
   scale, multiply (ordered, exactly two factors), transpose, and take 2x2
   determinants of written-out matrices, delegating each cell to checked

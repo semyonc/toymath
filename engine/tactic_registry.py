@@ -668,7 +668,9 @@ TACTICS = (
                transforming=False),
 
     TacticSpec('diff', 'differentiate', 'differentiation',
-               'differentiate with respect to a variable',
+               'differentiate with respect to a variable (a '
+               'variable-bound definite integral closes via the FTC '
+               'bound rule)',
                differentiation.differentiate, (E, V)),
 
     TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',

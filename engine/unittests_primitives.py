@@ -5553,6 +5553,190 @@ class TestNumericDefiniteCheck(unittest.TestCase):
         self.assertEqual(check['status'], 'skipped')
 
 
+class TestDerivativeOperatorParts(unittest.TestCase):
+    """The Leibniz-prefix reading convention: consulted only at the
+    differentiate boundary, so nothing else re-reads a fraction."""
+
+    def test_prefix_form(self):
+        self.assertEqual(
+            P.derivative_operator_parts('\\frac{d}{d x} (x^2+1)'),
+            ('x', 'x^{2}+1'))
+
+    def test_adjacent_dx_spelling(self):
+        var, operand = P.derivative_operator_parts('\\frac{d}{dx} x^3')
+        self.assertEqual(var, 'x')
+        self.assertEqual(operand, 'x^{3}')
+
+    def test_operand_spanning_several_factors(self):
+        var, operand = P.derivative_operator_parts(
+            '\\frac{d}{d u} u \\sin u')
+        self.assertEqual(var, 'u')
+        self.assertEqual(
+            Core.equal_exprs(operand, 'u \\sin u')['verdict'], 'yes')
+
+    def test_differential_in_numerator_form(self):
+        var, operand = P.derivative_operator_parts('\\frac{d y}{d x}')
+        self.assertEqual((var, operand), ('x', 'y'))
+
+    def test_numerator_operand_with_trailing_factors_is_ambiguous(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('\\frac{d y}{d x} z'))
+
+    def test_macro_named_variable(self):
+        var, _ = P.derivative_operator_parts(
+            '\\frac{d}{d \\alpha} \\alpha^2')
+        self.assertEqual(var, '\\alpha')
+
+    def test_bare_operator_without_operand_is_none(self):
+        self.assertIsNone(P.derivative_operator_parts('\\frac{d}{d x}'))
+
+    def test_ordinary_fraction_is_none(self):
+        self.assertIsNone(P.derivative_operator_parts('\\frac{a}{b} x'))
+        self.assertIsNone(P.derivative_operator_parts('\\frac{d}{b} x'))
+        self.assertIsNone(P.derivative_operator_parts('\\frac{a}{d x} x'))
+
+    def test_higher_order_operator_is_not_misread(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('\\frac{d^2}{d x^2} x^3'))
+
+    def test_fraction_not_in_prefix_position_is_none(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('y \\frac{d}{d x} x'))
+
+
+class TestDifferentiateDefiniteIntegral(unittest.TestCase):
+    """The FTC bound rule as a differentiate branch: d/dx of a
+    variable-bound definite integral, checked by quadrature plus a
+    central difference."""
+
+    ASK = '\\int_0^{x^2} \\sqrt{1+t^2} d t'
+
+    def test_variable_upper_bound_closes(self):
+        rec = Differentiation.differentiate(self.ASK, 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['check']['method'],
+                         'quadrature central-difference')
+        self.assertEqual(rec['method'], 'ftc')
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+
+    def test_leibniz_spelling_names_its_own_variable(self):
+        rec = Differentiation.differentiate(
+            '\\frac{d}{d x} ' + self.ASK, None)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['args']['var'], 'x')
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+        # the record's input stays the typed spelling
+        self.assertIn('\\frac{d}{d x}', rec['input'])
+
+    def test_leibniz_variable_mismatch_refuses(self):
+        rec = Differentiation.differentiate('\\frac{d}{d y} y^2', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('d/dy', rec['error'])
+
+    def test_both_bounds_variable(self):
+        rec = Differentiation.differentiate(
+            '\\int_{x}^{x^2} t^3 d t', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x^{7} - x^{3}')['verdict'], 'yes')
+
+    def test_constant_bounds_differentiate_to_zero(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^1 \\sqrt{1+t^2} d t', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+
+    def test_continuity_is_recorded_not_proved(self):
+        rec = Differentiation.differentiate(self.ASK, 'x')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('continuous between 0 and x^{2}' in t
+                            for t in texts), texts)
+
+    def test_refuses_the_bound_variable(self):
+        rec = Differentiation.differentiate(self.ASK, 't')
+        self.assertFalse(rec['ok'])
+        self.assertIn('integration variable', rec['error'])
+
+    def test_refuses_differentiation_under_the_integral_sign(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^{x^2} x t \\, d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('under the integral sign', rec['error'])
+
+    def test_refuses_a_bound_containing_the_integration_variable(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^{t} t^2 \\, d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bound', rec['error'])
+
+    def test_indefinite_integral_is_never_a_silent_constant(self):
+        # measured before the guard: the polyrat path atomized the
+        # integral and differentiated the atom to a silent, uncheckable 0
+        rec = Differentiation.differentiate('\\int t^2 d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('indefinite', rec['error'])
+
+    def test_rules_never_reach_across_the_integral_sign(self):
+        # measured before the guard: the product rule once returned
+        # `\int 2x dx + \int x^2 d` for this input
+        rec = Differentiation.differentiate('\\int x^2 d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('indefinite', rec['error'])
+
+    def test_embedded_definite_integral_names_the_route(self):
+        rec = Differentiation.differentiate(
+            'x + \\int_0^{x^2} \\sqrt{1+t^2} d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('its own step', rec['error'])
+
+    def test_leibniz_prefix_on_a_plain_expression(self):
+        rec = Differentiation.differentiate(
+            '\\frac{d}{d x} (x^2+1)', None)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '2x')
+
+
+class TestFtcDerivativeCheck(unittest.TestCase):
+    """The independent leg: quadrature evaluates the integral as a
+    function, a central difference differentiates it, and a planted lie
+    must be refused with evidence."""
+
+    ASK = '\\int_0^{x^2} \\sqrt{1+t^2} d t'
+
+    def test_correct_derivative_agrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '2 x \\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_missing_chain_factor_disagrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '\\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_corrupted_coefficient_disagrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '2.001 x \\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_parameterized_bounds_sample_the_parameter(self):
+        check = Differentiation._ftc_derivative_check(
+            '\\int_{x}^{a x} t \\, d t', 'a^{2} x - x', 'x')
+        self.assertEqual(check['status'], 'agree')
+        check = Differentiation._ftc_derivative_check(
+            '\\int_{x}^{a x} t \\, d t', 'a^{2} x + x', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_not_an_integral_is_skipped(self):
+        check = Differentiation._ftc_derivative_check('x^2', '2x', 'x')
+        self.assertEqual(check['status'], 'skipped')
+
+
 class TestIntegrateDefinite(unittest.TestCase):
     """FTC part 2 as a narrow move over a recorded antiderivative."""
 

@@ -5742,6 +5742,22 @@ class TestExprComposite(unittest.TestCase):
         for s in self.shell.ledger.steps:
             self.assertEqual(s['check']['status'], 'agree')
 
+    def test_leibniz_prefixed_definite_integral_is_zero_token(self):
+        # the user's exact spelling: the operator names the variable (so
+        # inference never sees the free 'd'), the FTC bound rule closes
+        # the integral, and no agent runs
+        self.shell.exec(
+            'diff! \\frac{d}{d x} \\int_0^{x^2} \\sqrt{1+t^2} d t',
+            1, add_to_history=True)
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['differentiate'])
+        step = self.shell.ledger.steps[0]
+        self.assertEqual(step['check']['status'], 'agree')
+        self.assertEqual(core_tactics.equal_exprs(
+            step['result'], '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+        texts = [a['text'] for a in step.get('assumptions', [])]
+        self.assertTrue(any('continuous' in t for t in texts), texts)
+
     def test_history_backrefs_do_not_accumulate_index_braces(self):
         # Final do!/composite output is future [[n]] input.  Every old plain
         # writer hop added one transparent group around powers/subscripts.

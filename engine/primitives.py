@@ -462,6 +462,87 @@ def definite_integral_parts(latex, var=None):
             write_latex(_peel_groups(upper, notation), notation))
 
 
+def _is_bare_d(sym, notation):
+    return (isinstance(sym, Symbol) and notation.get(sym) is None
+            and sym.name == 'd')
+
+
+def _differential_denominator_var(den, notation):
+    """The <var> of a ``d<var>`` fraction denominator, or None."""
+    f = notation.getf(_peel_groups(den, notation), Notation.P_LIST)
+    if f is None:
+        return None
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and a.name in Notation.styles)]
+    if len(items) != 2 or not _is_bare_d(items[0], notation):
+        return None
+    v = items[1]
+    if not (isinstance(v, Symbol) and notation.get(v) is None):
+        return None
+    return v.name
+
+
+def derivative_operator_parts(latex):
+    """(var, operand_latex) when ``latex`` is a Leibniz-prefixed
+    derivative — ``\\frac{d}{d x} <expr>`` or the differential-in-
+    numerator form ``\\frac{d <expr>}{d x}`` — else None.
+
+    A reading convention, not a DAG node: the parser sees an ordinary
+    fraction whose ``d``s are one-letter symbols, exactly as an
+    integral's trailing differential is an ordinary product tail.  As
+    there, a genuine variable named ``d`` is indistinguishable from the
+    operator and the human reading wins (see
+    ``_split_trailing_differential``).  Only the derivative-taking
+    boundary — the ``differentiate`` tactic and the diff! variable
+    inference — consults this reader, so nothing else re-reads a
+    fraction; both consumers share this one function so the two
+    readings can never disagree."""
+    try:
+        sym, notation = parse_latex(latex)
+    except PrimitiveError:
+        return None
+    inner = _peel_groups(sym, notation)
+    items = None
+    f = notation.getf(inner, Notation.P_LIST)
+    if f is not None:
+        items = [a for a in f.args if not (isinstance(a, Symbol)
+                                           and a.name in Notation.styles)]
+        if not items:
+            return None
+        head = items[0]
+    else:
+        head = inner
+    fr = notation.get(head)
+    if fr is None or len(fr.args) != 2 \
+            or not (fr.sym == Notation.SLASH
+                    or fr.sym.name in FRAC_NAMES):
+        return None
+    dvar = _differential_denominator_var(fr.args[1], notation)
+    if dvar is None or dvar == 'd':
+        return None
+    num = _peel_groups(fr.args[0], notation)
+    if _is_bare_d(num, notation):
+        # prefix form: the operand is everything after the fraction
+        if items is None or len(items) < 2:
+            return None
+        rest = items[1:]
+    else:
+        # differential-in-numerator: \frac{d <expr>}{d x}, nothing after
+        if items is not None and len(items) > 1:
+            return None
+        nf = notation.getf(num, Notation.P_LIST)
+        if nf is None:
+            return None
+        nitems = [a for a in nf.args if not (isinstance(a, Symbol)
+                                             and a.name in Notation.styles)]
+        if len(nitems) < 2 or not _is_bare_d(nitems[0], notation):
+            return None
+        rest = nitems[1:]
+    operand = rest[0] if len(rest) == 1 else \
+        notation.setf(Notation.P_LIST, tuple(rest))
+    return dvar, write_latex(_peel_groups(operand, notation), notation)
+
+
 def _integral_parts_latex(latex):
     """(var, integrand_latex) for a top-level indefinite ``\\int`` in
     either canonical (``\\int f \\, dx``) or textbook differential-in-
@@ -1776,6 +1857,47 @@ def _union_truths_at(env, tparts, dparts, tol):
     return t, any(conjunctions)
 
 
+def _simpson_panels(fs, fn, var, a, b, env, n):
+    """One composite-Simpson pass over ``fs`` for ``var`` in [a, b] under
+    ``env``: (value, bad_node).  ``bad_node`` is the first node where the
+    integrand leaves its domain while other nodes evaluate — an
+    x-dependent domain break inside the bounds, a witness rather than
+    ignorance; value None with no bad node is oracle ignorance (an
+    unevaluable draw), never evidence.  Shared oracle infrastructure:
+    the definite-integral evaluation check and the FTC derivative check
+    both integrate through here, neither shares a computation with any
+    symbolic leg."""
+    h = (b - a) / n
+    total = 0.0
+    evaluated = 0
+    domain_break = None
+    unknown = False
+    for i in range(n + 1):
+        x = a + i * h
+        node_env = dict(env)
+        node_env[var] = x
+        kind, value = _eval_kind(fs, fn, node_env)
+        if kind is None and (isinstance(value, list)
+                             or not math.isfinite(value)):
+            kind = 'oracle'
+        if kind == 'domain':
+            if domain_break is None:
+                domain_break = x
+            continue
+        if kind is not None:
+            unknown = True     # oracle ignorance, not a witness
+            continue
+        evaluated += 1
+        weight = 1 if i in (0, n) else (4 if i % 2 else 2)
+        total += weight * value
+    if domain_break is not None:
+        # every node failing is a bad parameter draw, not a witness
+        return None, (domain_break if evaluated else None)
+    if unknown:
+        return None, None
+    return total * h / 3.0, None
+
+
 def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
                            panels=64, tol=1e-4):
     """Quadrature leg for a definite-integral evaluation: composite
@@ -1820,37 +1942,7 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
     params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
 
     def simpson(env, n):
-        # returns (value, bad_node); bad_node is the first x where the
-        # integrand leaves its domain while other nodes evaluate
-        h = (b - a) / n
-        total = 0.0
-        evaluated = 0
-        domain_break = None
-        unknown = False
-        for i in range(n + 1):
-            x = a + i * h
-            node_env = dict(env)
-            node_env[var] = x
-            kind, value = _eval_kind(fs, fn, node_env)
-            if kind is None and (isinstance(value, list)
-                                 or not math.isfinite(value)):
-                kind = 'oracle'
-            if kind == 'domain':
-                if domain_break is None:
-                    domain_break = x
-                continue
-            if kind is not None:
-                unknown = True     # oracle ignorance, not a witness
-                continue
-            evaluated += 1
-            weight = 1 if i in (0, n) else (4 if i % 2 else 2)
-            total += weight * value
-        if domain_break is not None:
-            # every node failing is a bad parameter draw, not a witness
-            return None, (domain_break if evaluated else None)
-        if unknown:
-            return None, None
-        return total * h / 3.0, None
+        return _simpson_panels(fs, fn, var, a, b, env, n)
 
     rng = random.Random(seed)
     rounds = samples if params else 1
