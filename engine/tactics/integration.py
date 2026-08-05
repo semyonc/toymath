@@ -223,6 +223,25 @@ def _table_integrate(sym, notation, var, assumptions):
         raise
 
 
+def _is_func_head_factor(a, notation):
+    """A product factor that is a function HEAD — bare (`\\cosh`) or
+    powered (`\\cosh^{2}`, an INDEX whose base is a function name).
+    Under the application reading convention such a factor BINDS what
+    follows it, so a constant-peel that treats it as a var-free factor
+    reads `\\frac{1}{\\cosh^{2} x}` as `\\frac{1}{\\cosh^{2}} \\cdot
+    \\frac{1}{x}` — a live run recorded exactly that false
+    antiderivative with a skipped check."""
+    if (isinstance(a, Symbol) and notation.get(a) is None
+            and a.name in FUNC_NAMES):
+        return True
+    idx = notation.getf(a, Notation.INDEX)
+    if idx is None:
+        return False
+    base = idx.args[0]
+    return (isinstance(base, Symbol) and notation.get(base) is None
+            and base.name in FUNC_NAMES)
+
+
 def _table_structural(sym, notation, var, assumptions):
     """The spelling-structural half of the table: unwraps groups and
     signs, splits sums, peels var-free (possibly symbolic) constant
@@ -268,8 +287,7 @@ def _table_structural(sym, notation, var, assumptions):
         i = 0
         while i < len(args):
             a = args[i]
-            if (isinstance(a, Symbol) and notation.get(a) is None
-                    and a.name in FUNC_NAMES):
+            if _is_func_head_factor(a, notation):
                 break
             if var in free_symbols(a, notation):
                 break
@@ -307,8 +325,7 @@ def _table_structural(sym, notation, var, assumptions):
             df = notation.getf(dcore, Notation.P_LIST)
             dconsts, dvars = [], []
             if df is not None and not any(
-                    isinstance(a, Symbol) and notation.get(a) is None
-                    and a.name in FUNC_NAMES for a in df.args):
+                    _is_func_head_factor(a, notation) for a in df.args):
                 for a in df.args:
                     if isinstance(a, Symbol) and a.name in Notation.styles:
                         continue

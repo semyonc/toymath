@@ -51,6 +51,25 @@ chain that lets the cell accept your final value.
    per-piece step ids (the C := 0 results), in the exact piece order the
    linearity step returned.
 
+## Hyperbolic reciprocals
+
+There is no sech/csch vocabulary and no table rule for
+`\frac{1}{\cosh x}` — these close by substitution, one move each:
+
+- `\int \frac{dx}{\cosh x}`: substitute `u = \sinh x` proposing
+  `\frac{1}{1+u^{2}}` (since `\cosh^2 = 1+\sinh^2`); the arctan table
+  rule closes it; back-substitute.
+- `\int \frac{dx}{\cosh^{2} x}`: substitute `u = \tanh x` proposing the
+  constant `1`; back-substitute gives `\tanh x + C`.
+- Higher powers `\frac{1}{\cosh^{m} x}` for literal `m`: peel one
+  `\frac{1}{\cosh^{2} x}` factor and use `integrate_by_parts`, or state
+  the family's recurrence with `integrate_reduction`.
+
+`\cosh(x)^2` and `\cosh^{2} x` are the same expression (the power
+applies to the application); the continental `\operatorname{ch}`,
+`\operatorname{sh}`, `\operatorname{th}` spellings are the
+`\cosh`/`\sinh`/`\tanh` heads.
+
 ## Roots of the variable inside a fraction
 
 Pure power terms like `x^{1/2}` integrate directly with

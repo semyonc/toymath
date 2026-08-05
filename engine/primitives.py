@@ -69,6 +69,10 @@ def parse_latex(latex, allow_ellipsis=False, command_names=None):
         raise PrimitiveError(f'cannot parse {latex!r}: {e}')
     if sym is None:
         raise PrimitiveError(f'cannot parse {latex!r}')
+    if ')^' in normalized:
+        fresh = Notation()
+        sym = _ApplicationPowerNormalizer(notation, fresh)(sym)
+        notation = fresh
     return sym, notation
 
 
@@ -471,6 +475,71 @@ def definite_integral_parts(latex, var=None):
     return (var, integrand_latex,
             write_latex(_peel_groups(lower, notation), notation),
             write_latex(_peel_groups(upper, notation), notation))
+
+
+class _ApplicationPowerNormalizer(Replicator):
+    """`\\cos(x)^{2}` means the SQUARE OF THE APPLICATION.  The capture
+    convention alone reads the `(x)^{2}` INDEX as one factor — the
+    argument — so both legs coherently evaluated `\\cosh(x)^2` as
+    `\\cosh(x^2)` (measured 27.31 = cosh(4) at x = 2), and a live run's
+    correct Pythagorean identity was refused as false.  This normalizer
+    rewrites a function head followed by a bracketed-group INDEX onto
+    the powered-head spelling (`\\cos^{2}(x)`) that every reader
+    already handles, at the parse boundary, so no two legs can ever
+    read the spelling apart.  A head that is itself already powered is
+    left untouched (genuinely ambiguous, and unseen in the wild)."""
+
+    def _head_name(self, a):
+        if not (isinstance(a, Symbol) and self.notation.get(a) is None):
+            return None
+        if a.name in _UNARY_TABLE or a.name in FUNC_NAMES:
+            return a.name
+        return None
+
+    def _powered_group(self, a):
+        idx = self.notation.getf(a, Notation.INDEX)
+        if idx is None:
+            return None
+        sub, sup_l, power, sup_r = idx.args[1]
+        if (power is None or sub is not None or sup_l is not None
+                or sup_r is not None):
+            return None
+        base = idx.args[0]
+        g = self.notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
+        if (g is None or Notation.is_semantic_bracket(g)
+                or g.props.get('br') != '()'):
+            return None
+        return base, power
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        out = []
+        i = 0
+        changed = False
+        while i < len(args):
+            a = args[i]
+            if self._head_name(a) is not None and i + 1 < len(args):
+                pg = self._powered_group(args[i + 1])
+                if pg is not None:
+                    group_sym, power = pg
+                    mapped_power = (self.enter_expr(power)
+                                    if isinstance(power, Symbol)
+                                    else power)
+                    powered_head = self.output_notation.setf(
+                        Notation.INDEX,
+                        (a, (None, None, mapped_power, None)))
+                    out.append(powered_head)
+                    out.append(self.enter_expr(group_sym))
+                    i += 2
+                    changed = True
+                    continue
+            out.append(self.enter_expr(a))
+            i += 1
+        if not changed:
+            return super(_ApplicationPowerNormalizer,
+                         self).enter_plist(sym, f)
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, tuple(out), **f.props))
 
 
 class _IntegralPlaceholderer(Replicator):

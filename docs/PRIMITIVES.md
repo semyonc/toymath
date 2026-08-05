@@ -308,6 +308,11 @@ Important verified-layer behaviors include:
 - rational powers of positive plain-variable bases have a limited Puiseux
   fold; composite bases remain opaque because identities such as
   `(x^2)^(1/2)=|x|` are domain-sensitive;
+- a function head followed by a bracketed argument carrying a power —
+  `\cos(x)^{2}` — reads as the power of the APPLICATION and normalizes
+  to the powered-head spelling `\cos^{2}(x)` at the parse boundary, so
+  the numeric and symbolic legs cannot read the spelling apart; write
+  `\cos(x^{2})` when the power belongs inside the argument;
 - ellipsis tokens have no semantics and are rejected except by the explicit
   finite-sum/product interpretation tactics, which record continuation as an
   assumption;

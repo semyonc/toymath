@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tests for the agent-scoped verified-derivation primitives."""
+import math
 import os
 import json
 import tempfile
@@ -6324,6 +6325,79 @@ class TestIntegrateImproper(unittest.TestCase):
             self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2} + t')
         self.assertFalse(rec['ok'])
         self.assertIn('truncation variable', rec['error'])
+
+
+class TestApplicationPowerReading(unittest.TestCase):
+    """`\\cos(x)^{2}` means the square of the APPLICATION: the parse
+    boundary normalizes head-then-bracketed-group-INDEX onto the
+    powered-head spelling, so no leg can read it as \\cos(x^2) — which
+    both legs coherently did (measured cosh(4) for cosh(2)^2), refusing
+    a live run's correct Pythagorean identity."""
+
+    def test_reads_as_the_square_of_the_application(self):
+        s, n = P.parse_latex('\\cosh(x)^2')
+        self.assertEqual(P.write_latex(s, n), '\\cosh^{2}(x)')
+        self.assertAlmostEqual(P.numeric_eval(s, n, {'x': 2.0}),
+                               math.cosh(2.0) ** 2)
+
+    def test_the_live_identity_now_holds(self):
+        self.assertEqual(Core.equal_exprs(
+            '\\frac{1}{\\cosh(x)^2}', '1-\\tanh(x)^2')['verdict'], 'yes')
+        self.assertEqual(Core.equal_exprs(
+            '\\cosh(x)^2', '\\cosh^{2} x')['verdict'], 'yes')
+
+    def test_provenance_equates_the_two_spellings(self):
+        import tactic_registry
+        self.assertTrue(tactic_registry._same_spelling(
+            '\\cosh(x)^2', '\\cosh^{2} x'))
+
+    def test_capture_boundary_is_untouched(self):
+        # the group still ends the argument: cos(x)^2 y = cos(x)^2 * y
+        s, n = P.parse_latex('\\cos(x)^2 y')
+        self.assertAlmostEqual(
+            P.numeric_eval(s, n, {'x': 2.0, 'y': 3.0}),
+            (math.cos(2.0) ** 2) * 3.0)
+
+    def test_a_bare_group_power_is_not_rewritten(self):
+        s, n = P.parse_latex('y (x)^2')
+        self.assertAlmostEqual(P.numeric_eval(s, n, {'x': 3.0, 'y': 2.0}),
+                               18.0)
+
+    def test_the_canonical_spelling_is_stable(self):
+        s, n = P.parse_latex('\\cosh(x)^2')
+        out = P.write_latex(s, n)
+        s2, n2 = P.parse_latex(out)
+        self.assertEqual(P.write_latex(s2, n2), out)
+
+
+class TestTablePeelSoundness(unittest.TestCase):
+    """A powered function head must never peel as a var-free constant:
+    a live run recorded \\frac{1}{\\cosh^{2}} \\ln(x) + C for
+    \\int \\frac{dx}{\\cosh^{2} x} with a skipped check."""
+
+    def test_the_false_record_is_gone(self):
+        rec = Integration.integrate_table('\\frac{1}{\\cosh^{2} x}', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertNotIn('\\ln', rec.get('error', ''))
+        self.assertIn('no table rule', rec['error'])
+
+    def test_powered_head_product_refuses(self):
+        rec = Integration.integrate_table('\\cosh^{2} x', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_symbolic_constant_peels_still_close(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b\\left(v^{2}+1\\right)}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_the_i1_route_closes(self):
+        # the exact route the live agent needed: u = tanh x
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh(x)^2} \\, d x', 'x',
+            '\\tanh(x)', 'u', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
 
 
 class TestIntegrateReduction(unittest.TestCase):
