@@ -659,18 +659,11 @@ def _graded_quadrature(fs, fn, var, a, b, env, panels=64):
     return sign * total
 
 
-def _truncation_ladder_value(fs, fn, ivar, finite, sign, env):
-    """The definitional value of an integral with one infinite bound:
-    graded quadrature to truncation points growing by decades away from
-    the finite bound, iterated Aitken over the rungs.  Raises EvalError
-    when the ladder stalls (no finite value is in evidence — the
-    divergent shape) or the extrapolation cannot vouch for its value;
-    callers treat that as oracle ignorance, never as evidence."""
-    scale = max(1.0, abs(finite))
-    vals = []
-    for t in [scale * 10.0 ** k for k in range(1, 6)]:
-        lo, hi = (finite, t) if sign > 0 else (-t, finite)
-        vals.append(_graded_quadrature(fs, fn, ivar, lo, hi, env))
+def _ladder_value(vals):
+    """Iterated-Aitken value of a truncation ladder, with the
+    extrapolation spread as its own honesty gate: raises EvalError when
+    the rung differences stop decaying (no finite value in evidence —
+    the divergent shape) or the spread cannot vouch for the value."""
     diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
     tail = [abs(d) for d in diffs[-2:]]
     if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
@@ -693,6 +686,63 @@ def _truncation_ladder_value(fs, fn, ivar, finite, sign, env):
     if spread > 1e-5 * max(1.0, abs(est)):
         raise EvalError('the truncation extrapolation did not converge')
     return est
+
+
+def _truncation_ladder_value(fs, fn, ivar, finite, sign, env, rungs=7):
+    """The definitional value of an integral with one infinite bound:
+    graded quadrature to truncation points growing by decades away from
+    the finite bound, iterated Aitken over the rungs (seven decades —
+    slow power-law tails like x^{-1.2} need the depth).  Raises
+    EvalError when no finite value is in evidence; callers treat that
+    as oracle ignorance, never as evidence."""
+    scale = max(1.0, abs(finite))
+    vals = []
+    for t in [scale * 10.0 ** k for k in range(1, rungs + 1)]:
+        lo, hi = (finite, t) if sign > 0 else (-t, finite)
+        vals.append(_graded_quadrature(fs, fn, ivar, lo, hi, env))
+    return _ladder_value(vals)
+
+
+def _singular_ladder_value(fs, fn, ivar, a, b, side, env):
+    """The definitional value of an integral whose integrand is singular
+    at the ``side`` (``'lower'``/``'upper'``) bound: cumulative graded
+    slabs approaching the singular bound geometrically, iterated Aitken
+    over the running sums — the gen-76 singular ladder as a VALUE.
+    Raises EvalError when no finite value is in evidence."""
+    span = b - a
+    deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(7)]
+    if side == 'lower':
+        regions = [(a + deltas[0], b)]
+        regions += [(a + deltas[k + 1], a + deltas[k]) for k in range(6)]
+    else:
+        regions = [(a, b - deltas[0])]
+        regions += [(b - deltas[k], b - deltas[k + 1]) for k in range(6)]
+    vals = []
+    run = 0.0
+    for lo, hi in regions:
+        run += _graded_quadrature(fs, fn, ivar, lo, hi, env, panels=64)
+        vals.append(run)
+    return _ladder_value(vals)
+
+
+def _improper_value(fs, fn, ivar, a, b_infinite_sign, env):
+    """Numeric value of ``\\int_a^{+\\infty}`` (or the mirrored
+    ``\\int_{-\\infty}^{b}`` when the sign is negative, with ``a`` the
+    finite bound) tolerating a singular finite endpoint: the finite
+    part is tried as plain graded quadrature and falls back to the
+    singular ladder, the tail is the decade truncation ladder.  Oracle
+    infrastructure for the known-integral and definite-by-parts checks;
+    raises EvalError when no finite value is in evidence."""
+    sign = b_infinite_sign
+    mid = a + (1.0 if sign > 0 else -1.0) * max(1.0, abs(a))
+    lo, hi = (a, mid) if sign > 0 else (mid, a)
+    try:
+        finite_part = _graded_quadrature(fs, fn, ivar, lo, hi, env)
+    except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+        finite_part = _singular_ladder_value(
+            fs, fn, ivar, lo, hi, 'lower' if sign > 0 else 'upper', env)
+    tail = _truncation_ladder_value(fs, fn, ivar, mid, sign, env)
+    return finite_part + tail
 
 
 def definite_integral_evaluator(sym, notation):
@@ -2000,6 +2050,16 @@ def _sample_guards(assumptions):
                 parts = None
             if parts is not None:
                 constraints.append(parts)
+                continue
+            # a chained/conjunction constraint (1 < n < 2 desugars to an
+            # A_LIST): every member restricts the sample region — a
+            # silently dropped constraint would sample the whole space
+            try:
+                members = _conjunction_parts(relation)
+            except PrimitiveError:
+                members = None
+            if members is not None:
+                constraints.extend(members)
     return nonzero, constraints
 
 
@@ -2679,6 +2739,122 @@ def numeric_reduction_check(lhs, rhs, assumptions=None, samples=4,
     return {'status': 'agree', 'samples': agreed,
             'method': 'parameter-sampled truncation quadrature on '
                       'both sides'}
+
+
+def numeric_known_integral_check(expr, var, result, assumptions=None,
+                                 samples=4, seed=20260805, tol=1e-4):
+    """Quadrature leg for a claimed definite/improper integral VALUE:
+    the integral is evaluated at parameters sampled inside the recorded
+    constraints — one infinite bound via the doubly-improper value
+    (singular finite end tolerated, decade truncation tail), finite
+    bounds via graded quadrature with singular-end ladder fallbacks —
+    against the claimed closed form.  Used by the known-integral facts
+    and the definite by-parts assembly.  Shares only the structure
+    readers with the symbolic gates; a draw with no finite value in
+    evidence is skipped — a refusal is never evidence of
+    divergence."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    _var, integrand, lower, upper = parts
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    lo_inf = _infinity_sign(ls, ln)
+    hi_inf = _infinity_sign(us, un)
+    if (lo_inf is not None and hi_inf is not None) \
+            or lo_inf == 1 or hi_inf == -1:
+        return {'status': 'skipped',
+                'reason': 'doubly-infinite or reversed bounds are '
+                          'outside this check'}
+    fin_s, fin_n = (ls, ln) if hi_inf == 1 else (
+        (us, un) if lo_inf == -1 else (None, None))
+    if fin_s is not None:
+        if free_symbols(fin_s, fin_n):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(fin_s, fin_n, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if isinstance(a, list) or not math.isfinite(a):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        b = None
+    else:
+        if free_symbols(ls, ln) | free_symbols(us, un):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if any(isinstance(v, list) or not math.isfinite(v)
+               for v in (a, b)):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+    guards = _sample_guards(assumptions)
+    variables = ((free_symbols(fs, fn) | free_symbols(rs, rn)
+                  | _guard_variables(guards)) - {var})
+    rng = random.Random(seed)
+    rounds = samples if variables else 1
+    budget = _sample_budget(rounds, guards)
+    agreed = 0
+    tried = 0
+    last_reason = 'no evaluable sample points'
+    while agreed < rounds and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng) if variables else {}
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            expected = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if isinstance(expected, list) or not math.isfinite(expected):
+            continue
+        try:
+            if fin_s is not None:
+                value = _improper_value(fs, fn, var, a,
+                                        1 if hi_inf == 1 else -1, env)
+            else:
+                try:
+                    value = _graded_quadrature(fs, fn, var, a, b, env)
+                except (EvalError, ValueError, ZeroDivisionError,
+                        OverflowError):
+                    try:
+                        value = _singular_ladder_value(
+                            fs, fn, var, a, b, 'lower', env)
+                    except (EvalError, ValueError, ZeroDivisionError,
+                            OverflowError):
+                        value = _singular_ladder_value(
+                            fs, fn, var, a, b, 'upper', env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            last_reason = ('the integral had no finite value in '
+                           'evidence at a sampled parameter (a refusal '
+                           'is never evidence of divergence)')
+            continue
+        scale = max(1.0, abs(value), abs(expected))
+        delta = abs(value - expected)
+        if delta / scale > tol:
+            if delta <= 3.2e-4 * scale:
+                last_reason = ('the quadrature could not resolve the '
+                               'gap within its own error bar')
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': expected, 'numeric': value}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': last_reason}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'doubly-improper quadrature at sampled parameters'}
 
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,

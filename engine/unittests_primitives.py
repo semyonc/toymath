@@ -5124,10 +5124,15 @@ class TestFractionalPowerSteering(unittest.TestCase):
         # steering must be truthful: the power rule really does handle this
         self.assertIn('rational literal exponents', rec['error'])
 
-    def test_symbolic_exponent_keeps_its_name(self):
+    def test_symbolic_exponent_now_integrates(self):
+        # gen 81: a var-free symbolic exponent has its own power rule,
+        # recording the exponent != -1 and var > 0
         rec = Integration.integrate_power_rule('\\int x^{n} \\, d x', 'x')
-        self.assertFalse(rec['ok'])
-        self.assertIn('non-integer exponent n', rec['error'])
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('\\ne -1', texts)
+        self.assertIn('x > 0', texts)
 
 
 class TestSubstituteZeroFolding(unittest.TestCase):
@@ -6398,6 +6403,133 @@ class TestTablePeelSoundness(unittest.TestCase):
             '\\tanh(x)', 'u', '1')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestSymbolicPowerRule(unittest.TestCase):
+    """A var-free symbolic exponent has its own power rule — the wall
+    the live \\ln(1+x)/x^n run died on."""
+
+    def test_shapes(self):
+        for expr in ('x^{-n}', 'x^{1-n}', '\\frac{1}{x^n}', 'x^{p}'):
+            rec = Integration.integrate_power_rule(expr, 'x')
+            self.assertTrue(rec['ok'], (expr, rec.get('error')))
+            self.assertEqual(rec['check']['status'], 'agree', expr)
+
+    def test_literal_paths_unchanged(self):
+        rec = Integration.integrate_power_rule('x^{2}', 'x')
+        self.assertEqual(rec['check']['status'], 'agree')
+        rec = Integration.integrate_power_rule('x^{-1}', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_by_parts_takes_a_symbolic_dv(self):
+        rec = Integration.integrate_by_parts(
+            '\\frac{\\ln(1+x)}{x^n}', 'x', '\\ln(1+x)', 'x^{-n}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('remaining_integral', rec)
+
+
+class TestLimitEvaluateAssuming(unittest.TestCase):
+    """The oracle samples parameters only inside the stated region —
+    and agreement needs evidence: Aitken extrapolates a GROWING ladder
+    to its fixed point 0 exactly, with an astronomical self-error."""
+
+    def test_domain_conditional_limit_certifies(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} x^{1-n}', '0', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
+    def test_the_false_green_is_dead(self):
+        # before the evidence bar this CERTIFIED: est = 0 exactly with
+        # err ~ 1e15, and the agreement branch never looked at err
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} x^{1-n}', '0', assuming='n < 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_conjunction_constraints_restrict(self):
+        # 1 < n and n < 2 as one constraint: both members must bind
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} \\ln(1+x) \\frac{x^{1-n}}{1-n}', '0',
+            assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestIntegrateKnown(unittest.TestCase):
+    """The named known-integral catalog (Euler reflection), checked by
+    doubly-improper quadrature at sampled parameters."""
+
+    def test_reflection_fact_certifies(self):
+        rec = Integration.integrate_known(
+            '\\int_0^{+\\infty} \\frac{x^{s-1}}{1+x} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('> 0', texts)
+        self.assertIn('< 1', texts)
+
+    def test_a_riding_var_free_coefficient_is_carried(self):
+        rec = Integration.integrate_known(
+            '\\int_0^{+\\infty} \\frac {x^{(-n)+1}} {(-n)+1} '
+            '\\frac {1} {x+1} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('\\frac{1}{(-n)+1}', rec['result'])
+
+    def test_unknown_shapes_refuse(self):
+        for expr in (
+                '\\int_0^{+\\infty} \\frac{x^{s-1}}{2+x} \\, d x',
+                '\\int_1^{+\\infty} \\frac{x^{s-1}}{1+x} \\, d x',
+                '\\int_0^{+\\infty} \\frac{\\ln x}{1+x} \\, d x'):
+            rec = Integration.integrate_known(expr, 'x')
+            self.assertFalse(rec['ok'], expr)
+
+
+class TestIntegrateByPartsDefinite(unittest.TestCase):
+    """By parts over a definite/improper interval from recorded pieces,
+    checked against the original integral by doubly-improper
+    quadrature at sampled parameters."""
+
+    EX = '\\int_0^{+\\infty} \\frac{\\ln (1+x)}{x^n} d x'
+    V = '\\frac {x^{(-n)+1}} {(-n)+1}'
+    REM = ('\\frac{1}{(-n)+1} \\frac{\\pi}{\\sin\\left(\\pi '
+           '\\left(((-n)+1)+1\\right)\\right)}')
+
+    def test_the_live_integral_assembles(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, '0', '0',
+            self.REM, assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('evidence, not proof', texts)
+
+    def test_a_wrong_remaining_value_is_refused_by_the_check(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, '0', '0',
+            '\\frac{\\pi}{2}', assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_gates(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', 'x^{7}', '0', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an antiderivative', rec['error'])
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n-1}', self.V, '0', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('u * dv', rec['error'])
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, 'x', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('still contains', rec['error'])
 
 
 class TestIntegrateReduction(unittest.TestCase):

@@ -217,6 +217,52 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(report['status'], 'failed')
         self.assertEqual(report['reason'], 'limit provenance mismatch')
 
+    def test_cli_by_parts_definite_closes_the_reflection_family(self):
+        from ledger import Ledger
+        from tactics import core, integration, limits
+        import primitives as P
+
+        path = os.path.join(tempfile.mkdtemp(), 'byparts.json')
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_power_rule(
+            '\\int x^{-n} \\, d x', 'x'))
+        ledger.record(core.substitute(
+            ledger.last_result(),
+            ledger.steps[-1].get('constant') or 'C', '0'))
+        v = ledger.last_result()
+        uv = integration._uv_latex('\\ln(1+x)', v)
+        ledger.record(limits.limit_evaluate(
+            P._limit_latex('x', '\\infty', 'two-sided', uv), '0',
+            assuming='n > 1'))
+        ledger.record(limits.limit_evaluate(
+            P._limit_latex('x', '0', 'right', uv), '0',
+            assuming='n < 2'))
+        vdu = integration._uv_latex(v, '\\frac {1} {x+1}')
+        ledger.record(integration.integrate_known(
+            f'\\int_0^{{+\\infty}} {vdu} \\, d x', 'x'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_by_parts_definite',
+                '\\int_0^{+\\infty} \\frac{\\ln (1+x)}{x^n} d x', 'x',
+                '\\ln(1+x)', 'x^{-n}', 's2', 's3', 's4', 's5',
+                '--assuming', '1 \\lt n \\land n \\lt 2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['sources'],
+                         {'antiderivative': 's2', 'upper': 's3',
+                          'lower': 's4', 'remaining': 's5'})
+        saved = Ledger(path)
+        self.assertEqual(saved.replay()['status'], 'verified')
+        saved.steps[-1]['sources']['remaining'] = 's1'
+        report = saved.replay()
+        self.assertEqual(report['status'], 'failed')
+        self.assertIn('remaining', report['reason'])
+
     def test_cli_integrate_reduction_certifies(self):
         output = io.StringIO()
         with redirect_stdout(output):

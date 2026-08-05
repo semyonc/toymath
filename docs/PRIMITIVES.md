@@ -367,8 +367,21 @@ writer, comparer, and replicator landmines.
   integrand stays evaluable at deep truncation points. A ladder that
   does not settle certifies nothing — a refusal is never evidence of
   divergence, and a divergent integral has no finite limit step to
-  cite in the first place. Interior singularities and doubly-improper
+  cite in the first place. Interior singularities and doubly-infinite
   intervals still have no closing tactic.
+- Integration by parts extends over a definite or improper interval
+  through `integrate_by_parts_definite`, assembled from recorded
+  pieces: an antiderivative of dv (re-verified by differentiation),
+  the two boundary limits of u·v cited as recorded limit steps, and
+  the recorded value of the remaining integral over the same bounds.
+  The power rule accepts a var-free symbolic exponent (recording the
+  exponent != -1), `limit_evaluate` accepts an `assuming` parameter
+  domain that both restricts the oracle's sampling and is recorded,
+  and a small named known-integral catalog (`integrate_known`,
+  currently Euler's reflection integral with var-free coefficients
+  carried) closes the remaining integrals no elementary antiderivative
+  reaches. Every such record states that convergence at sampled
+  parameters is evidence, not proof, over the stated domain.
 - A parameterized reduction formula is stated by `integrate_reduction`:
   one integral family related to itself at an integer parameter shift,
   with the coefficient proposed by the agent. The structural fence —

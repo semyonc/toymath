@@ -12,6 +12,7 @@ from primitives import (
     FRAC_NAMES, PrimitiveError, EvalError, parse_latex, write_latex,
     same_expression,
     _transparent_inner, _plain_symbol_name, _contains_free_infinity,
+    _sample_guards, _admissible_point, _guard_variables,
     free_symbols, numeric_eval, definite_integral_evaluator,
     _overflow_saturation,
     _sample_point, _result, _error, _int_literal, _strip_limit,
@@ -38,15 +39,29 @@ def _limit_parts(expr):
     }
 
 
-def _limit_sample_envs(parsed, var, samples, seed=20260705):
+def _limit_sample_envs(parsed, var, samples, seed=20260705, guards=None):
     variables = set()
     for sym, notation in parsed:
         variables |= free_symbols(sym, notation)
     variables.discard(var)
+    if guards is not None:
+        variables |= _guard_variables(guards) - {var}
     if not variables:
         return [{}]
     rng = random.Random(seed)
-    return [_sample_point(variables, rng) for _ in range(samples)]
+    if guards is None or not (guards[0] or guards[1]):
+        return [_sample_point(variables, rng) for _ in range(samples)]
+    # rejection-sample inside the stated parameter region; a
+    # parameter-dependent limit certified on unconstrained draws would
+    # count only the draws that happened to converge
+    envs = []
+    tried = 0
+    while len(envs) < samples and tried < samples * 24:
+        tried += 1
+        env = _sample_point(variables, rng)
+        if _admissible_point(guards, env):
+            envs.append(env)
+    return envs
 
 
 def _aitken(a, b, c):
@@ -178,7 +193,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
 
 
 def _limit_check(body_latex, var, point_latex, direction, expected_latex,
-                 samples=6):
+                 samples=6, assumptions=None):
     """Check a claimed limit by approach sampling, independently of tactics."""
     try:
         body, bn = parse_latex(body_latex)
@@ -189,8 +204,10 @@ def _limit_check(body_latex, var, point_latex, direction, expected_latex,
     if var in free_symbols(expected, en):
         return {'status': 'skipped',
                 'reason': 'claimed limit still contains the bound variable'}
+    guards = _sample_guards(assumptions) if assumptions else None
     envs = _limit_sample_envs(
-        [(body, bn), (point, pn), (expected, en)], var, samples)
+        [(body, bn), (point, pn), (expected, en)], var, samples,
+        guards=guards)
     agreed = 0
     for env in envs:
         try:
@@ -208,6 +225,13 @@ def _limit_check(body_latex, var, point_latex, direction, expected_latex,
                 continue
             return {'status': 'disagree', 'point': env,
                     'expected': expected_value, 'numeric': estimate}
+        if error > 0.1 * scale:
+            # agreement needs evidence too: Aitken extrapolates a
+            # GROWING geometric ladder to its fixed point 0 exactly,
+            # with an astronomical self-error — an estimate whose own
+            # error bar dwarfs it is no evidence of agreement
+            # (measured: x^{1-n} -> 0 "confirmed" at n < 1)
+            continue
         agreed += 1
     if agreed == 0:
         return {'status': 'skipped',
@@ -243,6 +267,9 @@ def _limit_equivalence_check(parts, new_body, samples=6):
                 continue
             return {'status': 'disagree', 'point': env,
                     'original': a, 'transformed': b}
+        if ea + eb > 0.1 * scale:
+            # same evidence bar as _limit_check's agreement branch
+            continue
         agreed += 1
     if agreed == 0:
         return {'status': 'skipped',
@@ -383,7 +410,7 @@ def limit_substitute(expr):
                           'direction': parts['direction']})
 
 
-def limit_evaluate(expr, value):
+def limit_evaluate(expr, value, assuming=None):
     """Certify an agent-proposed VALUE for a limit by the independent
     approach oracle.
 
@@ -394,8 +421,15 @@ def limit_evaluate(expr, value):
     oracle verifies; a proposal the ladder cannot confirm is refused
     with the oracle's evidence, never recorded.  Sampled trust, named
     in the check — the `rewrite_as` bargain for limits: prefer the
-    named table/l'Hopital/substitution rules where they bind."""
+    named table/l'Hopital/substitution rules where they bind.
+
+    ``assuming`` states the parameter region the limit is claimed on
+    (``n > 1``): the oracle samples parameters only inside it, and the
+    stated region is recorded — a parameter-dependent limit certified
+    without it counts only whichever draws happened to converge."""
     args = {'expr': expr, 'value': value}
+    if assuming is not None:
+        args['assuming'] = assuming
     try:
         parts = _limit_parts(expr)
         vs, vn = parse_latex(value)
@@ -405,8 +439,14 @@ def limit_evaluate(expr, value):
         return _error('limit_evaluate', args,
                       'the proposed value still contains the bound '
                       'variable')
+    assumptions = []
+    if assuming is not None:
+        assumptions.append({'text': f'assuming {assuming}',
+                            'display': f'assuming ${assuming}$',
+                            'constraint': assuming})
     check = _limit_check(parts['body_latex'], parts['var'],
-                         parts['point_latex'], parts['direction'], value)
+                         parts['point_latex'], parts['direction'], value,
+                         assumptions=assumptions or None)
     if check.get('status') != 'agree':
         if check.get('status') == 'disagree':
             detail = (f'the approach oracle estimates '
@@ -420,6 +460,7 @@ def limit_evaluate(expr, value):
     check = dict(check)
     check['method'] = 'agent-proposed value; ' + check.get('method', '')
     return _result('limit_evaluate', args, expr, value, check=check,
+                   assumptions=assumptions,
                    extra={'body': parts['body_latex'],
                           'var': parts['var'],
                           'point': parts['point_latex'],

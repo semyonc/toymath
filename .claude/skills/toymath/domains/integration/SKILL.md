@@ -158,10 +158,43 @@ integrals — in four moves:
 If the limit in move 3 does not exist, nothing can certify it and the
 integral has no finite value in evidence: report the verified stopping
 point with the open outcome — a refusal is never evidence of
-divergence. A singularity strictly INSIDE the interval, improperness
-at BOTH ends (two singular ends, two infinite ends, or one of each),
-and a singular integrand UNDER an infinite bound still have no closing
-tactic; use the open outcome there too.
+divergence. A singularity strictly INSIDE the interval and two
+INFINITE ends still have no closing tactic; use the open outcome
+there. An integral improper at both ends in the singular-plus-infinite
+way (`\int_0^{+\infty} \frac{\ln(1+x)}{x^n} dx`) closes through the
+definite by-parts route below when its pieces exist.
+
+## By parts over the whole interval (parameterized/improper integrals)
+
+`integrate_by_parts_definite` assembles
+`\int_a^b u\,dv = [uv]_a^b - \int_a^b v\,du` from recorded pieces —
+the route for parameterized improper integrals with no elementary
+antiderivative. The worked shape, exactly the reflection family:
+
+1. Integrate dv: `integrate_power_rule` handles a var-free SYMBOLIC
+   exponent (`\int x^{-n} dx`, recording the exponent `\ne -1` and
+   `x > 0`); pin its `+ C` to zero with core `substitute`.
+2. Record BOTH boundary limits of `u \cdot v` — spell each limit body
+   as `(u) v` with v exactly as step 1 returned it: at an infinite
+   bound `\lim_{x \to \infty}`, at a finite bound the one-sided limit
+   from inside (`x \to 0^{+}` for a lower bound). Pass `--assuming`
+   with the parameter domain that makes each boundary term vanish
+   (`n > 1`, `n < 2`) — the oracle samples only inside it.
+3. Evaluate the remaining integral `\int_a^b v\,du` as its own step.
+   `integrate_known` closes the named catalog forms — Euler's
+   reflection integral `\int_0^{+\infty} \frac{x^{s-1}}{1+x} dx =
+   \frac{\pi}{\sin(\pi s)}` for `0 < s < 1`, var-free coefficients
+   carried — and records the domain as sampling constraints.
+4. Call `integrate_by_parts_definite` with the ORIGINAL integral, u,
+   dv, and the four step ids (`ANTIDERIVATIVE_STEP UPPER_STEP
+   LOWER_STEP REMAINING_STEP`), plus `--assuming` with the combined
+   domain (`1 \lt n \land n \lt 2`). The check re-evaluates the whole
+   improper integral by quadrature at sampled parameters against the
+   assembled value; a follow-up core `expand` tidies the answer.
+
+State the TIGHTEST parameter domain at every step: agreement at
+sampled parameters is evidence about the stated region, not a proof,
+and every record says so.
 
 ## Reduction formulas (a parameterized family)
 
