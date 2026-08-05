@@ -471,6 +471,158 @@ def definite_integral_parts(latex, var=None):
             write_latex(_peel_groups(upper, notation), notation))
 
 
+class _IntegralPlaceholderer(Replicator):
+    """Copy a graph replacing each definite-integral term — the ``\\int``
+    INDEX head through its differential — with a fresh placeholder
+    symbol, collecting (name, var, integrand, lower, upper) specs.
+
+    This walk decides only WHERE a term starts and ends inside a
+    product; what the term MEANS is delegated to
+    ``definite_integral_parts`` on the sliced spelling, so the reading
+    can never disagree with the other structure readers.  A slice the
+    reader refuses is left in place untouched (its evaluation will
+    raise, which downstream treats as oracle ignorance)."""
+
+    def __init__(self, notation, output_notation):
+        super(_IntegralPlaceholderer, self).__init__(
+            notation, output_notation)
+        self.specs = []
+
+    def _int_head(self, sym):
+        idx = self.notation.getf(sym, Notation.INDEX)
+        if idx is None:
+            return False
+        base = idx.args[0]
+        return (isinstance(base, Symbol) and self.notation.get(base) is None
+                and base.name == '\\int')
+
+    def _slice_end(self, args, start):
+        """One past the differential of the integral starting at
+        ``start``: the first bare ``d`` + plain-symbol pair, else the end
+        of the product (the frac-differential spelling)."""
+        k = start + 1
+        while k < len(args) - 1:
+            if (_is_bare_d(args[k], self.notation)
+                    and isinstance(args[k + 1], Symbol)
+                    and self.notation.get(args[k + 1]) is None):
+                return k + 2
+            k += 1
+        return len(args)
+
+    def _placeholder(self, term):
+        scratch = Notation()
+        rep = Replicator(self.notation, scratch)
+        mapped = tuple(rep(a) for a in term)
+        sub = (mapped[0] if len(mapped) == 1
+               else scratch.setf(Notation.P_LIST, mapped))
+        parts = definite_integral_parts(write_latex(sub, scratch))
+        if parts is None:
+            return None
+        name = f'zz#lim{len(self.specs) + 1}'
+        self.specs.append((name,) + parts)
+        return Symbol(name)
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        out = []
+        i = 0
+        changed = False
+        while i < len(args):
+            if self._int_head(args[i]):
+                end = self._slice_end(args, i)
+                placeholder = self._placeholder(args[i:end])
+                if placeholder is not None:
+                    out.append(placeholder)
+                    i = end
+                    changed = True
+                    continue
+            out.append(self.enter_expr(args[i]))
+            i += 1
+        if not changed:
+            return super(_IntegralPlaceholderer, self).enter_plist(sym, f)
+        if len(out) == 1:
+            return out[0]
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, tuple(out), **f.props))
+
+
+def _graded_quadrature(fs, fn, var, a, b, env, panels=64):
+    """The signed value of ``\\int_a^b`` under ``env`` by composite
+    Simpson over slabs graded geometrically from BOTH bounds all the
+    way to the midpoint, so an integrand whose scale-length is the
+    distance to a nearby singularity (``1/t^2`` on ``[x, 1]`` as
+    ``x -> 0``) stays resolvable in every slab — uniform panels
+    measurably cannot, and grading only an outer fringe of the span
+    fails the same way once the bound moves inside it.  The two-grid
+    Richardson residual is its own honesty bar: raises EvalError
+    whenever it cannot vouch for the value (domain break,
+    non-convergence), which approach-sampling treats as ignorance,
+    never as evidence."""
+    if a == b:
+        return 0.0
+    sign = 1.0
+    if b < a:
+        a, b = b, a
+        sign = -1.0
+    span = b - a
+    rel = [0.5] + [10.0 ** (-k) for k in range(1, 7)]
+    cuts = ([a] + [a + r * span for r in reversed(rel)]
+            + [b - r * span for r in rel[1:]] + [b])
+    total = 0.0
+    err = 0.0
+    for lo, hi in zip(cuts, cuts[1:]):
+        coarse, _bad = _simpson_panels(fs, fn, var, lo, hi, env, panels)
+        fine, _bad2 = _simpson_panels(fs, fn, var, lo, hi, env,
+                                      panels * 2)
+        if coarse is None or fine is None:
+            raise EvalError('integrand is not evaluable on the interval')
+        total += fine
+        err += abs(fine - coarse) / 15.0
+    if err > 1e-6 * max(1.0, abs(total)):
+        raise EvalError('quadrature over the interval did not converge')
+    return sign * total
+
+
+def definite_integral_evaluator(sym, notation):
+    """A callable ``env -> float`` for a limit body containing
+    variable-bound definite integrals: each integral is computed by
+    ``_graded_quadrature`` under the ambient environment (bounds
+    evaluated per call, the bound variable lexically shadowed), then the
+    surrounding expression is evaluated with the values in place.
+    Returns None when the body contains no definite integral, so
+    callers keep plain ``numeric_eval``.
+
+    Deliberately LIMITS-ORACLE infrastructure: general ``equal?`` does
+    not gain this evaluator — a definite integral's VALUE still closes
+    only through `integrate_definite`/`integrate_improper`, and letting
+    the sampling comparator decide integrals numerically would open a
+    proposal route around that boundary."""
+    scratch = Notation()
+    walker = _IntegralPlaceholderer(notation, scratch)
+    skeleton = walker(sym)
+    if not walker.specs:
+        return None
+    parsed = []
+    for name, ivar, integrand, lower, upper in walker.specs:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        parsed.append((name, ivar, fs, fn, ls, ln, us, un))
+
+    def evaluate(env):
+        e = dict(env)
+        for name, ivar, fs, fn, ls, ln, us, un in parsed:
+            a = numeric_eval(ls, ln, e)
+            b = numeric_eval(us, un, e)
+            if (isinstance(a, list) or isinstance(b, list)
+                    or not (math.isfinite(a) and math.isfinite(b))):
+                raise EvalError('integral bound is not evaluable')
+            e[name] = _graded_quadrature(fs, fn, ivar, a, b, e)
+        return numeric_eval(skeleton, scratch, e)
+
+    return evaluate
+
+
 def _is_bare_d(sym, notation):
     return (isinstance(sym, Symbol) and notation.get(sym) is None
             and sym.name == 'd')

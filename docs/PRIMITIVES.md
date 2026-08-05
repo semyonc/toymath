@@ -360,6 +360,14 @@ writer, comparer, and replicator landmines.
   has no finite limit step to cite in the first place. Infinite bounds,
   interior singularities, and both-end singularities still have no
   closing tactic.
+- A limit whose body contains a variable-bound definite integral is
+  checkable: the limit tactics' approach oracle evaluates such an
+  integral by graded quadrature (and l'Hôpital's form gate samples
+  through it, with the FTC bound rule differentiating it). This
+  evaluator belongs to the limits oracle leg only — general equality
+  checking deliberately does not gain it, so a definite integral's own
+  value still closes only through the integration tactics, never
+  through a sampled proposal.
 - In the other direction, `differentiate` closes the derivative of a
   variable-bound definite integral through the FTC bound rule
   (`f(b(x)) b'(x) - f(a(x)) a'(x)`), recording continuity of the integrand

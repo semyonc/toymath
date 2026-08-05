@@ -11,7 +11,7 @@ from primitives import (
     FRAC_NAMES, PrimitiveError, EvalError, parse_latex, write_latex,
     same_expression,
     _transparent_inner, _plain_symbol_name, _contains_free_infinity,
-    free_symbols, numeric_eval,
+    free_symbols, numeric_eval, definite_integral_evaluator,
     _sample_point, _result, _error, _int_literal, _strip_limit,
     _infinity_sign, _limit_latex, _paren, _is_sum_str,
 )
@@ -54,9 +54,22 @@ def _aitken(a, b, c):
     return c - (c - b) ** 2 / d
 
 
+def _body_fn(sym, notation):
+    """The approach oracle's evaluator for one body: plain numeric_eval,
+    or the quadrature-backed evaluator when the body carries a
+    variable-bound definite integral (a capability of the LIMITS oracle
+    leg only — the value of an integral itself still closes through the
+    integration tactics, never through sampling)."""
+    special = definite_integral_evaluator(sym, notation)
+    if special is not None:
+        return special
+    return lambda env: numeric_eval(sym, notation, env)
+
+
 def _approach_estimate(body, notation, var, point, point_notation,
                        direction, env):
     """Independent numeric limit estimate plus a convergence-error bound."""
+    body_eval = _body_fn(body, notation)
     inf = _infinity_sign(point, point_notation)
     if inf is not None:
         # fixed ladders: fall back to shorter/nearer ones only when a point
@@ -72,7 +85,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
                 for x in ladder:
                     e = dict(env)
                     e[var] = inf * x
-                    vals.append(numeric_eval(body, notation, e))
+                    vals.append(body_eval(e))
             except (OverflowError, ValueError, ZeroDivisionError,
                     EvalError):
                 continue
@@ -102,7 +115,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
     def at(offset):
         e = dict(env)
         e[var] = a + offset
-        v = numeric_eval(body, notation, e)
+        v = body_eval(e)
         if isinstance(v, list):
             raise EvalError('matrix-valued limit')
         return v
@@ -243,6 +256,8 @@ def _limit_indeterminate_form(parts, numerator, denominator):
         point, pn = parse_latex(parts['point_latex'])
     except PrimitiveError:
         return None
+    num_eval = _body_fn(ns, nn)
+    den_eval = _body_fn(ds, dn)
     envs = _limit_sample_envs(
         [(ns, nn), (ds, dn), (point, pn)], parts['var'], 4)
     inf = _infinity_sign(point, pn)
@@ -252,7 +267,7 @@ def _limit_indeterminate_form(parts, numerator, denominator):
                 a = numeric_eval(point, pn, env)
                 at = dict(env)
                 at[parts['var']] = a
-                nv, dv = numeric_eval(ns, nn, at), numeric_eval(ds, dn, at)
+                nv, dv = num_eval(at), den_eval(at)
                 if (not isinstance(nv, list) and not isinstance(dv, list)
                         and abs(nv) < 1e-8 and abs(dv) < 1e-8):
                     return '0/0'
@@ -270,8 +285,8 @@ def _limit_indeterminate_form(parts, numerator, denominator):
             for x in xs:
                 e = dict(env)
                 e[parts['var']] = x
-                nm.append(abs(numeric_eval(ns, nn, e)))
-                dm.append(abs(numeric_eval(ds, dn, e)))
+                nm.append(abs(num_eval(e)))
+                dm.append(abs(den_eval(e)))
             if (nm[1] > 50 and dm[1] > 50
                     and nm[1] > 1.5 * nm[0]
                     and dm[1] > 1.5 * dm[0]):

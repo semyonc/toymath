@@ -64,3 +64,16 @@ ignorance, not a counterexample.
 
 If the body contains an ellipsis or a finite sum/product, load
 `finite_operators` first, then return to this skill for the outer limit.
+
+A limit whose body contains a variable-bound DEFINITE integral
+(`\lim_{x \to 0^{+}} x \int_x^1 \frac{\cos t}{t^2} dt`) is checkable:
+the approach oracle evaluates the integral by graded quadrature, so
+`limit_evaluate` can certify your proposed value directly, and
+`limit_lhopital` sees the indeterminate form through the integral (its
+derivative step handles `\frac{d}{dx} \int_{a(x)}^{b(x)}` by the FTC
+bound rule). Two cautions: a body defined on only one side of the point
+— the integral crossing a pole for `x` past the bound — needs the
+one-sided spelling (`0^{+}`), or the samples honestly refuse; and this
+evaluates limits ABOUT integrals only — the value of a definite
+integral itself still closes through the `integration` skill's
+tactics, never by proposing it as a limit.

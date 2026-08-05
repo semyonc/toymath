@@ -4896,12 +4896,13 @@ class TestLimitFromSides(unittest.TestCase):
         self.assertIn('contradicts', rec['error'])
 
     def test_unconverged_oracle_defers_to_premises(self):
-        # the approach oracle cannot evaluate an integral atom at all, so
-        # the record is exact-by-theorem and only the registry handlers
+        # an INDEFINITE integral atom has no bounds for the quadrature
+        # evaluator (definite bodies evaluate since gen 77), so the
+        # record is exact-by-theorem and only the registry handlers
         # (recorded premises) can admit it
         rec = Limits.limit_from_sides(
-            '\\lim_{x \\to 0} \\left(x + \\int_0^1 t \\, dt\\right)',
-            '\\frac{1}{2}')
+            '\\lim_{x \\to 0} \\left(x + \\int t \\, dt\\right)',
+            '\\int t \\, dt')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertEqual(rec['check']['status'], 'exact')
 
@@ -5988,6 +5989,89 @@ class TestIntegrateDefiniteEndpointDoor(unittest.TestCase):
             '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertNotIn('upper_limit', rec['args'])
+
+
+class TestIntegralBearingLimitBodies(unittest.TestCase):
+    """The approach oracle evaluates a variable-bound definite integral
+    by graded quadrature — a capability of the LIMITS oracle leg only,
+    so a limit ABOUT an integral is checkable while the integral's own
+    value still closes only through the integration tactics."""
+
+    TARGET = ('\\lim_{x \\to 0^{+}} x \\int_x^1 '
+              '\\frac{\\cos t}{t^2} d t')
+
+    def test_the_motivating_limit_certifies(self):
+        rec = Limits.limit_evaluate(self.TARGET, '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_wrong_value_is_refused_with_the_estimate(self):
+        rec = Limits.limit_evaluate(self.TARGET, '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_the_two_sided_spelling_stays_honestly_open(self):
+        # for x < 0 the integral crosses the non-integrable pole at 0,
+        # so the left approach cannot evaluate: refuse, never certify
+        rec = Limits.limit_evaluate(
+            '\\lim _{x \\rightarrow 0} x \\int_x^1 '
+            '\\frac{\\cos t}{t^2} d t', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('did not converge', rec['error'])
+
+    def test_lhopital_sees_the_form_through_the_integral(self):
+        # the form gate samples the integral numerator; the derivative
+        # of the numerator is gen 75's FTC bound rule
+        rec = Limits.limit_lhopital(
+            '\\lim_{x \\to 0^{+}} \\frac{\\int_x^1 '
+            '\\frac{\\cos t}{t^2} d t}{\\frac{1}{x}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['indeterminate_form'], 'infinity/infinity')
+        self.assertIn('\\cos', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_frac_differential_spelling_evaluates(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} x \\int_x^1 '
+            '\\frac{\\cos t \\, d t}{t^2}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_at_infinity_integral_body(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} \\int_1^x \\frac{1}{t^2} d t', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_parameters_sample_through_the_integral(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} x \\int_x^1 \\frac{c}{t^2} d t', 'c')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_record_replays(self):
+        ledger = Ledger()
+        ledger.record(Limits.limit_evaluate(self.TARGET, '1'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_evaluator_declines_integral_free_and_indefinite_bodies(self):
+        s, n = P.parse_latex('x^2 + 1')
+        self.assertIsNone(P.definite_integral_evaluator(s, n))
+        s, n = P.parse_latex('x + \\int t \\, dt')
+        self.assertIsNone(P.definite_integral_evaluator(s, n))
+
+    def test_quadrature_refuses_a_domain_break(self):
+        fs, fn = P.parse_latex('\\frac{1}{t^{2}}')
+        with self.assertRaises(P.EvalError):
+            P._graded_quadrature(fs, fn, 't', -1.0, 1.0, {})
+
+    def test_general_equal_deliberately_does_not_gain_this(self):
+        # the boundary that keeps the door meaningful: equal? must not
+        # start deciding integral values numerically, or a sampled
+        # proposal could close a definite integral around
+        # integrate_definite/integrate_improper
+        rec = Core.equal_exprs('\\int_0^1 t^2 \\, dt', '\\frac{1}{3}')
+        self.assertEqual(rec['verdict'], 'unknown')
 
 
 class TestNumericImproperCheck(unittest.TestCase):
