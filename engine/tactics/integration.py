@@ -681,20 +681,26 @@ def integrate_substitute(expr, var, u_expr, u_var, new_integrand):
         return _error('integrate_substitute', args,
                       f'the new integrand must not mention {var!r}; '
                       f'write it in terms of {u_var!r} only')
-    if u_var not in free_symbols(nsym, nnotation):
-        return _error('integrate_substitute', args,
-                      f'the new integrand must be written in terms of '
-                      f'{u_var!r}')
+    # a u-free new integrand is NOT refused: `u = \tanh x` turns
+    # \int \frac{1}{\cosh^2 x} dx into \int 1 \, du, and the mechanical
+    # gate below (new_integrand[u := u_expr] * du/dx == integrand) is
+    # the authority either way — a wrong constant fails it
     du_rec = differentiate(u_expr, var)
     if not du_rec.get('ok'):
         return _error('integrate_substitute', args,
                       f'cannot differentiate u: {du_rec.get("error")}')
-    back_rec = substitute(new_integrand, u_var, u_expr)
-    if not back_rec.get('ok'):
-        return _error('integrate_substitute', args,
-                      f'cannot check the rewrite: {back_rec.get("error")}')
+    if u_var in free_symbols(nsym, nnotation):
+        back_rec = substitute(new_integrand, u_var, u_expr)
+        if not back_rec.get('ok'):
+            return _error('integrate_substitute', args,
+                          f'cannot check the rewrite: '
+                          f'{back_rec.get("error")}')
+        back = back_rec['result']
+    else:
+        # u-free integrand: the back-substitution is the identity
+        back = new_integrand
     du = du_rec['result']
-    reconstructed = _d_mul(_paren(back_rec['result']), _paren(du))
+    reconstructed = _d_mul(_paren(back), _paren(du))
     eq = equal_exprs(reconstructed, integrand_latex)
     if not (eq.get('ok') and eq.get('verdict') == 'yes'):
         return _error(
@@ -1033,14 +1039,19 @@ def _improper_parts(expr, var, truncated):
         return ('expr must be a definite integral \\int_a^b f \\, d<var> '
                 'with both bounds present')
     _var, integrand, lower, upper = parts
-    for bound in (lower, upper):
+    infinities = {}
+    for tag, bound in (('lower', lower), ('upper', upper)):
         try:
             bsym, bn = parse_latex(bound)
         except PrimitiveError as e:
             return f'bound {bound!r} is malformed: {e}'
-        if _infinity_sign(bsym, bn) is not None:
-            return ('infinite bounds have no truncation door here; only '
-                    'a singular finite endpoint does')
+        infinities[tag] = _infinity_sign(bsym, bn)
+    if infinities['lower'] is not None and infinities['upper'] is not None:
+        return ('both bounds are infinite; split the integral at a '
+                'finite point first')
+    if infinities['upper'] == -1 or infinities['lower'] == 1:
+        return ('the infinite bound is on the wrong side; reorient the '
+                'integral first')
     tparts = definite_integral_parts(truncated, var)
     if tparts is None:
         return ('truncated must be a definite integral over the same '
@@ -1061,6 +1072,19 @@ def _improper_parts(expr, var, truncated):
         side, bound, replaced, direction = 'upper', upper, t_upper, 'left'
     else:
         side, bound, replaced, direction = 'lower', lower, t_lower, 'right'
+    other = 'lower' if side == 'upper' else 'upper'
+    if infinities[other] is not None:
+        return (f'the truncated integral must replace the infinite '
+                f'{other} bound, not the finite one')
+    if infinities[side] is not None:
+        # the infinite door: the truncation point runs away instead of
+        # approaching a finite singularity, and the at-infinity limit
+        # spelling is two-sided (no direction marker)
+        kind = 'infinite'
+        bound = '\\infty' if infinities[side] > 0 else '-\\infty'
+        direction = 'two-sided'
+    else:
+        kind = 'singular'
     try:
         tsym, tn = parse_latex(replaced)
     except PrimitiveError as e:
@@ -1077,7 +1101,7 @@ def _improper_parts(expr, var, truncated):
                 'it appears in the integral itself')
     return {'integrand': integrand, 'lower': lower, 'upper': upper,
             'side': side, 'bound': bound, 'bound_var': bound_var,
-            'direction': direction}
+            'direction': direction, 'kind': kind}
 
 
 def integrate_improper(expr, var, truncated, truncated_value,
@@ -1126,16 +1150,26 @@ def integrate_improper(expr, var, truncated, truncated_value,
                       f'variable {info["bound_var"]}')
     definitional = _limit_latex(info['bound_var'], info['bound'],
                                 info['direction'], truncated)
-    interval = (f'[{info["lower"]}, {info["upper"]})'
-                if info['side'] == 'upper'
-                else f'({info["lower"]}, {info["upper"]}]')
+    if info['kind'] == 'infinite':
+        interval = (f'[{info["lower"]}, \\infty)'
+                    if info['side'] == 'upper'
+                    else f'(-\\infty, {info["upper"]}]')
+        improper_at = (f'the integral has an infinite {info["side"]} '
+                       'bound')
+        improper_at_display = (f'infinite {info["side"]} bound')
+    else:
+        interval = (f'[{info["lower"]}, {info["upper"]})'
+                    if info['side'] == 'upper'
+                    else f'({info["lower"]}, {info["upper"]}]')
+        improper_at = (f'the integral is improper at the {info["side"]} '
+                       f'bound {var} = {info["bound"]}')
+        improper_at_display = (f'improper at the {info["side"]} bound '
+                               f'${var} = {info["bound"]}$')
     assumptions = [
-        {'text': (f'the integral is improper at the {info["side"]} '
-                  f'bound {var} = {info["bound"]}; its value is read '
+        {'text': (f'{improper_at}; its value is read '
                   f'as {definitional} (the definitional limit of the '
                   'truncated integrals)'),
-         'display': (f'improper at the {info["side"]} bound '
-                     f'${var} = {info["bound"]}$: read as '
+         'display': (f'{improper_at_display}: read as '
                      f'${definitional}$ (definitional limit)')},
         {'text': (f'{info["integrand"]} is continuous on {interval}'),
          'display': (f'${info["integrand"]}$ is continuous on '
@@ -1146,7 +1180,9 @@ def integrate_improper(expr, var, truncated, truncated_value,
         assumptions=assumptions,
         extra={'integrand': info['integrand'], 'lower': info['lower'],
                'upper': info['upper'], 'singular': info['side'],
+               'improper_kind': info['kind'],
                'bound_var': info['bound_var']})
     rec['check'] = numeric_improper_check(expr, var, info['side'],
-                                          limit_value)
+                                          limit_value,
+                                          kind=info['kind'])
     return rec

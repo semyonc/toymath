@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Limit tactics and independent approach checks."""
+import math
 import random
 from fractions import Fraction
 
@@ -12,6 +13,7 @@ from primitives import (
     same_expression,
     _transparent_inner, _plain_symbol_name, _contains_free_infinity,
     free_symbols, numeric_eval, definite_integral_evaluator,
+    _overflow_saturation,
     _sample_point, _result, _error, _int_literal, _strip_limit,
     _infinity_sign, _limit_latex, _paren, _is_sum_str,
 )
@@ -59,11 +61,27 @@ def _body_fn(sym, notation):
     or the quadrature-backed evaluator when the body carries a
     variable-bound definite integral (a capability of the LIMITS oracle
     leg only — the value of an integral itself still closes through the
-    integration tactics, never through sampling)."""
+    integration tactics, never through sampling).
+
+    Runs under overflow saturation so genuinely-huge intermediates
+    cancel (`\\frac{1}{\\cosh^{n} x}` at a deep ladder rung is 0, not
+    an error), but keeps the public contract: a NON-FINITE body value
+    raises, exactly as an overflow did before, so Richardson/Aitken
+    arithmetic never sees an infinity — nan comparisons read as
+    agreement, the one shape this leg must never emit."""
     special = definite_integral_evaluator(sym, notation)
-    if special is not None:
-        return special
-    return lambda env: numeric_eval(sym, notation, env)
+    if special is None:
+        def special(env):
+            return numeric_eval(sym, notation, env)
+
+    def guarded(env):
+        with _overflow_saturation():
+            v = special(env)
+        if not isinstance(v, list) and not math.isfinite(v):
+            raise EvalError('non-finite body value')
+        return v
+
+    return guarded
 
 
 def _approach_estimate(body, notation, var, point, point_notation,

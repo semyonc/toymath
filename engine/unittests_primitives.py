@@ -6111,7 +6111,7 @@ class TestNumericImproperCheck(unittest.TestCase):
         check = P.numeric_improper_check(
             '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x', 'upper', '5')
         self.assertEqual(check['status'], 'disagree')
-        self.assertIn('away from the declared singular bound',
+        self.assertIn('away from the declared improper bound',
                       check['reason'])
 
     def test_parameters_are_sampled(self):
@@ -6181,13 +6181,120 @@ class TestIntegrateImproper(unittest.TestCase):
         self.assertFalse(rec['ok'])
         self.assertIn('must be fresh', rec['error'])
 
-    def test_refuses_infinite_bounds(self):
+    def test_infinite_upper_bound_closes(self):
+        # the infinite door (gen 78): the truncation point runs away
+        # instead of approaching a finite singularity
         rec = Integration.integrate_improper(
             '\\int_1^{\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
             '\\int_1^t \\frac{1}{x^{2}} \\, dx',
             '1 - \\frac{1}{t}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['improper_kind'], 'infinite')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('infinite upper bound', texts)
+        self.assertIn('continuous on [1, \\infty)', texts)
+        self.assertIn('\\lim_{t \\to \\infty}', texts)
+
+    def test_plus_infinity_spelling_routes_to_the_infinite_door(self):
+        # \int_0^{+\infty}: the PLUS wrapper must read as infinity — it
+        # previously read as a finite symbol and the whole record
+        # admitted with a skipped check
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x^{2}} \\, dx',
+            '\\left(-\\frac{1}{s}\\right) - \\left(-\\frac{1}{1}\\right)',
+            '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['improper_kind'], 'infinite')
+
+    def test_infinite_wrong_value_is_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x^{2}} \\, dx',
+            '\\left(-\\frac{1}{s}\\right) - \\left(-\\frac{1}{1}\\right)',
+            '2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_infinite_lower_bound_closes(self):
+        rec = Integration.integrate_improper(
+            '\\int_{-\\infty}^0 e^{x} \\, d x', 'x',
+            '\\int_s^0 e^{x} \\, d x', 'e^{0} - e^{s}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('continuous on (-\\infty, 0]', texts)
+        self.assertIn('\\lim_{s \\to -\\infty}', texts)
+
+    def test_divergent_infinite_ladder_never_certifies(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x} \\, dx', '\\ln s - \\ln 1', '5')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'skipped')
+        self.assertIn('never evidence of divergence',
+                      rec['check']['reason'])
+
+    def test_both_infinite_bounds_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_{-\\infty}^{+\\infty} \\frac{1}{1+x^{2}} \\, dx', 'x',
+            '\\int_s^{+\\infty} \\frac{1}{1+x^{2}} \\, dx', 'g', '\\pi')
         self.assertFalse(rec['ok'])
-        self.assertIn('infinite bounds', rec['error'])
+        self.assertIn('both bounds are infinite', rec['error'])
+
+    def test_replacing_the_finite_bound_is_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_s^{+\\infty} \\frac{1}{x^{2}} \\, dx',
+            '\\frac{1}{s}', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('must replace the infinite upper bound',
+                      rec['error'])
+
+    def test_hyperbolic_alias_spelling_closes_the_flagship(self):
+        # \operatorname{ch} normalizes to \cosh at the lexer, so the
+        # continental spelling and the canonical one are one expression
+        self.assertTrue(P.same_expression(
+            '\\operatorname{ch}^{n+1} x', '\\cosh^{n+1} x'))
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\operatorname{ch} x} \\, d x', 'x',
+            '\\sinh x', 'u', '\\frac{1}{1+u^{2}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_u_free_constant_integrand_is_checked_not_refused(self):
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh^{2} x} \\, d x', 'x',
+            '\\tanh x', 'u', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        wrong = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh^{2} x} \\, d x', 'x',
+            '\\tanh x', 'u', '2')
+        self.assertFalse(wrong['ok'])
+        self.assertIn('does not equal the integrand', wrong['error'])
+
+    def test_overflow_saturates_only_inside_the_mode(self):
+        s, n = P.parse_latex('\\frac{1}{\\cosh^{3} x}')
+        with P._overflow_saturation():
+            self.assertEqual(P.numeric_eval(s, n, {'x': 300.0}), 0.0)
+        with self.assertRaises(OverflowError):
+            P.numeric_eval(s, n, {'x': 300.0})
+
+    def test_growth_bodies_still_refuse_at_infinity(self):
+        # saturation must never leak a false green: a genuinely growing
+        # body raises inside the guarded evaluator and the proposal is
+        # refused, exactly as before
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} e^{e^{x}}', '5')
+        self.assertFalse(rec['ok'])
+        rec = Limits.limit_evaluate(
+            '\\lim_{T \\to \\infty} \\int_0^T '
+            '\\frac{1}{\\cosh^{3} x} \\, d x', '\\frac{\\pi}{4}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
 
     def test_refuses_when_no_bound_is_replaced(self):
         rec = Integration.integrate_improper(

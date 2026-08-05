@@ -198,6 +198,9 @@ class MathLexer(object):
          return t
 
              
+     HYPERBOLIC_ALIASES = {'ch': '\\cosh', 'sh': '\\sinh',
+                           'th': '\\tanh', 'cth': '\\coth'}
+
      def t_LITERAL(self, t):
          r'\\[A-Za-z]+|[A-Za-z]|\#\w+|\#\#'
          val = t.value
@@ -207,6 +210,18 @@ class MathLexer(object):
              # \lim_{n \rightarrow \infty} parses as a comparison, not a
              # product of plain symbols
              val = t.value = '\\to'
+           if val == '\\operatorname':
+             # the continental hyperbolic names normalize to the canonical
+             # heads at the lexer, like \rightarrow -> \to; every OTHER
+             # \operatorname keeps today's behavior (and its refusal) —
+             # a general form would silently mint unknown function heads
+             import re as _re
+             ahead = _re.match(r'\s*\{\s*(ch|sh|th|cth)\s*\}',
+                               t.lexer.lexdata[t.lexer.lexpos:])
+             if ahead is not None:
+               val = t.value = MathLexer.HYPERBOLIC_ALIASES[ahead.group(1)]
+               t.lexer.lexpos += ahead.end()
+               return t
            if val in ('\\cdots', '\\dots', '\\hdots', '\\dotsb',
                       '\\dotsc', '\\dotsi', '\\dotsm', '\\dotso'):
              # the inline dots family is pure typography for the same

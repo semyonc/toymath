@@ -347,19 +347,27 @@ writer, comparer, and replicator landmines.
   leg as a parameter. A chain rooted
   at the bare integrand — or the bare body of any value-bearing binder,
   such as a limit — is never accepted as the bounded expression's value.
-- An integrand singular at one finite endpoint closes through
-  `integrate_improper`, the definitional door: the integral is read as
-  the one-sided limit of its truncated integrals, consuming a recorded
-  truncated `integrate_definite` step (the singular bound replaced by a
-  fresh variable) and a recorded one-sided limit of that evaluation.
-  The definitional reading and half-open continuity are recorded, not
-  proved; the independent leg re-integrates the integrand over a graded
-  truncation ladder and extrapolates, refusing only past its own
-  measured residual. A ladder that does not settle certifies nothing —
-  a refusal is never evidence of divergence, and a divergent integral
-  has no finite limit step to cite in the first place. Infinite bounds,
-  interior singularities, and both-end singularities still have no
-  closing tactic.
+- An integrand singular at one finite endpoint — or an integral with
+  one infinite bound — closes through `integrate_improper`, the
+  definitional door: the integral is read as the limit of its
+  truncated integrals, consuming a recorded truncated
+  `integrate_definite` step (the improper bound replaced by a fresh
+  variable) and a recorded limit of that evaluation (one-sided from
+  inside at a singular bound; at ±infinity for an infinite one). The
+  definitional reading and half-open continuity are recorded, not
+  proved; the independent leg re-integrates the integrand over a
+  graded truncation ladder and extrapolates, refusing only past its
+  own measured residual, with genuinely-huge growth saturating to
+  infinity inside the quadrature so an exponentially decaying
+  integrand stays evaluable at deep truncation points. A ladder that
+  does not settle certifies nothing — a refusal is never evidence of
+  divergence, and a divergent integral has no finite limit step to
+  cite in the first place. Interior singularities and doubly-improper
+  intervals still have no closing tactic. The continental hyperbolic
+  spellings `\operatorname{ch}`, `\operatorname{sh}`,
+  `\operatorname{th}`, `\operatorname{cth}` normalize to
+  `\cosh`/`\sinh`/`\tanh`/`\coth` at the lexer; other `\operatorname`
+  names are unchanged.
 - A limit whose body contains a variable-bound definite integral is
   checkable: the limit tactics' approach oracle evaluates such an
   integral by graded quadrature (and l'Hôpital's form gate samples

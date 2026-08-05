@@ -13,6 +13,8 @@ Deliberately absent: solve, simplify, autonomous integrate, general factor.
 import math
 import random
 import re
+import threading
+from contextlib import contextmanager
 
 from notation import Notation, Symbol, Func
 from LatexParser import MathParser
@@ -570,14 +572,19 @@ def _graded_quadrature(fs, fn, var, a, b, env, panels=64):
             + [b - r * span for r in rel[1:]] + [b])
     total = 0.0
     err = 0.0
-    for lo, hi in zip(cuts, cuts[1:]):
-        coarse, _bad = _simpson_panels(fs, fn, var, lo, hi, env, panels)
-        fine, _bad2 = _simpson_panels(fs, fn, var, lo, hi, env,
-                                      panels * 2)
-        if coarse is None or fine is None:
-            raise EvalError('integrand is not evaluable on the interval')
-        total += fine
-        err += abs(fine - coarse) / 15.0
+    with _overflow_saturation():
+        for lo, hi in zip(cuts, cuts[1:]):
+            coarse, _bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                           panels)
+            fine, _bad2 = _simpson_panels(fs, fn, var, lo, hi, env,
+                                          panels * 2)
+            if coarse is None or fine is None:
+                raise EvalError(
+                    'integrand is not evaluable on the interval')
+            total += fine
+            err += abs(fine - coarse) / 15.0
+    if not math.isfinite(total):
+        raise EvalError('the integral value overflows')
     if err > 1e-6 * max(1.0, abs(total)):
         raise EvalError('quadrature over the interval did not converge')
     return sign * total
@@ -1215,6 +1222,47 @@ def _is_func_name(sym, notation):
             and sym.name in _UNARY_TABLE)
 
 
+_SATURATE_OVERFLOW = threading.local()
+
+
+@contextmanager
+def _overflow_saturation():
+    """Evaluation mode in which a genuinely-huge overflow saturates to
+    IEEE infinity and propagates (`1/\\cosh^{3}(300)` is 0, not an
+    error), for the quadrature and approach-ladder legs whose deep
+    rungs measurably die on `\\cosh`-family growth otherwise.
+
+    Deliberately NOT the default: the comparison legs (`equal?`,
+    spot checks) must keep seeing overflow as an evaluation failure —
+    `inf` on both sides of `_num_agree` is nan-arithmetic, a false
+    DISAGREE between identical spellings.  Every consumer of this mode
+    re-raises when the final value itself is non-finite, so the mode
+    never widens what a caller can observe, only what can cancel
+    inside."""
+    prev = getattr(_SATURATE_OVERFLOW, 'on', False)
+    _SATURATE_OVERFLOW.on = True
+    try:
+        yield
+    finally:
+        _SATURATE_OVERFLOW.on = prev
+
+
+def _apply_unary(fname, v):
+    """One table application, saturating only the genuinely monotone
+    overflow shapes (sinh/cosh/exp); `coth` saturates to ±1, never
+    infinity, so its overflow stays an error."""
+    try:
+        return _UNARY_TABLE[fname](v)
+    except OverflowError:
+        if not getattr(_SATURATE_OVERFLOW, 'on', False):
+            raise
+        if fname == '\\sinh':
+            return math.copysign(math.inf, v)
+        if fname in ('\\cosh', '\\exp'):
+            return math.inf
+        raise
+
+
 # ---------------------------------------------------------------------------
 # matrix-aware oracle arithmetic. Matrices evaluate to lists of lists of
 # floats; the helpers keep multiplication ORDERED, so the oracle can
@@ -1286,7 +1334,14 @@ def _num_pow(b, p):
         raise ZeroDivisionError
     if b < 0 and p != int(p):
         raise ValueError('negative base, fractional power')
-    return math.pow(b, p)
+    try:
+        return math.pow(b, p)
+    except OverflowError:
+        if not getattr(_SATURATE_OVERFLOW, 'on', False):
+            raise
+        if b > 0:
+            return math.inf
+        return math.inf if int(p) % 2 == 0 else -math.inf
 
 
 def _num_abs(v):
@@ -1488,7 +1543,7 @@ def numeric_eval(sym, notation, env):
             v = numeric_eval(arg, notation, env)
             if isinstance(v, list):
                 raise EvalError('matrix argument to a function')
-            return _UNARY_TABLE[fname.name](v)
+            return _apply_unary(fname.name, v)
         raise EvalError(f'unknown function {fname!r}')
     if op.name in FRAC_NAMES:
         d = numeric_eval(f.args[1], notation, env)
@@ -1633,9 +1688,9 @@ def _eval_plist(args, notation, env):
                 inner = _num_mul(inner, numeric_eval(t, notation, env))
             if isinstance(inner, list):
                 raise EvalError('matrix argument to a function')
-            v = _UNARY_TABLE[fname](inner)
+            v = _apply_unary(fname, inner)
             if power is not None:
-                v = math.pow(v, numeric_eval(power, notation, env))
+                v = _num_pow(v, numeric_eval(power, notation, env))
             result = _num_mul(result, v)
             i = j
         else:
@@ -2184,29 +2239,70 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
             'method': 'composite-simpson quadrature'}
 
 
-def numeric_improper_check(expr, var, side, result, samples=4,
-                           seed=20260805, panels=128, rungs=7, tol=1e-4):
-    """Truncation-quadrature leg for an improper endpoint integral: the
-    integrand is singular at the ``side`` (``'upper'``/``'lower'``)
-    bound, and ``result`` claims the integral's definitional value —
-    the limit of the truncated integrals from inside.
+def _aitken_accel(x, y, z):
+    d = (z - y) - (y - x)
+    if abs(d) < 1e-15 * max(abs(x), abs(y), abs(z), 1e-300):
+        return None
+    return z - (z - y) ** 2 / d
 
-    The leg walks that definition numerically: it integrates up to a
-    ladder of cut points approaching the singular bound geometrically,
-    each rung adding one graded slab (uniform Simpson cannot resolve the
-    steepening integrand over the whole interval, but a slab whose width
-    shrinks with its distance from the singularity sees only a bounded
-    relative variation), then extrapolates the rung values with iterated
-    Aitken.  Never touches any antiderivative or recorded limit — it
+
+def _ladder_verdict(vals, quad_err, expected, tol):
+    """One truncation ladder against one expected value, by iterated
+    Aitken with the accumulated quadrature residual as the honesty bar:
+    ('agree'|'undecided'|'disagree'|'stalled', estimate).  'stalled'
+    means the rung differences stop decaying — no finite value is in
+    evidence, which is the divergent shape and never a counterexample."""
+    diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+    tail = [abs(d) for d in diffs[-2:]]
+    if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
+            and tail[1] > tol * max(1.0, abs(vals[-1])):
+        return 'stalled', None
+    lvl1 = [_aitken_accel(*vals[k:k + 3]) for k in range(len(vals) - 2)]
+    if any(v is None for v in lvl1):
+        est = vals[-1]
+        spread = abs(vals[-1] - vals[-2])
+    else:
+        lvl2 = [_aitken_accel(*lvl1[k:k + 3])
+                for k in range(len(lvl1) - 2)]
+        if not lvl2 or any(v is None for v in lvl2):
+            est = lvl1[-1]
+            spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
+        else:
+            est = lvl2[-1]
+            spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
+                      else abs(lvl2[-1] - lvl1[-1]))
+    bar = 16.0 * (quad_err + spread)
+    scale = max(1.0, abs(est), abs(expected))
+    delta = abs(est - expected)
+    if delta / scale <= tol:
+        return 'agree', est
+    if delta <= bar:
+        return 'undecided', est
+    return 'disagree', est
+
+
+def numeric_improper_check(expr, var, side, result, samples=4,
+                           seed=20260805, panels=128, rungs=7, tol=1e-4,
+                           kind='singular'):
+    """Truncation-quadrature leg for an improper integral: ``result``
+    claims the definitional value — the limit of the truncated
+    integrals.  ``kind='singular'``: the integrand is singular at the
+    ``side`` (``'upper'``/``'lower'``) finite bound, and the ladder's
+    cut points approach it geometrically from inside, each rung adding
+    one graded slab.  ``kind='infinite'``: the ``side`` bound is
+    ``±\\infty``, and the ladder's truncation points grow by decades
+    away from the finite bound, each rung a full graded quadrature
+    (under overflow saturation, so an exponentially decaying integrand
+    is 0 at deep nodes rather than an error).  Both ladders share one
+    verdict: iterated Aitken against the leg's own accumulated
+    residual.  Never touches any antiderivative or recorded limit — it
     shares only the structure readers with the symbolic path.
 
-    Its error bar is its own measured convergence residual (the
-    accumulated two-grid Richardson estimates plus the extrapolation
-    spread): a gap that does not clear the bar is undecided, never a
-    counterexample.  A ladder whose rung differences stop decaying has
+    A gap that does not clear the bar is undecided, never a
+    counterexample; a ladder whose rung differences stop decaying has
     no finite value in evidence (the divergent shape) and reports
     ``skipped`` — a refusal is never evidence of divergence.  A domain
-    break at a node away from the declared singular bound is a witness
+    break at a node away from the declared improper bound is a witness
     that the integrand is improper elsewhere too, and refuses — under
     sampled parameters it is a bad draw instead."""
     parts = definite_integral_parts(expr, var)
@@ -2215,6 +2311,8 @@ def numeric_improper_check(expr, var, side, result, samples=4,
     _var, integrand, lower, upper = parts
     if side not in ('upper', 'lower'):
         return {'status': 'skipped', 'reason': 'unknown singular side'}
+    if kind not in ('singular', 'infinite'):
+        return {'status': 'skipped', 'reason': 'unknown improper kind'}
     try:
         fs, fn = parse_latex(integrand)
         ls, ln = parse_latex(lower)
@@ -2222,33 +2320,54 @@ def numeric_improper_check(expr, var, side, result, samples=4,
         rs, rn = parse_latex(result)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
-    if free_symbols(ls, ln) | free_symbols(us, un):
-        return {'status': 'skipped',
-                'reason': 'symbolic bounds are outside this check'}
-    try:
-        a = numeric_eval(ls, ln, {})
-        b = numeric_eval(us, un, {})
-    except (EvalError, ValueError, ZeroDivisionError, OverflowError):
-        return {'status': 'skipped', 'reason': 'bounds are not evaluable'}
-    if not (math.isfinite(a) and math.isfinite(b)):
-        return {'status': 'skipped', 'reason': 'bounds are not finite'}
-    if not b > a:
-        return {'status': 'skipped', 'reason': 'bounds are not ordered'}
-    span = b - a
-    deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(rungs)]
+    if kind == 'infinite':
+        fin_s, fin_n = (ls, ln) if side == 'upper' else (us, un)
+        if free_symbols(fin_s, fin_n):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            finite = numeric_eval(fin_s, fin_n, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if isinstance(finite, list) or not math.isfinite(finite):
+            return {'status': 'skipped',
+                    'reason': 'the finite bound is not evaluable'}
+        cut_scale = max(1.0, abs(finite))
+        ladder_ts = [cut_scale * 10.0 ** k for k in range(1, 6)]
+        a = b = finite
+    else:
+        if free_symbols(ls, ln) | free_symbols(us, un):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return {'status': 'skipped', 'reason': 'bounds are not finite'}
+        if not b > a:
+            return {'status': 'skipped', 'reason': 'bounds are not ordered'}
+        span = b - a
+        deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(rungs)]
     params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
 
     def piece(lo, hi, env):
         """(fine value, richardson error, bad node) for one region."""
-        coarse, bad = _simpson_panels(fs, fn, var, lo, hi, env, panels)
-        if coarse is None:
-            return None, None, bad
-        fine, bad = _simpson_panels(fs, fn, var, lo, hi, env, panels * 2)
+        with _overflow_saturation():
+            coarse, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                          panels)
+            if coarse is None:
+                return None, None, bad
+            fine, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                        panels * 2)
         if fine is None:
             return None, None, bad
         return fine, abs(fine - coarse) / 15.0, None
 
-    def ladder(env):
+    def singular_ladder(env):
         """(rung values, accumulated quadrature error, bad node)."""
         if side == 'upper':
             regions = [(a, b - deltas[0])]
@@ -2270,11 +2389,21 @@ def numeric_improper_check(expr, var, side, result, samples=4,
             vals.append(total)
         return vals, err, None
 
-    def aitken(x, y, z):
-        d = (z - y) - (y - x)
-        if abs(d) < 1e-15 * max(abs(x), abs(y), abs(z), 1e-300):
-            return None
-        return z - (z - y) ** 2 / d
+    def infinite_ladder(env):
+        """(rung values, accumulated quadrature error, None) — each rung
+        a full graded quadrature to a decade-farther truncation point."""
+        vals = []
+        err = 0.0
+        for t in ladder_ts:
+            lo, hi = (a, t) if side == 'upper' else (-t, b)
+            try:
+                value = _graded_quadrature(fs, fn, var, lo, hi, env)
+            except (EvalError, ValueError, ZeroDivisionError,
+                    OverflowError):
+                return None, None, None
+            vals.append(value)
+            err += 1e-6 * max(1.0, abs(value))
+        return vals, err, None
 
     rng = random.Random(seed)
     rounds = samples if params else 1
@@ -2290,65 +2419,63 @@ def numeric_improper_check(expr, var, side, result, samples=4,
             continue
         if isinstance(expected, list) or not math.isfinite(expected):
             continue
-        # break-hunt probe over the whole interval, walked so the
-        # declared singular bound is the LAST node: the first domain
-        # break found is then never the declared one, i.e. a witness
-        # that the integrand is improper somewhere else too
-        if side == 'upper':
-            _probe, bad = _simpson_panels(fs, fn, var, a, b, env, panels)
-            declared = b
+        # break-hunt probe walked so the declared improper bound is the
+        # LAST node (singular) or not a node at all (infinite): the
+        # first domain break found is then never the declared one, i.e.
+        # a witness that the integrand is improper somewhere else too
+        if kind == 'infinite':
+            lo, hi = ((a, ladder_ts[0]) if side == 'upper'
+                      else (-ladder_ts[0], b))
+            with _overflow_saturation():
+                _probe, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                              panels)
+            witness = bad is not None
         else:
-            _probe, bad = _simpson_panels(fs, fn, var, b, a, env, panels)
-            declared = a
-        if bad is not None and (abs(bad - declared)
-                                > 1e-9 * max(1.0, abs(declared))):
+            with _overflow_saturation():
+                if side == 'upper':
+                    _probe, bad = _simpson_panels(fs, fn, var, a, b,
+                                                  env, panels)
+                    declared = b
+                else:
+                    _probe, bad = _simpson_panels(fs, fn, var, b, a,
+                                                  env, panels)
+                    declared = a
+            witness = bad is not None and (
+                abs(bad - declared) > 1e-9 * max(1.0, abs(declared)))
+        if witness:
             if not params:
                 return {'status': 'disagree', 'point': {var: bad},
                         'reason': f'integrand is not evaluable at '
                                   f'{var} = {bad:.6g}, away from the '
-                                  'declared singular bound; the integral '
+                                  'declared improper bound; the integral '
                                   'is improper there too'}
             continue
-        vals, quad_err, bad = ladder(env)
+        if kind == 'infinite':
+            vals, quad_err, bad = infinite_ladder(env)
+        else:
+            vals, quad_err, bad = singular_ladder(env)
         if vals is None:
             if bad is not None and not params:
                 return {'status': 'disagree', 'point': {var: bad},
                         'reason': f'integrand is not evaluable at '
                                   f'{var} = {bad:.6g}, away from the '
-                                  'declared singular bound; the integral '
+                                  'declared improper bound; the integral '
                                   'is improper there too'}
+            last_reason = 'truncated integrals were not evaluable'
             continue
-        diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
-        tail = [abs(d) for d in diffs[-2:]]
-        if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
-                and tail[1] > tol * max(1.0, abs(vals[-1])):
+        status, est = _ladder_verdict(vals, quad_err, expected, tol)
+        if status == 'stalled':
             last_reason = ('the truncation ladder does not settle — no '
                            'finite value is in evidence (a refusal is '
                            'never evidence of divergence)')
             if params:
                 continue
             break
-        lvl1 = [aitken(*vals[k:k + 3]) for k in range(len(vals) - 2)]
-        if any(v is None for v in lvl1):
-            est = vals[-1]
-            spread = abs(vals[-1] - vals[-2])
-        else:
-            lvl2 = [aitken(*lvl1[k:k + 3]) for k in range(len(lvl1) - 2)]
-            if not lvl2 or any(v is None for v in lvl2):
-                est = lvl1[-1]
-                spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
-            else:
-                est = lvl2[-1]
-                spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
-                          else abs(lvl2[-1] - lvl1[-1]))
-        bar = 16.0 * (quad_err + spread)
-        scale = max(1.0, abs(est), abs(expected))
-        delta = abs(est - expected)
-        if delta / scale > tol:
-            if delta <= bar:
-                last_reason = ('the truncation quadrature could not '
-                               'resolve the gap within its own error bar')
-                continue
+        if status == 'undecided':
+            last_reason = ('the truncation quadrature could not '
+                           'resolve the gap within its own error bar')
+            continue
+        if status == 'disagree':
             return {'status': 'disagree', 'point': env,
                     'symbolic': expected, 'numeric': est}
         agreed += 1
@@ -2619,6 +2746,10 @@ def _strip_limit(sym, notation):
 
 def _infinity_sign(sym, notation):
     sym = _transparent_inner(sym, notation)
+    pos = notation.getf(sym, Notation.PLUS)
+    if pos is not None:
+        # the explicit-sign spelling \int_0^{+\infty} / x \to +\infty
+        sym = _transparent_inner(pos.args[0], notation)
     neg = notation.getf(sym, Notation.MINUS)
     if neg is not None:
         inner = _transparent_inner(neg.args[0], notation)

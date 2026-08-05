@@ -109,22 +109,25 @@ Continuity of the integrand on `[a, b]` is recorded as an assumption; a
 pole strictly inside the bounds makes the check refuse (the integral is
 improper there).
 
-## Improper integrals (endpoint singularity)
+## Improper integrals (endpoint singularity or an infinite bound)
 
 An integrand singular at ONE finite bound
-(`\int_0^1 \frac{dx}{(2-x)\sqrt{1-x}}` blows up at `x = 1`) closes by
-its definition — the limit of the truncated integrals — in four moves:
+(`\int_0^1 \frac{dx}{(2-x)\sqrt{1-x}}` blows up at `x = 1`), or an
+integral with ONE infinite bound (`\int_0^{+\infty} \frac{dx}{\cosh
+x}`), closes by its definition — the limit of the truncated
+integrals — in four moves:
 
 1. Derive the ANTIDERIVATIVE of the integrand with the indefinite
    tactics above.
-2. Evaluate the TRUNCATED integral: replace the singular bound with a
+2. Evaluate the TRUNCATED integral: replace the improper bound with a
    fresh variable (`\int_0^t`, keeping the other bound verbatim) and
    call `integrate_definite` citing the antiderivative step. The
    symbolic bound is fine — the check samples it.
-3. Load the `limits` skill and record the one-sided limit of that
-   step's FULL result at the singular bound, approached from inside
-   the interval (`t \to 1^{-}` for an upper bound, `t \to 0^{+}` for a
-   lower). Spell the limit body exactly as the truncated step returned
+3. Load the `limits` skill and record the limit of that step's FULL
+   result at the replaced bound: one-sided from inside for a singular
+   bound (`t \to 1^{-}` for an upper bound, `t \to 0^{+}` for a
+   lower), plain `t \to \infty` (or `t \to -\infty`) for an infinite
+   one. Spell the limit body exactly as the truncated step returned
    it; `limit_evaluate` certifies your proposed value when no named
    rule reaches it.
 4. Call `integrate_improper` with the ORIGINAL integral, citing the
@@ -136,9 +139,10 @@ its definition — the limit of the truncated integrals — in four moves:
 If the limit in move 3 does not exist, nothing can certify it and the
 integral has no finite value in evidence: report the verified stopping
 point with the open outcome — a refusal is never evidence of
-divergence. Infinite bounds, a singularity strictly INSIDE the
-interval, and singularities at BOTH ends still have no closing tactic;
-use the open outcome there too.
+divergence. A singularity strictly INSIDE the interval, improperness
+at BOTH ends (two singular ends, two infinite ends, or one of each),
+and a singular integrand UNDER an infinite bound still have no closing
+tactic; use the open outcome there too.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly
