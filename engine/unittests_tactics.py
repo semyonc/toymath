@@ -118,6 +118,18 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('cases_assemble TARGET UNION STEP...', equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
+    def test_boundary_term_reduction_steers_to_the_equations_route(self):
+        """A reduction formula with a boundary term is outside
+        integrate_reduction's structural fence; the skill must route it to
+        differentiation plus coefficient matching instead of letting the
+        one-tactic scope read as impossibility (live: the agent answered
+        `set_open` on a task the equations route had already closed)."""
+        integration = tactic_skills.render('integration')
+        self.assertIn('boundary term', integration)
+        self.assertIn('coefficient matching', integration)
+        self.assertIn('system_assemble', integration)
+        self.assertIn('never a reason to declare the task open', integration)
+
     def test_existing_cli_shapes_are_preserved(self):
         parser = toymath_cli.build_parser()
         apply = parser.parse_args(['apply', '2x+3=7', '-', '3'])

@@ -213,6 +213,20 @@ greenness. Close each base case as its own cell through the definite
 or improper recipe above. A divergent side stalls the check's ladder
 and certifies nothing — a refusal is never evidence of divergence.
 
+An INDEFINITE reduction formula that carries a boundary term
+(`\int \frac{dx}{(a+b\cos x)^n} = \frac{A\sin x}{(a+b\cos x)^{n-1}}
++ B\int\frac{dx}{(a+b\cos x)^{n-1}} + C\int\frac{dx}{(a+b\cos x)^{n-2}}`,
+"find A, B, C") is outside `integrate_reduction`'s scope — that is a
+fact about ONE tactic's fence, never a reason to declare the task open.
+Prove it by DIFFERENTIATION and coefficient matching: `diff` the
+boundary term, use `equal` to certify the algebraic identities you
+rely on, let `match_coefficients` turn the polynomial identity into
+the coefficient system, and close the constants through the equations
+skill (`apply`, `expand`, `equal --assuming`, `system_assemble`),
+then `set_result` with the assembled constants. The certified content is the mechanically checked
+derivative identity plus the constants — no integration step is
+recorded, and none is needed when the ask is the constants.
+
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly
 provenance is part of the mechanical certificate.
