@@ -515,6 +515,20 @@ if isinstance(n, IntegerValue): ...
   kernel thread. Failed Python/TikZ attempts never publish partial figures;
   the final failure is shown as a bounded, non-ledger notebook notice. Keep
   figure bytes out of model replies, traces, the ledger, and replay.
+- LANDMINE: cell output must name its parent explicitly, never resolve it at
+  send time. `MathKernel._send_cell_output` pins the execute request's
+  header captured at `do_execute` entry; the streamed step log is
+  `display()`ed from provider worker threads, and a worker thread resolves
+  `get_parent()` through a shared last-shell-message fallback that ipykernel
+  updates for EVERY shell message — including a comm handled on a kernel
+  subshell WHILE the cell runs (ipykernel 7 dispatches subshell messages
+  concurrently; JupyterLab runs comms over subshells by default). Measured:
+  one mid-run `toymath.render`/`toymath.model` comm re-pointed the fallback,
+  every later step line arrived parented to the comm message, and the
+  notebook — with no cell to route it to — silently dropped the live log
+  while the end-of-run table (sent from the dispatch context, whose own
+  parent survives) still rendered. Do not publish cell output through bare
+  `send_response`.
 
 ## Reference Reading
 

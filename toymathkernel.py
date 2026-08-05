@@ -94,6 +94,9 @@ class MathKernel(Kernel):
 
         setHandler(self.Display)
         self.redirect_to_log = False
+        # The executing cell's parent header, captured at do_execute entry;
+        # every cell-output publish names it explicitly (_send_cell_output).
+        self._cell_parent = {}
 
         self.comm_manager = CommManager(parent=self, kernel=self)
         register_comm_target(self)
@@ -193,6 +196,10 @@ class MathKernel(Kernel):
     ):
         # Set the ability for the kernel to get standard-in:
         self._allow_stdin = allow_stdin
+        # Pin this cell's parent while the dispatch context still names it
+        # unambiguously; worker threads cannot resolve it later (see
+        # _send_cell_output).
+        self._cell_parent = self.get_parent("shell")
         # Create a default response:
         kernel_resp = {
             "status": "ok",
@@ -219,9 +226,29 @@ class MathKernel(Kernel):
         """The repr of the kernel."""
         return repr(item)
 
+    def _send_cell_output(self, msg_type, content):
+        """Publish cell output on IOPub, parented to the executing cell.
+
+        send_response resolves the parent at SEND time: a worker thread
+        falls back to "the last shell message anyone dispatched", and with
+        kernel subshells (ipykernel 7; JupyterLab runs comms over them by
+        default) a comm message handled while the cell runs re-points that
+        fallback mid-run. Streamed step lines then arrive parented to the
+        comm message, which the notebook can route to no cell, so the live
+        log silently disappears while the end-of-run output — published
+        from the dispatch context, whose own parent survives — still
+        renders. Cell output therefore always names the parent captured at
+        do_execute entry.
+        """
+        if not self.session:
+            return
+        parent = self._cell_parent or self.get_parent("shell")
+        self.session.send(self.iopub_socket, msg_type, content,
+                          parent=parent)
+
     def clear_output(self, wait=False):
         """Clear the output of the kernel."""
-        self.send_response(self.iopub_socket, "clear_output", {"wait": wait})
+        self._send_cell_output("clear_output", {"wait": wait})
 
     def Write(self, message):
         """Write message directly to the iopub stdout with no added end character."""
@@ -230,7 +257,7 @@ class MathKernel(Kernel):
         if self.redirect_to_log:
             self.log.info(message)
         else:
-            self.send_response(self.iopub_socket, "stream", stream_content)
+            self._send_cell_output("stream", stream_content)
 
     def Error(self, *objects, **kwargs):
         """Print `objects` to stdout, separated by `sep` and followed by `end`.
@@ -242,7 +269,7 @@ class MathKernel(Kernel):
         if self.redirect_to_log:
             self.log.info(message.rstrip())
         else:
-            self.send_response(self.iopub_socket, "stream", stream_content)
+            self._send_cell_output("stream", stream_content)
 
     def Display(self, *objects, **kwargs):
         """Display one or more objects using rich display.
@@ -264,7 +291,7 @@ class MathKernel(Kernel):
                     },
                 }
                 content = {"data": data, "metadata": {}}
-                self.send_response(self.iopub_socket, "display_data", content)
+                self._send_cell_output("display_data", content)
             else:
                 self.log.debug("Display Data")
                 try:
@@ -273,7 +300,7 @@ class MathKernel(Kernel):
                     self.Error(e)
                     return
                 content = {"data": data[0], "metadata": data[1]}
-                self.send_response(self.iopub_socket, "display_data", content)
+                self._send_cell_output("display_data", content)
 
 
 def format_message(*objects, **kwargs):
