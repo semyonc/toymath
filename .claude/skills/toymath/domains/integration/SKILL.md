@@ -107,10 +107,38 @@ exactly that antiderivative or it is refused.
 
 Continuity of the integrand on `[a, b]` is recorded as an assumption; a
 pole strictly inside the bounds makes the check refuse (the integral is
-improper there). Truly improper integrals — infinite bounds or an
-integrand singularity inside or at the interval — still have no closing
-tactic: report the verified stopping point with the open outcome
-instead of forcing a value.
+improper there).
+
+## Improper integrals (endpoint singularity)
+
+An integrand singular at ONE finite bound
+(`\int_0^1 \frac{dx}{(2-x)\sqrt{1-x}}` blows up at `x = 1`) closes by
+its definition — the limit of the truncated integrals — in four moves:
+
+1. Derive the ANTIDERIVATIVE of the integrand with the indefinite
+   tactics above.
+2. Evaluate the TRUNCATED integral: replace the singular bound with a
+   fresh variable (`\int_0^t`, keeping the other bound verbatim) and
+   call `integrate_definite` citing the antiderivative step. The
+   symbolic bound is fine — the check samples it.
+3. Load the `limits` skill and record the one-sided limit of that
+   step's FULL result at the singular bound, approached from inside
+   the interval (`t \to 1^{-}` for an upper bound, `t \to 0^{+}` for a
+   lower). Spell the limit body exactly as the truncated step returned
+   it; `limit_evaluate` certifies your proposed value when no named
+   rule reaches it.
+4. Call `integrate_improper` with the ORIGINAL integral, citing the
+   truncated step and the limit step. It records the definitional
+   reading and the half-open continuity assumption, and an independent
+   truncation-ladder quadrature re-derives the value from the
+   integrand alone.
+
+If the limit in move 3 does not exist, nothing can certify it and the
+integral has no finite value in evidence: report the verified stopping
+point with the open outcome — a refusal is never evidence of
+divergence. Infinite bounds, a singularity strictly INSIDE the
+interval, and singularities at BOTH ends still have no closing tactic;
+use the open outcome there too.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly

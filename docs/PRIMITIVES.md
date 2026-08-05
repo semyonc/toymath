@@ -343,10 +343,23 @@ writer, comparer, and replicator landmines.
   consumes a recorded antiderivative step, substitutes both bounds itself,
   and is checked by independent quadrature over the integrand; continuity
   on the interval is recorded, not proved, and an interior domain break
-  makes the quadrature leg refuse. Improper integrals (infinite bounds or
-  an interior/endpoint singularity) have no closing tactic. A chain rooted
+  makes the quadrature leg refuse. A symbolic bound is sampled by that
+  leg as a parameter. A chain rooted
   at the bare integrand — or the bare body of any value-bearing binder,
   such as a limit — is never accepted as the bounded expression's value.
+- An integrand singular at one finite endpoint closes through
+  `integrate_improper`, the definitional door: the integral is read as
+  the one-sided limit of its truncated integrals, consuming a recorded
+  truncated `integrate_definite` step (the singular bound replaced by a
+  fresh variable) and a recorded one-sided limit of that evaluation.
+  The definitional reading and half-open continuity are recorded, not
+  proved; the independent leg re-integrates the integrand over a graded
+  truncation ladder and extrapolates, refusing only past its own
+  measured residual. A ladder that does not settle certifies nothing —
+  a refusal is never evidence of divergence, and a divergent integral
+  has no finite limit step to cite in the first place. Infinite bounds,
+  interior singularities, and both-end singularities still have no
+  closing tactic.
 - In the other direction, `differentiate` closes the derivative of a
   variable-bound definite integral through the FTC bound rule
   (`f(b(x)) b'(x) - f(a(x)) a'(x)`), recording continuity of the integrand

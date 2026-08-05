@@ -1923,14 +1923,146 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
     x-dependent domain break inside [a,b] — the Fundamental Theorem's
     own hypothesis fails there, and F(b)-F(a) is exactly the classic
     wrong answer (``\\int_{-1}^{1} x^{-2} = -2``) — so that point is
-    reported as a refusal, never sampled around.  A sample whose every
-    node fails is a bad parameter draw and is skipped.  Convergence is
-    estimated from two grids; a non-converged estimate is oracle
-    ignorance, never a counterexample."""
+    reported as a refusal, never sampled around.  The hunt for that
+    witness runs even when the claimed result itself is unevaluable —
+    a divergent integral's F(b)-F(a) typically contains the very
+    singularity (``\\ln(0)``), and skipping on it would admit the
+    nonsense the break refusal exists to bar.  A symbolic bound is
+    sampled like any parameter (the identity is then claimed for the
+    bound as a variable), but a domain break under a sampled bound is
+    a bad draw — the claim's own continuity assumption excludes that
+    region — never a witness.  A sample whose every node fails is a
+    bad parameter draw and is skipped.  Convergence is estimated from
+    two grids; a non-converged estimate is oracle ignorance, never a
+    counterexample."""
     parts = definite_integral_parts(expr, var)
     if parts is None:
         return {'status': 'skipped', 'reason': 'not a definite integral'}
     _var, integrand, lower, upper = parts
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    bound_syms = free_symbols(ls, ln) | free_symbols(us, un)
+    if var in bound_syms:
+        return {'status': 'skipped',
+                'reason': 'a bound contains the integration variable'}
+    if not bound_syms:
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return {'status': 'skipped', 'reason': 'bounds are not finite'}
+    params = ((free_symbols(fs, fn) | free_symbols(rs, rn) | bound_syms)
+              - {var})
+
+    rng = random.Random(seed)
+    rounds = samples if params else 1
+    agreed = 0
+    tried = 0
+    while agreed < rounds and tried < rounds * 6:
+        tried += 1
+        env = _sample_point(params, rng) if params else {}
+        if bound_syms:
+            try:
+                a = numeric_eval(ls, ln, env)
+                b = numeric_eval(us, un, env)
+            except (EvalError, ValueError, ZeroDivisionError,
+                    OverflowError):
+                continue
+            if any(isinstance(v, list) or not math.isfinite(v)
+                   for v in (a, b)):
+                continue
+
+        def simpson(env, n):
+            return _simpson_panels(fs, fn, var, a, b, env, n)
+
+        def break_refusal(bad):
+            near = 1e-9 * max(1.0, abs(a), abs(b))
+            if abs(bad - a) <= near or abs(bad - b) <= near:
+                reason = (f'integrand is not evaluable at the bound '
+                          f'{var} = {bad:.6g}; the integral is improper '
+                          'there — a singular endpoint closes through '
+                          'integrate_improper (evaluate the truncated '
+                          'integral, then cite its recorded one-sided '
+                          'limit)')
+            else:
+                reason = (f'integrand is not evaluable at '
+                          f'{var} = {bad:.6g} inside the bounds; '
+                          'the integral is improper there')
+            return {'status': 'disagree', 'point': {var: bad},
+                    'reason': reason}
+
+        try:
+            expected = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            expected = None
+        if (expected is None or isinstance(expected, list)
+                or not math.isfinite(expected)):
+            if not bound_syms:
+                _value, bad = simpson(env, panels)
+                if bad is not None:
+                    return break_refusal(bad)
+            continue
+        coarse, bad = simpson(env, panels)
+        if bad is not None:
+            if bound_syms:
+                continue
+            return break_refusal(bad)
+        fine, bad = simpson(env, panels * 2)
+        if coarse is None or fine is None:
+            continue
+        err_est = abs(fine - coarse) / 15.0   # Simpson is O(h^4)
+        scale = max(1.0, abs(fine), abs(expected))
+        if abs(fine - expected) / scale > tol:
+            if abs(fine - expected) <= 16 * err_est:
+                continue   # quadrature has not converged: skip sample
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': expected, 'numeric': fine}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'composite-simpson quadrature'}
+
+
+def numeric_improper_check(expr, var, side, result, samples=4,
+                           seed=20260805, panels=128, rungs=7, tol=1e-4):
+    """Truncation-quadrature leg for an improper endpoint integral: the
+    integrand is singular at the ``side`` (``'upper'``/``'lower'``)
+    bound, and ``result`` claims the integral's definitional value —
+    the limit of the truncated integrals from inside.
+
+    The leg walks that definition numerically: it integrates up to a
+    ladder of cut points approaching the singular bound geometrically,
+    each rung adding one graded slab (uniform Simpson cannot resolve the
+    steepening integrand over the whole interval, but a slab whose width
+    shrinks with its distance from the singularity sees only a bounded
+    relative variation), then extrapolates the rung values with iterated
+    Aitken.  Never touches any antiderivative or recorded limit — it
+    shares only the structure readers with the symbolic path.
+
+    Its error bar is its own measured convergence residual (the
+    accumulated two-grid Richardson estimates plus the extrapolation
+    spread): a gap that does not clear the bar is undecided, never a
+    counterexample.  A ladder whose rung differences stop decaying has
+    no finite value in evidence (the divergent shape) and reports
+    ``skipped`` — a refusal is never evidence of divergence.  A domain
+    break at a node away from the declared singular bound is a witness
+    that the integrand is improper elsewhere too, and refuses — under
+    sampled parameters it is a bad draw instead."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    _var, integrand, lower, upper = parts
+    if side not in ('upper', 'lower'):
+        return {'status': 'skipped', 'reason': 'unknown singular side'}
     try:
         fs, fn = parse_latex(integrand)
         ls, ln = parse_latex(lower)
@@ -1948,15 +2080,55 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
         return {'status': 'skipped', 'reason': 'bounds are not evaluable'}
     if not (math.isfinite(a) and math.isfinite(b)):
         return {'status': 'skipped', 'reason': 'bounds are not finite'}
+    if not b > a:
+        return {'status': 'skipped', 'reason': 'bounds are not ordered'}
+    span = b - a
+    deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(rungs)]
     params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
 
-    def simpson(env, n):
-        return _simpson_panels(fs, fn, var, a, b, env, n)
+    def piece(lo, hi, env):
+        """(fine value, richardson error, bad node) for one region."""
+        coarse, bad = _simpson_panels(fs, fn, var, lo, hi, env, panels)
+        if coarse is None:
+            return None, None, bad
+        fine, bad = _simpson_panels(fs, fn, var, lo, hi, env, panels * 2)
+        if fine is None:
+            return None, None, bad
+        return fine, abs(fine - coarse) / 15.0, None
+
+    def ladder(env):
+        """(rung values, accumulated quadrature error, bad node)."""
+        if side == 'upper':
+            regions = [(a, b - deltas[0])]
+            regions += [(b - deltas[k], b - deltas[k + 1])
+                        for k in range(rungs - 1)]
+        else:
+            regions = [(a + deltas[0], b)]
+            regions += [(a + deltas[k + 1], a + deltas[k])
+                        for k in range(rungs - 1)]
+        vals = []
+        total = 0.0
+        err = 0.0
+        for lo, hi in regions:
+            value, piece_err, bad = piece(lo, hi, env)
+            if value is None:
+                return None, None, bad
+            total += value
+            err += piece_err
+            vals.append(total)
+        return vals, err, None
+
+    def aitken(x, y, z):
+        d = (z - y) - (y - x)
+        if abs(d) < 1e-15 * max(abs(x), abs(y), abs(z), 1e-300):
+            return None
+        return z - (z - y) ** 2 / d
 
     rng = random.Random(seed)
     rounds = samples if params else 1
     agreed = 0
     tried = 0
+    last_reason = 'no evaluable sample points'
     while agreed < rounds and tried < rounds * 6:
         tried += 1
         env = _sample_point(params, rng) if params else {}
@@ -1966,27 +2138,73 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
             continue
         if isinstance(expected, list) or not math.isfinite(expected):
             continue
-        coarse, bad = simpson(env, panels)
-        if bad is not None:
-            return {'status': 'disagree', 'point': {var: bad},
-                    'reason': f'integrand is not evaluable at '
-                              f'{var} = {bad:.6g} inside the bounds; '
-                              'the integral is improper there'}
-        fine, bad = simpson(env, panels * 2)
-        if coarse is None or fine is None:
+        # break-hunt probe over the whole interval, walked so the
+        # declared singular bound is the LAST node: the first domain
+        # break found is then never the declared one, i.e. a witness
+        # that the integrand is improper somewhere else too
+        if side == 'upper':
+            _probe, bad = _simpson_panels(fs, fn, var, a, b, env, panels)
+            declared = b
+        else:
+            _probe, bad = _simpson_panels(fs, fn, var, b, a, env, panels)
+            declared = a
+        if bad is not None and (abs(bad - declared)
+                                > 1e-9 * max(1.0, abs(declared))):
+            if not params:
+                return {'status': 'disagree', 'point': {var: bad},
+                        'reason': f'integrand is not evaluable at '
+                                  f'{var} = {bad:.6g}, away from the '
+                                  'declared singular bound; the integral '
+                                  'is improper there too'}
             continue
-        err_est = abs(fine - coarse) / 15.0   # Simpson is O(h^4)
-        scale = max(1.0, abs(fine), abs(expected))
-        if abs(fine - expected) / scale > tol:
-            if abs(fine - expected) <= 16 * err_est:
-                continue   # quadrature has not converged: skip sample
+        vals, quad_err, bad = ladder(env)
+        if vals is None:
+            if bad is not None and not params:
+                return {'status': 'disagree', 'point': {var: bad},
+                        'reason': f'integrand is not evaluable at '
+                                  f'{var} = {bad:.6g}, away from the '
+                                  'declared singular bound; the integral '
+                                  'is improper there too'}
+            continue
+        diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+        tail = [abs(d) for d in diffs[-2:]]
+        if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
+                and tail[1] > tol * max(1.0, abs(vals[-1])):
+            last_reason = ('the truncation ladder does not settle — no '
+                           'finite value is in evidence (a refusal is '
+                           'never evidence of divergence)')
+            if params:
+                continue
+            break
+        lvl1 = [aitken(*vals[k:k + 3]) for k in range(len(vals) - 2)]
+        if any(v is None for v in lvl1):
+            est = vals[-1]
+            spread = abs(vals[-1] - vals[-2])
+        else:
+            lvl2 = [aitken(*lvl1[k:k + 3]) for k in range(len(lvl1) - 2)]
+            if not lvl2 or any(v is None for v in lvl2):
+                est = lvl1[-1]
+                spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
+            else:
+                est = lvl2[-1]
+                spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
+                          else abs(lvl2[-1] - lvl1[-1]))
+        bar = 16.0 * (quad_err + spread)
+        scale = max(1.0, abs(est), abs(expected))
+        delta = abs(est - expected)
+        if delta / scale > tol:
+            if delta <= bar:
+                last_reason = ('the truncation quadrature could not '
+                               'resolve the gap within its own error bar')
+                continue
             return {'status': 'disagree', 'point': env,
-                    'symbolic': expected, 'numeric': fine}
+                    'symbolic': expected, 'numeric': est}
         agreed += 1
     if agreed == 0:
-        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+        return {'status': 'skipped', 'reason': last_reason}
     return {'status': 'agree', 'samples': agreed,
-            'method': 'composite-simpson quadrature'}
+            'method': 'graded truncation quadrature with iterated '
+                      'Aitken extrapolation'}
 
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,

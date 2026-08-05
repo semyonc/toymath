@@ -180,6 +180,47 @@ def _integrate_definite_from_steps(context, args):
     return result
 
 
+def _integrate_improper_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_improper',
+                      'integrate_improper requires a session')
+    by_id = {step['id']: step for step in steps}
+    truncated_id = args['truncated_step']
+    truncated = by_id.get(truncated_id)
+    if truncated is None or truncated.get('result') is None:
+        return _error('integrate_improper',
+                      f'unknown transforming step {truncated_id!r}')
+    if truncated.get('op') != 'integrate_definite':
+        return _error(
+            'integrate_improper',
+            f'{truncated_id!r} is {truncated.get("op")!r}, not the '
+            'integrate_definite evaluation of the truncated integral')
+    info = integration._improper_parts(args['expr'], args['var'],
+                                       truncated.get('input') or '')
+    if isinstance(info, str):
+        return _error('integrate_improper', info)
+    limit_id = args['limit_step']
+    limit_step = by_id.get(limit_id)
+    if limit_step is None or limit_step.get('result') is None:
+        return _error('integrate_improper',
+                      f'unknown transforming step {limit_id!r}')
+    expected = primitives._limit_latex(info['bound_var'], info['bound'],
+                                       info['direction'],
+                                       truncated['result'])
+    if not _same_spelling(limit_step.get('input') or '', expected):
+        return _error(
+            'integrate_improper',
+            f'{limit_id!r} does not record the one-sided limit '
+            f'{expected!r} of the cited truncated evaluation')
+    result = integration.integrate_improper(
+        args['expr'], args['var'], truncated.get('input') or '',
+        truncated['result'], limit_step['result'])
+    if result.get('ok'):
+        result['sources'] = {'truncated': truncated_id, 'limit': limit_id}
+    return result
+
+
 def _limit_assemble_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -565,6 +606,32 @@ def _validate_integrate_definite(step, seen):
     return None
 
 
+def _validate_integrate_improper(step, seen):
+    sources = step.get('sources') or {}
+    truncated = seen.get(sources.get('truncated'))
+    if truncated is None or truncated.get('op') != 'integrate_definite':
+        return 'missing truncated-evaluation provenance'
+    args = step.get('args', {})
+    if (truncated.get('input') != args.get('truncated')
+            or truncated.get('result') != args.get('truncated_value')):
+        return 'truncated-evaluation provenance mismatch'
+    limit_step = seen.get(sources.get('limit'))
+    if (limit_step is None
+            or limit_step.get('result') != args.get('limit_value')):
+        return 'limit provenance mismatch'
+    info = integration._improper_parts(
+        args.get('expr', ''), args.get('var', ''),
+        args.get('truncated', ''))
+    if isinstance(info, str):
+        return info
+    expected = primitives._limit_latex(info['bound_var'], info['bound'],
+                                       info['direction'],
+                                       args.get('truncated_value', ''))
+    if not _same_spelling(limit_step.get('input') or '', expected):
+        return 'limit input mismatch'
+    return None
+
+
 def _validate_limit_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -850,6 +917,37 @@ TACTICS = (
                  default=None, option='--lower-limit-step')),
         cli_handler=_integrate_definite_from_steps,
         provenance_validator=_validate_integrate_definite),
+    TacticSpec(
+        'integrate_improper', 'integrate_improper', 'integration',
+        'close an improper endpoint integral from a recorded truncated '
+        'evaluation and its recorded one-sided limit (definitional '
+        'door)',
+        integration.integrate_improper,
+        (E, V,
+         _arg('truncated', 'TRUNCATED',
+              'the truncated integral (singular bound replaced by a '
+              'fresh variable)'),
+         _arg('truncated_value', 'TRUNCATED_VALUE',
+              'recorded evaluation of the truncated integral'),
+         _arg('limit_value', 'LIMIT_VALUE',
+              'recorded one-sided limit of that evaluation')),
+        agent_arguments=(
+            E, V,
+            _arg('truncated_step', 'STEP',
+                 'integrate_definite step id evaluating the truncated '
+                 'integral'),
+            _arg('limit_step', 'STEP',
+                 'limit step id at the singular bound')),
+        agent_handler=_integrate_improper_from_steps,
+        cli_arguments=(
+            E, V,
+            _arg('truncated_step', 'STEP',
+                 'integrate_definite step id evaluating the truncated '
+                 'integral'),
+            _arg('limit_step', 'STEP',
+                 'limit step id at the singular bound')),
+        cli_handler=_integrate_improper_from_steps,
+        provenance_validator=_validate_integrate_improper),
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',

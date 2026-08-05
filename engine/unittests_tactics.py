@@ -174,6 +174,68 @@ class TestTacticRegistry(unittest.TestCase):
                          {'roots': 's2', 'values': ['s3', 's4']})
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
+    def test_cli_integrate_improper_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core, integration, limits
+
+        path = os.path.join(tempfile.mkdtemp(), 'improper.json')
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_substitute(
+            '\\int \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x', 'x',
+            '\\sqrt{1-x}', 'u', '-\\frac{2}{1+u^{2}}'))
+        ledger.record(integration.integrate_table(
+            ledger.last_result(), 'u'))
+        ledger.record(core.substitute(
+            ledger.last_result(), 'u', '\\sqrt{1-x}'))
+        truncated = integration.integrate_definite(
+            '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x', 'x',
+            ledger.last_result())
+        truncated['sources'] = {'antiderivative': 's3'}
+        ledger.record(truncated)
+        ledger.record(limits.limit_evaluate(
+            primitives._limit_latex('t', '1', 'left',
+                                    ledger.last_result()),
+            '\\frac{\\pi}{2}'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_improper',
+                '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}', 'x',
+                's4', 's5', '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '\\frac{\\pi}{2}')
+        self.assertEqual(rec['sources'], {'truncated': 's4', 'limit': 's5'})
+        self.assertEqual(rec['check']['status'], 'agree')
+        saved = Ledger(path)
+        self.assertEqual(saved.replay()['status'], 'verified')
+        # a forged limit source must fail replay with the named reason
+        saved.steps[-1]['sources']['limit'] = 's3'
+        report = saved.replay()
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['reason'], 'limit provenance mismatch')
+
+    def test_cli_integrate_improper_requires_the_definite_evaluation(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'improper-op.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_improper',
+                '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}', 'x',
+                's1', 's1', '--session', path])
+        self.assertEqual(code, 1)
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('integrate_definite', rec['error'])
+
     def test_cli_system_assemble_reads_recorded_steps(self):
         from ledger import Ledger
         from tactics import core

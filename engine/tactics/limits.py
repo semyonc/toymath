@@ -121,10 +121,16 @@ def _approach_estimate(body, notation, var, point, point_notation,
     # Geometric h-ladders with Aitken acceleration, mirroring the infinity
     # branch: the plain Richardson model assumes a smooth truncation term
     # and honestly skips |x|-kinked bodies whose approach values decay like
-    # c*h^alpha.  Longer ladders fall back when a point fails to evaluate
-    # (e.g. a root over an oscillating argument); the final fallback is the
-    # original two-point estimate.
-    for ladder in ((h, h / 2, h / 4, h / 8), (h, h / 2, h / 4)):
+    # c*h^alpha.  The primary ladder is decade-spaced like the infinity
+    # branch's: a binary ladder leaves root-type approaches (c*h^{1/2},
+    # the truncated-improper-integral shape) with a residual above the
+    # agreement tolerance, because Aitken removes only the leading power
+    # and the secondary term decays too slowly across octaves.  Binary
+    # ladders remain as fallbacks when a decade point fails to evaluate
+    # (e.g. a root over an oscillating argument); the final fallback is
+    # the original two-point estimate.
+    for ladder in ((h, h / 10, h / 100, h / 1000),
+                   (h, h / 2, h / 4, h / 8), (h, h / 2, h / 4)):
         try:
             vals = [value_at(s) for s in ladder]
         except (OverflowError, ValueError, ZeroDivisionError, EvalError):

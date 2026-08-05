@@ -4896,13 +4896,23 @@ class TestLimitFromSides(unittest.TestCase):
         self.assertIn('contradicts', rec['error'])
 
     def test_unconverged_oracle_defers_to_premises(self):
-        # sampling cannot converge on this oscillating (true) limit; the
-        # record is exact-by-theorem and only the registry handlers
+        # the approach oracle cannot evaluate an integral atom at all, so
+        # the record is exact-by-theorem and only the registry handlers
         # (recorded premises) can admit it
+        rec = Limits.limit_from_sides(
+            '\\lim_{x \\to 0} \\left(x + \\int_0^1 t \\, dt\\right)',
+            '\\frac{1}{2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'exact')
+
+    def test_oscillating_decay_now_concurs(self):
+        # the decade-spaced approach ladder reaches deep enough that the
+        # x-amplitude bound itself pins x sin(1/x) below tolerance — the
+        # oracle now concurs instead of deferring
         rec = Limits.limit_from_sides(
             '\\lim_{x \\to 0} x \\sin\\frac{1}{x}', '0')
         self.assertTrue(rec['ok'], rec.get('error'))
-        self.assertEqual(rec['check']['status'], 'exact')
+        self.assertEqual(rec['check']['status'], 'agree')
 
 
 class TestEllipsisClaim(unittest.TestCase):
@@ -5579,10 +5589,36 @@ class TestNumericDefiniteCheck(unittest.TestCase):
         self.assertEqual(check['status'], 'agree')
         self.assertGreater(check['samples'], 1)
 
-    def test_symbolic_bounds_are_skipped(self):
+    def test_symbolic_bounds_are_sampled(self):
+        # a symbolic bound is a parameter: the identity in (a, b) is
+        # checked at sampled bound values, no longer skipped
         check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
                                          '\\frac{b^2-a^2}{2}')
-        self.assertEqual(check['status'], 'skipped')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_symbolic_bound_lie_is_refused(self):
+        check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
+                                         '\\frac{b^2-a^2}{3}')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_break_under_a_sampled_bound_is_a_bad_draw(self):
+        # \int_0^t of the endpoint-singular integrand: draws with t > 1
+        # break the domain and must be skipped, not reported as a
+        # witness — the surviving draws agree
+        check = P.numeric_definite_check(
+            '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx', 'x',
+            '\\left(-2 \\arctan\\sqrt{1-t}\\right) - '
+            '\\left(-2 \\arctan\\sqrt{1}\\right)')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_unevaluable_result_still_hunts_the_break(self):
+        # the divergent classic: F(b)-F(a) contains ln(0), which is not
+        # evaluable — the check must still find the interior/endpoint
+        # break instead of skipping on the result
+        check = P.numeric_definite_check('\\int_0^1 \\frac{1}{x} \\, dx',
+                                         'x', '\\ln(1) - \\ln(0)')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('improper', check['reason'])
 
 
 class TestDerivativeOperatorParts(unittest.TestCase):
@@ -5952,6 +5988,151 @@ class TestIntegrateDefiniteEndpointDoor(unittest.TestCase):
             '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertNotIn('upper_limit', rec['args'])
+
+
+class TestNumericImproperCheck(unittest.TestCase):
+    """The graded truncation-ladder quadrature leg: uniform Simpson to a
+    cut, then geometric slabs toward the singular bound, iterated Aitken
+    over the rung values, refusing only past its own measured residual."""
+
+    EX = '\\int_0^1 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx'
+
+    def test_certifies_the_definitional_value(self):
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '\\frac{\\pi}{2}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertIn('truncation quadrature', check['method'])
+
+    def test_refuses_a_planted_lie(self):
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '\\frac{\\pi}{2} + 0.01')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_refuses_a_small_corruption(self):
+        # 0.05% above pi/2 — must clear the leg's own error bar
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '1.5715817')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_divergent_ladder_is_never_evidence(self):
+        check = P.numeric_improper_check(
+            '\\int_0^1 \\frac{1}{x} \\, dx', 'x', 'lower', '5')
+        self.assertEqual(check['status'], 'skipped')
+        self.assertIn('never evidence of divergence', check['reason'])
+
+    def test_interior_break_is_a_witness(self):
+        # declared upper-singular, but the real break is at x = 0: the
+        # oriented probe walks the declared bound LAST, so the witness
+        # is never the declared singularity itself
+        check = P.numeric_improper_check(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x', 'upper', '5')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('away from the declared singular bound',
+                      check['reason'])
+
+    def test_parameters_are_sampled(self):
+        check = P.numeric_improper_check(
+            '\\int_0^1 \\frac{c}{\\sqrt{1-x}} \\, dx', 'x', 'upper', '2c')
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['samples'], 1)
+
+    def test_non_singular_integrand_still_certifies(self):
+        # the definitional reading is true of a proper integral too —
+        # the door must not manufacture a false refusal there
+        check = P.numeric_improper_check(
+            '\\int_0^1 x^{2} \\, dx', 'x', 'upper', '\\frac{1}{3}')
+        self.assertEqual(check['status'], 'agree')
+
+
+class TestIntegrateImproper(unittest.TestCase):
+    """The infinite-object door for integrals: an endpoint-singular
+    integral is read as the limit of its truncated integrals, closed
+    from a recorded truncated evaluation and a recorded one-sided
+    limit."""
+
+    EX = '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}'
+    TR = '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x'
+    G = ('\\left(-2 \\arctan\\sqrt{1-t}\\right) - '
+         '\\left(-2 \\arctan\\sqrt{1}\\right)')
+
+    def test_closes_the_endpoint_singular_integral(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '\\frac{\\pi}{2}')
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['singular'], 'upper')
+        self.assertEqual(rec['bound_var'], 't')
+
+    def test_reading_and_continuity_are_recorded_not_proved(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2}')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('definitional limit', texts)
+        self.assertIn('\\lim_{t \\to 1^{-}}', texts)
+        self.assertIn('continuous on [0, 1)', texts)
+
+    def test_lower_side_case(self):
+        rec = Integration.integrate_improper(
+            '\\int_0^1 \\frac{1}{\\sqrt{x}} \\, dx', 'x',
+            '\\int_s^1 \\frac{1}{\\sqrt{x}} \\, dx',
+            '2 - 2\\sqrt{s}', '2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['singular'], 'lower')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('continuous on (0, 1]', texts)
+
+    def test_a_wrong_value_is_refused_by_the_ladder(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{3}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_refuses_a_non_fresh_truncation_variable(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^x \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('must be fresh', rec['error'])
+
+    def test_refuses_infinite_bounds(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^t \\frac{1}{x^{2}} \\, dx',
+            '1 - \\frac{1}{t}', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('infinite bounds', rec['error'])
+
+    def test_refuses_when_no_bound_is_replaced(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^1 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('fresh variable', rec['error'])
+
+    def test_refuses_a_literal_truncation_bound(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^2 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bare fresh variable', rec['error'])
+
+    def test_refuses_a_mismatched_integrand(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', '\\int_0^t \\frac{1}{\\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('integrand differs', rec['error'])
+
+    def test_refuses_the_truncation_variable_in_the_value(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2} + t')
+        self.assertFalse(rec['ok'])
+        self.assertIn('truncation variable', rec['error'])
 
 
 class TestSideConditionSplit(unittest.TestCase):

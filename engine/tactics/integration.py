@@ -13,6 +13,8 @@ from primitives import (
     FRAC_NAMES, PrimitiveError, parse_latex, write_latex, free_symbols,
     _result, _error, _peel_groups, _strip_integral, _paren, _is_sum_str,
     definite_integral_parts, numeric_definite_check,
+    same_expression, _infinity_sign, _limit_latex, _int_literal,
+    _plain_symbol_name, numeric_improper_check,
 )
 from tactics.core import (
     equal_exprs, substitute, _merge_checks,
@@ -1017,4 +1019,134 @@ def integrate_definite(expr, var, antiderivative, upper_limit=None,
         assumptions=assumptions,
         extra={'integrand': integrand, 'lower': lower, 'upper': upper})
     rec['check'] = numeric_definite_check(expr, var, result)
+    return rec
+
+
+def _improper_parts(expr, var, truncated):
+    """Shared reader for the improper endpoint door: which bound of
+    ``expr`` the ``truncated`` integral replaces, with what variable,
+    approached from which side.  Returns a dict, or an error string.
+    One reader on purpose — the tactic, the session adapter, and the
+    replay validator must never disagree about this boundary."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return ('expr must be a definite integral \\int_a^b f \\, d<var> '
+                'with both bounds present')
+    _var, integrand, lower, upper = parts
+    for bound in (lower, upper):
+        try:
+            bsym, bn = parse_latex(bound)
+        except PrimitiveError as e:
+            return f'bound {bound!r} is malformed: {e}'
+        if _infinity_sign(bsym, bn) is not None:
+            return ('infinite bounds have no truncation door here; only '
+                    'a singular finite endpoint does')
+    tparts = definite_integral_parts(truncated, var)
+    if tparts is None:
+        return ('truncated must be a definite integral over the same '
+                'variable')
+    _tvar, t_integrand, t_lower, t_upper = tparts
+    if not same_expression(integrand, t_integrand):
+        return ('the truncated integrand differs from the integral '
+                'being closed')
+    lower_kept = same_expression(lower, t_lower)
+    upper_kept = same_expression(upper, t_upper)
+    if lower_kept and upper_kept:
+        return ('the truncated integral must replace the singular bound '
+                'with a fresh variable')
+    if not (lower_kept or upper_kept):
+        return ('the truncated integral must keep one bound and replace '
+                'only the other')
+    if lower_kept:
+        side, bound, replaced, direction = 'upper', upper, t_upper, 'left'
+    else:
+        side, bound, replaced, direction = 'lower', lower, t_lower, 'right'
+    try:
+        tsym, tn = parse_latex(replaced)
+    except PrimitiveError as e:
+        return f'truncation bound {replaced!r} is malformed: {e}'
+    bound_var = _plain_symbol_name(tsym, tn)
+    if bound_var is None or _int_literal(tsym, tn) is not None:
+        return ('the truncation bound must be a bare fresh variable, '
+                f'not {replaced!r}')
+    taken = set(free_symbols(*parse_latex(integrand)))
+    for latex in (lower, upper):
+        taken |= free_symbols(*parse_latex(latex))
+    if bound_var == var or bound_var in taken:
+        return (f'the truncation variable {bound_var!r} must be fresh: '
+                'it appears in the integral itself')
+    return {'integrand': integrand, 'lower': lower, 'upper': upper,
+            'side': side, 'bound': bound, 'bound_var': bound_var,
+            'direction': direction}
+
+
+def integrate_improper(expr, var, truncated, truncated_value,
+                       limit_value):
+    """Close an improper endpoint integral by its definitional reading
+    (the infinite-object door: value = limit of the truncated integrals
+    from inside the interval).
+
+    ``expr`` is the definite integral whose integrand is singular at one
+    finite bound; ``truncated`` is the same integral with that bound
+    replaced by a fresh variable, ``truncated_value`` its RECORDED
+    evaluation (an earlier `integrate_definite` step — the do! tool and
+    the CLI supply both from a ledger step id), and ``limit_value`` the
+    RECORDED one-sided limit of that evaluation at the replaced bound.
+    The step computes nothing new: it certifies that the two cited
+    pieces compose into exactly the definitional limit, records the
+    reading and the half-open continuity assumption, and is checked by
+    an independent leg that re-integrates the integrand itself over a
+    graded truncation ladder and extrapolates — never touching either
+    cited piece.  A ladder that does not settle certifies nothing: a
+    divergent integral has no recordable limit step to cite, and its
+    check finds no finite value in evidence."""
+    args = {'expr': expr, 'var': var, 'truncated': truncated,
+            'truncated_value': truncated_value,
+            'limit_value': limit_value}
+    info = _improper_parts(expr, var, truncated)
+    if isinstance(info, str):
+        return _error('integrate_improper', args, info)
+    for tag, value in (('truncated_value', truncated_value),
+                       ('limit_value', limit_value)):
+        if not isinstance(value, str) or not value.strip():
+            return _error('integrate_improper', args,
+                          f'{tag} must be a recorded result')
+        try:
+            vsym, vn = parse_latex(value)
+        except PrimitiveError as e:
+            return _error('integrate_improper', args,
+                          f'{tag} is malformed: {e}')
+        if var in free_symbols(vsym, vn):
+            return _error('integrate_improper', args,
+                          f'{tag} still contains {var}')
+    lsym, lnot = parse_latex(limit_value)
+    if info['bound_var'] in free_symbols(lsym, lnot):
+        return _error('integrate_improper', args,
+                      'limit_value still contains the truncation '
+                      f'variable {info["bound_var"]}')
+    definitional = _limit_latex(info['bound_var'], info['bound'],
+                                info['direction'], truncated)
+    interval = (f'[{info["lower"]}, {info["upper"]})'
+                if info['side'] == 'upper'
+                else f'({info["lower"]}, {info["upper"]}]')
+    assumptions = [
+        {'text': (f'the integral is improper at the {info["side"]} '
+                  f'bound {var} = {info["bound"]}; its value is read '
+                  f'as {definitional} (the definitional limit of the '
+                  'truncated integrals)'),
+         'display': (f'improper at the {info["side"]} bound '
+                     f'${var} = {info["bound"]}$: read as '
+                     f'${definitional}$ (definitional limit)')},
+        {'text': (f'{info["integrand"]} is continuous on {interval}'),
+         'display': (f'${info["integrand"]}$ is continuous on '
+                     f'${interval}$')},
+    ]
+    rec = _result(
+        'integrate_improper', args, expr, limit_value,
+        assumptions=assumptions,
+        extra={'integrand': info['integrand'], 'lower': info['lower'],
+               'upper': info['upper'], 'singular': info['side'],
+               'bound_var': info['bound_var']})
+    rec['check'] = numeric_improper_check(expr, var, info['side'],
+                                          limit_value)
     return rec
