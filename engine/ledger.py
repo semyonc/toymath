@@ -444,7 +444,10 @@ class Ledger(object):
                     f'branch marker {pending_branch["id"]} from '
                     f'{source_id}; consume that source result (or its '
                     f'operator body) verbatim, or — to abandon that step '
-                    f'itself — restart from its recorded input')
+                    f'itself — restart from its recorded input. To start '
+                    f'a FRESH line instead, first resolve the marker by '
+                    f'running one tactic on that recorded input '
+                    f'(re-deriving it is fine), then begin the new line')
         continues = None
         prev = self.last_result()
         cur = result.get('input')

@@ -335,6 +335,29 @@ class TestDoSessionApi(unittest.TestCase):
         self.assertEqual(topology['abandoned_paths'][0]['steps'], ['s2'])
         self.assertEqual(session.ledger.replay()['status'], 'verified')
 
+    def test_wedged_marker_refusal_teaches_the_fresh_start(self):
+        """Live int! trace shape: the agent marked from_step=s1 meaning
+        'the whole ansatz was wrong', then had every fresh start refused
+        and went open without finding either escape. The refusal must name
+        the unwedging move, and the move must actually work."""
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['expand']('(x+1)^2'))
+        marker = json.loads(api['comment']('the ansatz itself was wrong',
+                                           's1'))
+        self.assertEqual(marker['op'], 'branch')
+        refused = json.loads(api['expand']('(z+5)^2'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('first resolve the marker', refused['error'])
+        # the taught escape: one tactic on the marked step's recorded
+        # input resolves the marker...
+        resolved = json.loads(api['expand']('(x+1)^2'))
+        self.assertTrue(resolved['ok'], resolved.get('error'))
+        # ...and the fresh line is then admitted
+        fresh = json.loads(api['expand']('(z+5)^2'))
+        self.assertTrue(fresh['ok'], fresh.get('error'))
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
     def test_pending_marker_note_downgrades_and_refusal_steers(self):
         # live conv! trace shape: 5 of 8 comment calls died against the
         # pending-marker gate because the refusal never named the repair
@@ -1800,6 +1823,24 @@ class TestBackendToolParity(unittest.TestCase):
         names = {tool['name']
                  for tool in codex_backend.dynamic_tools(dispatcher)}
         self.assertFalse(names & set(tactic_registry.BY_NAME))
+
+
+class TestCodexRuntimeSpawn(unittest.TestCase):
+    def test_runtime_starts_in_its_own_process_group(self):
+        """Jupyter's Interrupt sends SIGINT to the kernel's WHOLE process
+        group (jupyter_client LocalProvisioner uses killpg): a runtime left
+        in that group dies on the first Stop press, the interrupted cell
+        errors with 'the Codex runtime closed' instead of a clean
+        interrupted outcome, and every later run fails the same way. The
+        spawn must detach the runtime into its own group."""
+        transport = codex_transport.AppServerTransport(binary='/fake/codex')
+        with mock.patch.object(codex_transport.subprocess, 'Popen') as popen, \
+                mock.patch.object(codex_transport.AppServerTransport,
+                                  'initialize'), \
+                mock.patch.object(codex_transport.threading, 'Thread',
+                                  return_value=mock.Mock()):
+            transport.start()
+        self.assertTrue(popen.call_args.kwargs.get('start_new_session'))
 
 
 class TestCodexToolCallBridge(unittest.TestCase):
