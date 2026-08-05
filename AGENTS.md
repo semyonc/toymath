@@ -401,6 +401,14 @@ if isinstance(n, IntegerValue): ...
   answers `item/tool/call` inline on its sole reader thread, so a slow
   ToyMath callback would delay `turn/interrupt` by exactly as long as the
   callback runs. LANDMINE: never move tool dispatch onto the reader thread.
+- The runtime is spawned in its own process group (`start_new_session`):
+  Jupyter's Interrupt sends SIGINT to the kernel's WHOLE group
+  (jupyter_client's provisioner uses killpg), and a runtime left inside it
+  died on the first Stop press — the interrupted cell errored with "the
+  Codex runtime closed" instead of a clean interrupted outcome, and every
+  later run failed the same way. Detaching leaks nothing: stdio transport
+  means kernel death closes the child's stdin and the app-server exits on
+  EOF, and `close()` still terminates it explicitly.
 - Codex capability containment is an accepted, bounded exception, not a
   claim: the pinned runtime still exposes `update_plan`,
   `request_user_input`, and `view_image`. The contract test captures the real
