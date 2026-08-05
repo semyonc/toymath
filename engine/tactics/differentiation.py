@@ -60,10 +60,16 @@ def _d_add(*terms):
 def _d_neg(a):
     if a == '0':
         return '0'
-    if a.startswith('-'):
-        return a[1:]
+    # Sum-ness must be decided BEFORE the double-negation collapse: a
+    # minus-led SUM string ('-A + B') starts with '-' but stripping that
+    # character negates only its first term. Live: the derivative of a
+    # partial-fraction antiderivative (an outer minus over exactly that
+    # shape) came back with every later term's sign intact, and the
+    # assembly's defense-in-depth check refused a correct 57-step run.
     if _is_sum_str(a):
         return '-' + _paren(a)
+    if a.startswith('-'):
+        return a[1:]
     return '-' + a
 
 

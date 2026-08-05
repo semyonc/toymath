@@ -869,6 +869,21 @@ class TestDifferentiate(unittest.TestCase):
     def test_chain_ln(self):
         self.check('\\ln(x^2 + 1)')
 
+    def test_minus_over_minus_led_sum_negates_every_term(self):
+        """A minus over a sum whose printed first term is negative: _d_neg
+        must decide sum-ness before collapsing a leading '-', or only the
+        first term flips sign (live: a correct partial-fraction run was
+        refused at its final assembly by the re-differentiation)."""
+        r = self.check(r'- \left( \left( - \ln\left((1-x)\right) \right)'
+                       r' + \ln\left((1+x)\right) \right)')
+        self.assertEqual(
+            Core.equal_exprs(r['result'], '\\frac{2}{x^{2}-1}')['verdict'],
+            'yes')
+
+    def test_double_negation_of_a_single_term_still_collapses(self):
+        r = self.check(r'- \left( - x^{2} \right)')
+        self.assertEqual(r['result'], '2x')
+
     def test_func_power(self):
         self.check('\\sin^2 x')
 
@@ -3416,6 +3431,51 @@ class TestIntegrateAssemble(unittest.TestCase):
         r = Integration.integrate_assemble('\\int (x+x^2) \\, d x', 'x', ['x^2/2'])
         self.assertFalse(r['ok'])
         self.assertIn('expected 2', r['error'])
+
+    def test_minus_led_sum_pieces_assemble(self):
+        """The live cell shape: antiderivative pieces that are minus-led
+        sums under assembly signs — refused before the _d_neg ordering fix
+        because the final re-differentiation lost every sign after the
+        first term."""
+        expr = ('\\int \\left(\\frac{1}{8}\\left(\\frac{1}{(1-x)^{3}}'
+                '+\\frac{1}{(1+x)^{3}}\\right)-\\frac{1}{16}'
+                '\\left(\\frac{1}{(1-x)^{2}}+\\frac{1}{(1+x)^{2}}\\right)'
+                '-\\frac{1}{16}\\left(\\frac{1}{1-x}+\\frac{1}{1+x}\\right)'
+                '\\right) \\, d x')
+        ants = [
+            '\\left ( \\frac {\\frac {1} {16}} {(1-x)^{2}}\\right )'
+            '+ \\left (- \\frac {\\frac {1} {16}} {(1+x)^{2}}\\right )',
+            '\\left ( \\frac {\\frac {1} {16}} {1-x}\\right )'
+            '+ \\left (- \\frac {\\frac {1} {16}} {1+x}\\right )',
+            '\\left (- \\frac {1} {16}\\ln\\left ((1-x) \\right ) \\right )'
+            '+ \\left ( \\frac {1} {16}\\ln\\left ((1+x) \\right ) \\right )',
+        ]
+        r = Integration.integrate_assemble(expr, 'x', ants)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_refuses_a_derivative_that_failed_its_own_check(self):
+        """An internally-consumed record with a disagreeing check is never
+        truth: the final re-differentiation must refuse naming the engine,
+        instead of comparing a wrong derivative downstream and blaming the
+        assembly."""
+        from unittest import mock
+        real = Differentiation.differentiate
+
+        def tampered(expr, var):
+            rec = real(expr, var)
+            if rec.get('ok') and expr.rstrip().endswith('+ C'):
+                rec = dict(rec)
+                rec['check'] = {'status': 'disagree'}
+            return rec
+
+        with mock.patch.object(Integration, 'differentiate',
+                               side_effect=tampered):
+            r = Integration.integrate_assemble(
+                '\\int (x - \\sin x) \\, d x', 'x',
+                ['\\frac{1}{2}x^2', '-\\cos x'])
+        self.assertFalse(r['ok'])
+        self.assertIn('own numeric spot-check', r['error'])
 
 
 class TestPartialFractionsIntegral(unittest.TestCase):

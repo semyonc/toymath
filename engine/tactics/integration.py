@@ -991,6 +991,16 @@ def integrate_assemble(expr, var, antiderivatives):
         return _error('integrate_assemble', args,
                       'cannot differentiate the assembled result: '
                       + derivative.get('error', 'unknown error'))
+    if (derivative.get('check') or {}).get('status') == 'disagree':
+        # An internally-consumed record whose own spot-check failed must
+        # never be trusted as truth. Live: a sign bug made differentiate
+        # return ok with a disagreeing check, this function compared the
+        # wrong derivative downstream, and the refusal blamed the
+        # assembly the agent had built correctly.
+        return _error('integrate_assemble', args,
+                      'internal: the derivative of the assembled result '
+                      'failed its own numeric spot-check; the engine, not '
+                      'the assembly, is suspect')
     equality = equal_exprs(derivative['result'], original_integrand)
     if not (equality.get('ok') and equality.get('verdict') == 'yes'):
         return _error('integrate_assemble', args,
