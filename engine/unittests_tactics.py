@@ -217,6 +217,20 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(report['status'], 'failed')
         self.assertEqual(report['reason'], 'limit provenance mismatch')
 
+    def test_cli_integrate_reduction_certifies(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_reduction',
+                '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n-1}{n} '
+                '\\int_0^{\\pi/2} \\cos^{n-2} x \\, d x',
+                'x', 'n', '2', '--assuming', 'n > 1'])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
     def test_cli_integrate_improper_requires_the_definite_evaluation(self):
         from ledger import Ledger
         from tactics import core

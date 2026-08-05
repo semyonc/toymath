@@ -15,6 +15,7 @@ from primitives import (
     definite_integral_parts, numeric_definite_check,
     same_expression, _infinity_sign, _limit_latex, _int_literal,
     _plain_symbol_name, numeric_improper_check,
+    _relation_parts, _IntegralPlaceholderer, numeric_reduction_check,
 )
 from tactics.core import (
     equal_exprs, substitute, _merge_checks,
@@ -1185,4 +1186,112 @@ def integrate_improper(expr, var, truncated, truncated_value,
     rec['check'] = numeric_improper_check(expr, var, info['side'],
                                           limit_value,
                                           kind=info['kind'])
+    return rec
+
+
+def integrate_reduction(relation, var, param, shift, assuming=None):
+    """Certify a proposed REDUCTION FORMULA: one definite/improper
+    integral family related to itself at a shifted parameter.
+
+    ``relation`` is the equality, e.g.
+    ``\\int_0^{+\\infty} \\cosh^{-(n+1)}x\\,dx =
+    \\frac{n-1}{n} \\int_0^{+\\infty} \\cosh^{-(n-1)}x\\,dx`` with
+    ``param='n'``, ``shift=2``.  The structural fence is what keeps
+    this narrower than an integral-equality oracle: the left side must
+    be ONE integral, the right side exactly one integral with verbatim
+    the same bounds and variable, whose integrand is mechanically equal
+    to the LEFT integrand with ``param := param - shift`` — so the step
+    can state a recurrence and nothing else.  The independent leg
+    samples the parameter inside the stated ``assuming`` domain and
+    evaluates BOTH sides by truncation quadrature.  Convergence at the
+    sampled parameters is evidence, not proof, and the record says so;
+    a divergent side stalls the ladder and certifies nothing."""
+    args = {'relation': relation, 'var': var, 'param': param,
+            'shift': shift}
+    if assuming is not None:
+        args['assuming'] = assuming
+    try:
+        shift_n = int(str(shift).strip())
+    except ValueError:
+        shift_n = None
+    if not shift_n:
+        return _error('integrate_reduction', args,
+                      'shift must be a nonzero integer literal')
+    try:
+        parts = _relation_parts(relation)
+    except PrimitiveError as e:
+        return _error('integrate_reduction', args, str(e))
+    if parts is None:
+        return _error('integrate_reduction', args,
+                      'relation must be a top-level relation')
+    lsym, rsym, rel, rnot = parts
+    if rel != '=':
+        return _error('integrate_reduction', args,
+                      'relation must be an equality')
+    lhs_latex = write_latex(_peel_groups(lsym, rnot), rnot)
+    rhs_latex = write_latex(_peel_groups(rsym, rnot), rnot)
+    lparts = definite_integral_parts(lhs_latex, var)
+    if lparts is None:
+        return _error('integrate_reduction', args,
+                      f'the left side must be a single definite '
+                      f'integral in {var!r}')
+    _lv, f_latex, lower, upper = lparts
+    scratch = Notation()
+    walker = _IntegralPlaceholderer(rnot, scratch)
+    walker(rsym)
+    if len(walker.specs) != 1:
+        return _error('integrate_reduction', args,
+                      'the right side must contain exactly one integral')
+    _name, rvar, g_latex, r_lower, r_upper = walker.specs[0]
+    if rvar != var:
+        return _error('integrate_reduction', args,
+                      'both sides must integrate over the same variable')
+    if not (same_expression(lower, r_lower)
+            and same_expression(upper, r_upper)):
+        return _error('integrate_reduction', args,
+                      'the bounds differ between the sides; a reduction '
+                      'formula keeps them verbatim')
+    if param == var or not param.strip():
+        return _error('integrate_reduction', args,
+                      'param must be a variable other than the '
+                      'integration variable')
+    fsym, fnot = parse_latex(f_latex)
+    if param not in free_symbols(fsym, fnot):
+        return _error('integrate_reduction', args,
+                      f'{param!r} does not occur in the left integrand')
+    spelled = (f'{param}-{shift_n}' if shift_n > 0
+               else f'{param}+{-shift_n}')
+    shifted = substitute(f_latex, param, spelled)
+    if not shifted.get('ok'):
+        return _error('integrate_reduction', args,
+                      'cannot shift the left integrand: '
+                      + shifted.get('error', 'unknown error'))
+    gate = equal_exprs(shifted['result'], g_latex)
+    if not (gate.get('ok') and gate.get('verdict') == 'yes'):
+        return _error(
+            'integrate_reduction', args,
+            f'the right integrand is not the left integrand with '
+            f'{param} := {spelled} (verdict: '
+            f'{gate.get("verdict", "error")}) — only a recurrence of '
+            'the same family can be stated here')
+    assumptions = []
+    if assuming is not None:
+        assumptions.append({
+            'text': f'assuming {assuming}',
+            'display': f'assuming ${assuming}$',
+            'constraint': assuming})
+    assumptions.append({
+        'text': ('both sides are read as definitional limits at any '
+                 'improper bound; convergence at the sampled parameter '
+                 'values is evidence, not proof'),
+        'display': ('both sides read as definitional limits; '
+                    'convergence at sampled parameters is evidence, '
+                    'not proof')})
+    rec = _result(
+        'integrate_reduction', args, relation, relation,
+        assumptions=assumptions,
+        extra={'integrand': f_latex, 'lower': lower, 'upper': upper,
+               'shift': shift_n})
+    rec['check'] = numeric_reduction_check(lhs_latex, rhs_latex,
+                                           assumptions=assumptions)
     return rec

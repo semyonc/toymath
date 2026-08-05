@@ -144,6 +144,23 @@ at BOTH ends (two singular ends, two infinite ends, or one of each),
 and a singular integrand UNDER an infinite bound still have no closing
 tactic; use the open outcome there too.
 
+## Reduction formulas (a parameterized family)
+
+When the task is a family `I_n` rather than one integral, the honest
+complete answer is a RECURRENCE plus recorded base cases — three
+separate statements (`I_n = \frac{n-1}{n} I_{n-2}` assuming `n > 1`,
+then `I_0`, then `I_1`), never one conjunction. State the recurrence
+with `integrate_reduction`: the relation (left side ONE integral;
+right side a coefficient times the SAME integral with the parameter
+shifted — anything else is refused), the variable, the parameter, the
+integer shift, and `--assuming` with the TIGHTEST parameter domain you
+can state. The check samples parameters only inside that domain, and
+its agreement is evidence about the sampled region, not a proof —
+overclaiming the domain weakens the record's honesty, never its
+greenness. Close each base case as its own cell through the definite
+or improper recipe above. A divergent side stalls the check's ladder
+and certifies nothing — a refusal is never evidence of divergence.
+
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly
 provenance is part of the mechanical certificate.

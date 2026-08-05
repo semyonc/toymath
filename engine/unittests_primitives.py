@@ -6326,6 +6326,95 @@ class TestIntegrateImproper(unittest.TestCase):
         self.assertIn('truncation variable', rec['error'])
 
 
+class TestIntegrateReduction(unittest.TestCase):
+    """A proposed reduction formula — an integral family related to
+    itself at a shifted parameter — certified by parameter-sampled
+    quadrature on both sides, inside the stated domain."""
+
+    REL = ('\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+           ' = \\frac{n-1}{n} '
+           '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n-1} x}')
+
+    def test_the_i_n_recurrence_certifies(self):
+        rec = Integration.integrate_reduction(
+            self.REL, 'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['shift'], 2)
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('assuming n > 1', texts)
+        self.assertIn('evidence, not proof', texts)
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
+    def test_the_wallis_family_certifies(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n-1}{n} '
+            '\\int_0^{\\pi/2} \\cos^{n-2} x \\, d x',
+            'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_negative_shift_relates_upward(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n+2}{n+1} '
+            '\\int_0^{\\pi/2} \\cos^{n+2} x \\, d x',
+            'x', 'n', '-2', assuming='n > 0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_wrong_coefficient_is_refused(self):
+        rec = Integration.integrate_reduction(
+            self.REL.replace('\\frac{n-1}{n}', '\\frac{n-2}{n}'),
+            'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_the_shifted_integrand_fence(self):
+        # sech^{n} on the right is NOT the left integrand at n := n-2 —
+        # the step can state a recurrence and nothing else
+        rec = Integration.integrate_reduction(
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+            ' = \\frac{n-1}{n} '
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n} x}',
+            'x', 'n', '2', assuming='n > 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('only a recurrence', rec['error'])
+
+    def test_differing_bounds_are_refused(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+            ' = \\frac{n-1}{n} '
+            '\\int_1^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n-1} x}',
+            'x', 'n', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bounds differ', rec['error'])
+
+    def test_shift_and_param_hygiene(self):
+        rec = Integration.integrate_reduction(self.REL, 'x', 'n', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('nonzero integer', rec['error'])
+        rec = Integration.integrate_reduction(self.REL, 'x', 'x', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('other than the integration variable',
+                      rec['error'])
+        rec = Integration.integrate_reduction(
+            self.REL, 'x', 'q', '2', assuming='q > 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not occur', rec['error'])
+
+    def test_only_an_equality_is_accepted(self):
+        rec = Integration.integrate_reduction(
+            self.REL.replace('=', '\\le'), 'x', 'n', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('equality', rec['error'])
+
+    def test_record_replays(self):
+        ledger = Ledger()
+        ledger.record(Integration.integrate_reduction(
+            self.REL, 'x', 'n', '2', assuming='n > 1'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+
 class TestSideConditionSplit(unittest.TestCase):
     """A trailing bracketed relation in an expr-command argument is a
     stated side condition, not a factor — as a factor it poisoned goal

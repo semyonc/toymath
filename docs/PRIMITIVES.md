@@ -363,7 +363,17 @@ writer, comparer, and replicator landmines.
   does not settle certifies nothing — a refusal is never evidence of
   divergence, and a divergent integral has no finite limit step to
   cite in the first place. Interior singularities and doubly-improper
-  intervals still have no closing tactic. The continental hyperbolic
+  intervals still have no closing tactic.
+- A parameterized reduction formula is stated by `integrate_reduction`:
+  one integral family related to itself at an integer parameter shift,
+  with the coefficient proposed by the agent. The structural fence —
+  same bounds and variable verbatim, the right integrand mechanically
+  equal to the left integrand at the shifted parameter — means the
+  step can state a recurrence and nothing else; it is not an
+  integral-equality oracle. Both sides are evaluated by truncation
+  quadrature at parameter values sampled inside the stated `assuming`
+  domain; agreement is evidence about the sampled region, not a proof,
+  and the record says so. The continental hyperbolic
   spellings `\operatorname{ch}`, `\operatorname{sh}`,
   `\operatorname{th}`, `\operatorname{cth}` normalize to
   `\cosh`/`\sinh`/`\tanh`/`\coth` at the lexer; other `\operatorname`

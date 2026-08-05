@@ -948,6 +948,20 @@ TACTICS = (
                  'limit step id at the singular bound')),
         cli_handler=_integrate_improper_from_steps,
         provenance_validator=_validate_integrate_improper),
+    TacticSpec(
+        'integrate_reduction', 'integrate_reduction', 'integration',
+        'certify a proposed reduction formula: an integral family '
+        'related to itself at a shifted parameter, both sides '
+        'quadrature-checked at sampled parameters',
+        integration.integrate_reduction,
+        (_arg('relation', 'RELATION',
+              'the proposed reduction equality'),
+         V,
+         _arg('param', 'PARAM', 'the reduction parameter'),
+         _arg('shift', 'SHIFT', 'nonzero integer parameter shift'),
+         _arg('assuming', 'ASSUMING',
+              'parameter-domain relation the check samples inside, '
+              'e.g. "n > 1"', default=None, option='--assuming'))),
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',

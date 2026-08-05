@@ -590,20 +590,58 @@ def _graded_quadrature(fs, fn, var, a, b, env, panels=64):
     return sign * total
 
 
+def _truncation_ladder_value(fs, fn, ivar, finite, sign, env):
+    """The definitional value of an integral with one infinite bound:
+    graded quadrature to truncation points growing by decades away from
+    the finite bound, iterated Aitken over the rungs.  Raises EvalError
+    when the ladder stalls (no finite value is in evidence — the
+    divergent shape) or the extrapolation cannot vouch for its value;
+    callers treat that as oracle ignorance, never as evidence."""
+    scale = max(1.0, abs(finite))
+    vals = []
+    for t in [scale * 10.0 ** k for k in range(1, 6)]:
+        lo, hi = (finite, t) if sign > 0 else (-t, finite)
+        vals.append(_graded_quadrature(fs, fn, ivar, lo, hi, env))
+    diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+    tail = [abs(d) for d in diffs[-2:]]
+    if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
+            and tail[1] > 1e-6 * max(1.0, abs(vals[-1])):
+        raise EvalError('the truncation ladder does not settle')
+    lvl1 = [_aitken_accel(*vals[k:k + 3]) for k in range(len(vals) - 2)]
+    if any(v is None for v in lvl1):
+        est = vals[-1]
+        spread = abs(vals[-1] - vals[-2])
+    else:
+        lvl2 = [_aitken_accel(*lvl1[k:k + 3])
+                for k in range(len(lvl1) - 2)]
+        if not lvl2 or any(v is None for v in lvl2):
+            est = lvl1[-1]
+            spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
+        else:
+            est = lvl2[-1]
+            spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
+                      else abs(lvl2[-1] - lvl1[-1]))
+    if spread > 1e-5 * max(1.0, abs(est)):
+        raise EvalError('the truncation extrapolation did not converge')
+    return est
+
+
 def definite_integral_evaluator(sym, notation):
     """A callable ``env -> float`` for a limit body containing
     variable-bound definite integrals: each integral is computed by
     ``_graded_quadrature`` under the ambient environment (bounds
-    evaluated per call, the bound variable lexically shadowed), then the
-    surrounding expression is evaluated with the values in place.
+    evaluated per call, the bound variable lexically shadowed; one
+    infinite bound routes through the decade truncation ladder), then
+    the surrounding expression is evaluated with the values in place.
     Returns None when the body contains no definite integral, so
     callers keep plain ``numeric_eval``.
 
-    Deliberately LIMITS-ORACLE infrastructure: general ``equal?`` does
-    not gain this evaluator — a definite integral's VALUE still closes
-    only through `integrate_definite`/`integrate_improper`, and letting
-    the sampling comparator decide integrals numerically would open a
-    proposal route around that boundary."""
+    Deliberately LIMITS/QUADRATURE-ORACLE infrastructure: general
+    ``equal?`` does not gain this evaluator — a definite integral's
+    VALUE still closes only through
+    `integrate_definite`/`integrate_improper`, and letting the sampling
+    comparator decide integrals numerically would open a proposal route
+    around that boundary."""
     scratch = Notation()
     walker = _IntegralPlaceholderer(notation, scratch)
     skeleton = walker(sym)
@@ -614,11 +652,29 @@ def definite_integral_evaluator(sym, notation):
         fs, fn = parse_latex(integrand)
         ls, ln = parse_latex(lower)
         us, un = parse_latex(upper)
-        parsed.append((name, ivar, fs, fn, ls, ln, us, un))
+        parsed.append((name, ivar, fs, fn,
+                       (ls, ln, _infinity_sign(ls, ln)),
+                       (us, un, _infinity_sign(us, un))))
 
     def evaluate(env):
         e = dict(env)
-        for name, ivar, fs, fn, ls, ln, us, un in parsed:
+        for name, ivar, fs, fn, lo_spec, hi_spec in parsed:
+            ls, ln, lo_inf = lo_spec
+            us, un, hi_inf = hi_spec
+            if lo_inf is not None and hi_inf is not None:
+                raise EvalError('both bounds are infinite')
+            if lo_inf == 1 or hi_inf == -1:
+                raise EvalError('reversed infinite bound')
+            if hi_inf == 1 or lo_inf == -1:
+                fin_s, fin_n = (ls, ln) if hi_inf == 1 else (us, un)
+                finite = numeric_eval(fin_s, fin_n, e)
+                if (isinstance(finite, list)
+                        or not math.isfinite(finite)):
+                    raise EvalError('integral bound is not evaluable')
+                sign = 1 if hi_inf == 1 else -1
+                e[name] = _truncation_ladder_value(fs, fn, ivar,
+                                                   finite, sign, e)
+                continue
             a = numeric_eval(ls, ln, e)
             b = numeric_eval(us, un, e)
             if (isinstance(a, list) or isinstance(b, list)
@@ -2484,6 +2540,76 @@ def numeric_improper_check(expr, var, side, result, samples=4,
     return {'status': 'agree', 'samples': agreed,
             'method': 'graded truncation quadrature with iterated '
                       'Aitken extrapolation'}
+
+
+def numeric_reduction_check(lhs, rhs, assumptions=None, samples=4,
+                            seed=20260805, tol=1e-4):
+    """Two-sided quadrature leg for a proposed reduction relation: both
+    sides are evaluated through `definite_integral_evaluator` (finite
+    bounds by graded quadrature, one infinite bound by the decade
+    truncation ladder) at parameter values sampled inside the recorded
+    ``constraint`` assumptions — the gen-55 vocabulary.  The two sides
+    share only the structure readers and the quadrature core with each
+    other, and nothing with the symbolic gates.
+
+    A side with no finite value in evidence at a draw (a stalled
+    ladder) skips that draw — a refusal is never evidence of
+    divergence, and agreement covers only the sampled region, which the
+    step's own assumption says.  A gap must clear the ladders' combined
+    evidence bar before it accuses."""
+    try:
+        ls, ln = parse_latex(lhs)
+        rs, rn = parse_latex(rhs)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    lhs_eval = definite_integral_evaluator(ls, ln)
+    rhs_eval = definite_integral_evaluator(rs, rn)
+    if lhs_eval is None or rhs_eval is None:
+        return {'status': 'skipped',
+                'reason': 'a side contains no integral to evaluate'}
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(ls, ln) | free_symbols(rs, rn)
+                 | _guard_variables(guards))
+    rng = random.Random(seed)
+    rounds = samples if variables else 1
+    budget = _sample_budget(rounds, guards)
+    agreed = 0
+    tried = 0
+    last_reason = 'no evaluable sample points'
+    while agreed < rounds and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng) if variables else {}
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            v1 = lhs_eval(env)
+            v2 = rhs_eval(env)
+        except (EvalError, ValueError, ZeroDivisionError,
+                OverflowError):
+            last_reason = ('a side had no finite value in evidence at '
+                           'a sampled parameter (a refusal is never '
+                           'evidence of divergence)')
+            continue
+        if any(isinstance(v, list) or not math.isfinite(v)
+               for v in (v1, v2)):
+            continue
+        scale = max(1.0, abs(v1), abs(v2))
+        delta = abs(v1 - v2)
+        if delta / scale > tol:
+            # the ladders vouch for ~1e-5 relative each; a gap inside
+            # 16x their combined bar is undecided, never an accusation
+            if delta <= 3.2e-4 * scale:
+                last_reason = ('the quadrature could not resolve the '
+                               'gap within its own error bar')
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'lhs': v1, 'rhs': v2}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': last_reason}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'parameter-sampled truncation quadrature on '
+                      'both sides'}
 
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
