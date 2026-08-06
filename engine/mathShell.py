@@ -68,6 +68,113 @@ def _display_replacing(obj):
         display(obj)
 
 
+def _replace_cell_output(obj):
+    """Show `obj` in place of everything this cell has displayed so far.
+
+    Returns True only when the swap actually happened. The kernel clears
+    with `wait=True`, so the frontend drops the old output at the moment
+    the replacement arrives and the reader sees no flicker. A console or
+    embedding handler has no clear at all (plain `IPython.display.display`
+    rejects the keyword), and there the caller must leave what it already
+    printed alone rather than print it a second time.
+    """
+    try:
+        display(obj, clear_output=True)
+        return True
+    except TypeError:
+        return False
+
+
+class _LiveLog:
+    """The cell's streamed step lines, kept so the finish can fold them.
+
+    The stream is what a reader watches while a long run works, and it is
+    worth having. But the verified-chain table rendered afterwards from the
+    ledger records says the same thing more completely and is the actual
+    artifact — streaming is decoration, never the record. Leaving both
+    expanded buries the record under its own rehearsal: one measured cell
+    had 60 streamed lines above the table that restates them.
+
+    So the lines are collected as they stream and re-emitted once, collapsed,
+    at the moment the cell's evidence renders. Only a run that CLOSED folds:
+    with no certified result the stream is the only account of what happened,
+    and hiding it would hide the diagnosis.
+
+    One log per CELL, not per run: an argument-resolving sub-run streams
+    before the outer run starts, and folding per run would clear lines that
+    the fold does not contain.
+    """
+
+    def __init__(self, shell):
+        self._shell = shell
+        self._records = []
+        self._spent = False
+
+    def disable(self):
+        """Give up folding for the rest of this cell.
+
+        The swap clears the cell wholesale, so it is only ever safe as the
+        FIRST thing published after the streaming stops. A path that must
+        show evidence mid-cell — resolving inline commands inside another
+        command's argument, which renders the inner chains and only then
+        runs the outer instruction — says so here, and the later fold
+        becomes a no-op instead of erasing what it does not contain.
+        """
+        self._spent = True
+
+    def __call__(self, step):
+        """Stream one step and remember it. Never raises: rendering a step
+        must not be able to fail the derivation that produced it."""
+        try:
+            html = self._shell.render_do_step(step)
+        except Exception:
+            return
+        self._records.append((step, html))
+        try:
+            display(HTML(html))
+        except Exception:
+            pass
+
+    def _summary(self):
+        steps = notes = checked = flagged = 0
+        for step, _ in self._records:
+            if step.get('op') in ('comment', 'branch'):
+                notes += 1
+                continue
+            steps += 1
+            if (step.get('check') or {}).get('status') in ('agree', 'exact'):
+                checked += 1
+            else:
+                flagged += 1
+        parts = [f'{steps} step{"s" if steps != 1 else ""}',
+                 f'{checked} checked']
+        if flagged:
+            parts.append(f'{flagged} not checked')
+        if notes:
+            parts.append(f'{notes} note{"s" if notes != 1 else ""}')
+        return 'agent turns &mdash; ' + ' &middot; '.join(parts)
+
+    def fold(self, closed):
+        """Collapse the streamed lines into one expandable group.
+
+        `closed` is the caller's answer to "did this cell produce a verified
+        result?" — the table only supersedes the log when it exists.
+        """
+        if self._spent or not closed or len(self._records) < 2:
+            return False
+        body = ''.join(html for _, html in self._records)
+        folded = HTML(
+            f'<details style="margin:2px 0"><summary style="cursor:pointer;'
+            f'color:#888">{self._summary()} '
+            f'<span style="font-size:90%">(click to expand)</span></summary>'
+            f'<div style="margin:4px 0 4px 1em;border-left:2px solid #eee;'
+            f'padding-left:.8em">{body}</div></details>')
+        if not _replace_cell_output(folded):
+            return False
+        self._records = []
+        return True
+
+
 def _notify_route(handler, route):
     """Send routing changes to the frontend.
 
@@ -90,6 +197,7 @@ class MathShell(object):
 
     def __init__(self):
         self.history = {}
+        self._live_log = _LiveLog(self)
         self.parsedNotation = Notation()
         self.processor = MathProcessor(model=PrologModel())
         # Discover both command systems before constructing the lexer. Bang
@@ -171,6 +279,9 @@ class MathShell(object):
         self.show_quotes = show_quotes
 
     def exec(self, code, execution_count, add_to_history=False, cell_id=None):
+        # one live log per CELL: an argument-resolving sub-run streams before
+        # the outer run starts, and the fold has to own both.
+        self._live_log = _LiveLog(self)
         stripped = code.strip()
         m = CMD_PREFIX_RE.match(stripped)
         if m and self.dispatch_command(m.group(1), stripped[m.end():].strip(),
@@ -947,11 +1058,7 @@ class MathShell(object):
             self._do_error(str(e))
             return
 
-        def on_step(step):
-            try:
-                display(HTML(self.render_do_step(step)))
-            except Exception:
-                pass  # rendering must never fail the derivation step
+        on_step = self._live_log
 
         try:
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
@@ -961,6 +1068,16 @@ class MathShell(object):
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
             return
+        # Rendered before anything else is published, because folding the
+        # log replaces the cell's output wholesale: a notice shown first
+        # would be swept away with the lines it was meant to survive. Pure
+        # rendering off the records, so computing it early changes nothing.
+        chain = self.render_do_chain(
+            res.get('steps') or [], res.get('branch_topology'),
+            all_steps=self.ledger.steps)
+        self._live_log.fold(bool(
+            chain and res.get('ok') and res.get('final_result')
+            and not res.get('cancelled')))
         if res.get('cancelled'):
             # not a failure: the work that was mechanically checked before
             # the interrupt is kept and still replays. Amber, not red — and
@@ -979,9 +1096,6 @@ class MathShell(object):
                 'missing.</div>'))
         for claim in res.get('claims', []):
             display(HTML(self.render_do_claim(claim)))
-        chain = self.render_do_chain(
-            res.get('steps') or [], res.get('branch_topology'),
-            all_steps=self.ledger.steps)
         if chain:
             display(HTML(chain))
         self._show_run_figures(res)
@@ -1040,11 +1154,7 @@ class MathShell(object):
             self._do_error(str(e))
             return
 
-        def on_step(step):
-            try:
-                display(HTML(self.render_do_step(step)))
-            except Exception:
-                pass  # rendering must never fail a derivation step
+        on_step = self._live_log
 
         def run_selected(instruction, **kwargs):
             kwargs['route'] = self.route
@@ -1065,10 +1175,17 @@ class MathShell(object):
         # above is best-effort (a backend may dispatch tool callbacks off
         # the kernel thread and lose the displays), and a cell whose only
         # visible artifact is its final value reads as an assertion.
-        for run in resolver.subruns:
-            chain = self.render_do_chain(run.get('steps') or [],
-                                         run.get('branch_topology'),
-                                         all_steps=self.ledger.steps)
+        chains = [self.render_do_chain(run.get('steps') or [],
+                                       run.get('branch_topology'),
+                                       all_steps=self.ledger.steps)
+                  for run in resolver.subruns]
+        # Folded before any of it is published, because the swap replaces
+        # the whole cell. Every sub-run must have closed: one that ended
+        # open makes its streamed lines the only account of why.
+        self._live_log.fold(bool(
+            any(chains)
+            and all(run.get('final_result') for run in resolver.subruns)))
+        for run, chain in zip(resolver.subruns, chains):
             if chain:
                 display(HTML(chain))
             self._show_run_narrative(run)
@@ -1158,11 +1275,7 @@ class MathShell(object):
             self._do_error(str(e))
             return None
 
-        def on_step(step):
-            try:
-                display(HTML(self.render_do_step(step)))
-            except Exception:
-                pass
+        on_step = self._live_log
 
         def run_selected(instruction, **kwargs):
             kwargs['route'] = self.route
@@ -1207,6 +1320,9 @@ class MathShell(object):
 
         # Provider callbacks may run off the kernel thread, so reproduce the
         # end-of-composite evidence here after every inner run finishes.
+        # This is mid-cell — the outer instruction has not run yet — so the
+        # cell forfeits folding rather than let that later fold clear these.
+        self._live_log.disable()
         for run in resolver.subruns:
             chain = self.render_do_chain(run.get('steps') or [],
                                          run.get('branch_topology'),

@@ -29,6 +29,7 @@ os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
 
 import agent_config
 import agent_do
+import mathShell
 import observability
 import plot_sandbox
 import tactic_registry
@@ -6080,6 +6081,168 @@ class TestExprComposite(unittest.TestCase):
                          'yes')
         # the pattern-continuation assumption is surfaced on the cell
         self.assertIn('continues the pattern', html)
+
+
+class TestLiveLogFolding(unittest.TestCase):
+    """The streamed turn log is decoration; the chain table is the record.
+
+    A closed run therefore re-emits its stream collapsed, so the artifact is
+    not buried under its own rehearsal (measured: 60 streamed lines above the
+    table that restates them). A run that did not close keeps the stream
+    expanded — there it is the only account of what happened.
+    """
+
+    def setUp(self):
+        import engine
+        self.displays = []
+        # the kernel clears with wait=True, so a fold really does replace
+        # everything shown so far; a handler that only appends would hide
+        # exactly the duplication these tests are about
+        def handler(*objs, **kw):
+            if kw.get('clear_output'):
+                self.displays.clear()
+            self.displays.extend(objs)
+        engine.setHandler(handler)
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def _steps(self, n):
+        return [{'id': f's{i}', 'hash': f'h{i}', 'op': 'expand',
+                 'check': {'status': 'agree'}, 'input': f'x^{i}',
+                 'result': f'x^{i + 1}', 'assumptions': [], 'continues': True}
+                for i in range(1, n + 1)]
+
+    def _run(self, steps, result='x^{4}'):
+        """A fake run that streams like a real one before returning."""
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            for step in steps:
+                if on_step is not None:
+                    on_step(step)
+            return {'ok': True, 'final_result': result, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'status': 'verified',
+                                         'source': 'ledger', 'step': 's1',
+                                         'method': 'test-fixture'}}
+        return fake
+
+    def test_closed_run_folds_the_live_log_into_one_group(self):
+        steps = self._steps(4)
+        with mock.patch.object(agent_do, 'run_instruction',
+                               self._run(steps)):
+            self.shell.exec('do! integrate x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertEqual(1, html.count('<details'))
+        self.assertIn('agent turns', html)
+        self.assertIn('4 steps', html)
+        self.assertIn('4 checked', html)
+        # every streamed line survives, once, inside the group
+        head, _, tail = html.partition('</details>')
+        for step in steps:
+            self.assertEqual(1, html.count(f"{step['id']}#{step['hash']}"),
+                             step['id'])
+            self.assertIn(f"{step['id']}#{step['hash']}", head)
+        # and the record itself is still published, outside the fold
+        self.assertIn('verified chain', tail)
+
+    def _chain(self, goal, result, n=4):
+        """`n` LINKED steps from `goal` to `result`.
+
+        The composite resolver refuses a final value that no checked chain
+        connects to the request, so a fixture of unlinked steps never
+        reaches the fold at all — it errors first.
+        """
+        points = ([goal] + [f'u_{{{i}}}' for i in range(1, n)] + [result])
+        return [{'id': f's{i + 1}', 'hash': f'h{i + 1}', 'op': 'expand',
+                 'check': {'status': 'agree'}, 'input': points[i],
+                 'result': points[i + 1], 'assumptions': [],
+                 'continues': True}
+                for i in range(n)]
+
+    def test_an_expr_command_cell_folds_too(self):
+        """`int!` declares `expr: true`, so a whole-cell `int! ...` is
+        resolved by exec_composite, NOT exec_do — the reported cell took
+        that path. Gen 67's lesson is that a fix landing only in exec_do
+        gets missed here, three times over."""
+        result = '\\frac{x^{4}}{4} + C'
+        seen = {}
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            steps = self._chain(_arg_of(instruction), result)
+            seen['steps'] = steps
+            for step in steps:
+                on_step(step)
+            return {'ok': True, 'final_result': result, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'status': 'verified',
+                                         'source': 'ledger', 'step': 's4',
+                                         'method': 'test-fixture'}}
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertEqual(1, html.count('<details'), html[:400])
+        self.assertIn('4 steps', html)
+        head, _, tail = html.partition('</details>')
+        for step in seen['steps']:
+            self.assertIn(f"{step['id']}#{step['hash']}", head)
+        self.assertIn('verified chain', tail)
+
+    def test_a_run_that_did_not_close_keeps_its_log_expanded(self):
+        steps = self._steps(3)
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            for step in steps:
+                on_step(step)
+            return {'ok': True, 'final_result': None, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'source': 'open',
+                                         'reason': 'no route closed it'}}
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('do! integrate x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertNotIn('<details', html)
+        for step in steps:
+            self.assertIn(f"{step['id']}#{step['hash']}", html)
+
+    def test_a_handler_that_cannot_clear_never_duplicates_the_log(self):
+        """Console and embedding handlers reject the clear keyword. There the
+        fold must decline outright, not print the log a second time."""
+        import engine
+        shown = []
+
+        def console(*objs, **kw):
+            if 'clear_output' in kw:
+                raise TypeError('unexpected keyword')
+            shown.extend(objs)
+        engine.setHandler(console)
+        log = mathShell._LiveLog(self.shell)
+        for step in self._steps(3):
+            log(step)
+        self.assertEqual(3, len(shown))
+        self.assertFalse(log.fold(True))
+        self.assertEqual(3, len(shown))
+
+    def test_evidence_published_mid_cell_forfeits_the_fold(self):
+        """Resolving inline commands inside another command's argument shows
+        the inner chains and only then runs the outer instruction. The swap
+        clears the cell wholesale, so it must not fire afterwards."""
+        log = mathShell._LiveLog(self.shell)
+        for step in self._steps(3):
+            log(step)
+        log.disable()
+        self.assertFalse(log.fold(True))
+
+    def test_one_streamed_line_is_left_alone(self):
+        log = mathShell._LiveLog(self.shell)
+        log(self._steps(1)[0])
+        self.assertFalse(log.fold(True))
 
 
 class TestChainsToGoal(unittest.TestCase):
