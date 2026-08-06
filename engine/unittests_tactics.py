@@ -130,6 +130,51 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('system_assemble', integration)
         self.assertIn('never a reason to declare the task open', integration)
 
+    def test_unloaded_subjects_are_indexed_from_the_registry(self):
+        """Discovery must not depend on having guessed the right skill.
+
+        The index is generated, so a subject added later is reachable from
+        every other subject without editing any skill Markdown."""
+        index = tactic_skills.crossref_markdown({'core', 'integration'})
+        self.assertIn('`differentiation`', index)
+        self.assertIn('`quadratic_roots`', index)
+        # The loaded subject and the always-on core skill are not repeated.
+        self.assertNotIn('`integrate_by_parts`', index)
+        self.assertNotIn('`expand`', index)
+        # Names and summaries only: signatures stay behind load_skill, so
+        # discovery never becomes authority.
+        self.assertNotIn('quadratic_roots EXPR VAR', index)
+        every = tactic_skills.crossref_markdown()
+        self.assertIn('`integrate_by_parts`', every)
+        self.assertEqual('', tactic_skills.crossref_markdown(
+            {spec.skill for spec in tactic_registry.TACTICS}))
+
+    def test_ftc_bound_rule_is_reachable_from_the_integration_skill(self):
+        """A d/dx of a variable-bound integral is owned by differentiation,
+        so an int! run loads a skill that has no move for it. The capability
+        hint lives on the diff signature, which used to render only once its
+        owner was loaded — live, the agent read the integration skill's
+        silence as impossibility and answered `set_open` on a cell the FTC
+        bound rule closes with an agreeing check."""
+        session = agent_do.DoSession()
+        loaded = agent_do.make_api(session)['load_skill']('integration')
+        self.assertIn('Other subjects not loaded', loaded)
+        self.assertIn('FTC bound rule', loaded)
+        self.assertIn(
+            'does not mean the task has no move', loaded)
+        # Reaching for it still requires loading the owning subject.
+        refused = tactic_registry.invoke_agent(
+            'diff', [r'\frac{d}{dx} \int_{\sin x}^{\cos x} \cos(\pi t^2) dt',
+                     'x'], session)
+        self.assertFalse(refused['ok'])
+        self.assertIn('load_skill', refused['error'])
+        agent_do.make_api(session)['load_skill']('differentiation')
+        closed = tactic_registry.invoke_agent(
+            'diff', [r'\frac{d}{dx} \int_{\sin x}^{\cos x} \cos(\pi t^2) dt',
+                     'x'], session)
+        self.assertTrue(closed['ok'], closed.get('error'))
+        self.assertEqual('agree', closed['check']['status'])
+
     def test_existing_cli_shapes_are_preserved(self):
         parser = toymath_cli.build_parser()
         apply = parser.parse_args(['apply', '2x+3=7', '-', '3'])
