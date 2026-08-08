@@ -720,6 +720,125 @@ class TestMatchCoefficients(unittest.TestCase):
             self.assertIn(msg, r['error'], expr)
 
 
+class TestMatchCoefficientsOverAnAtom(unittest.TestCase):
+    # gen 89, externally triggered: a live run on the
+    # `\int dx/(a+b\cos x)^n` reduction cell could not match in `\cos x`
+    # ("both sides must be polynomials in \cos x: operator symbol \cos"), so
+    # the agent HAND-TYPED the identity in a fresh variable. That retyped
+    # identity is a premise no step derived, and the whole coefficient system
+    # then rested on it. `collect` had grouped by an opaque atom since gen 7;
+    # the two sibling tactics simply disagreed about what a matching variable
+    # may be.
+
+    LIVE = (r'1=A\cos x(a+b\cos x)+Ab(n-1)(1-\cos^2x)'
+            r'+B(a+b\cos x)+C(a+b\cos x)^2')
+
+    def test_the_live_identity_matches_in_cos_x(self):
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'],
+                         '0 = -Abn+Cb^{2}+2Ab, 0 = 2Cab+Aa+Bb, '
+                         '1 = Abn+Ca^{2}-Ab+Ba')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_the_atom_result_is_a_system_assemble_can_consume(self):
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        sym, notation = P.parse_latex(r['result'])
+        self.assertIsNotNone(notation.getf(sym, Notation.C_LIST))
+
+    def test_the_recorded_variable_is_the_agents_spelling(self):
+        # the internal atom name must never reach the ledger
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertEqual(r['matched_in'], '\\cos x')
+        self.assertNotIn('zz#', r['result'])
+
+    def test_a_powered_head_counts_as_the_atom_squared(self):
+        # `1-\cos^2x` in the live identity is the atom SQUARED, not a
+        # separate object; that is what makes the degree 2
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertEqual(r['powers'], [2, 1, 0])
+
+    def test_the_oracle_leg_catches_a_corrupted_atom_coefficient(self):
+        """The risky half. The oracle cannot SET `\\cos x` — it has to draw
+        `x` and evaluate the atom to discover where the sample landed. If it
+        instead bound the sample to a variable named `\\cos x`, every point
+        would share one value of the atom and the recovery would be
+        meaningless."""
+        original = Equations._coefficient_buckets
+
+        def corrupt(poly, var):
+            buckets = original(poly, var)
+            if 1 in buckets:
+                buckets[1] = Poly.const(999)
+            return buckets
+
+        Equations._coefficient_buckets = corrupt
+        try:
+            r = Equations.match_coefficients(self.LIVE, '\\cos x')
+            self.assertEqual(r['check']['status'], 'disagree')
+        finally:
+            Equations._coefficient_buckets = original
+
+    def test_a_true_atom_identity_is_never_accused(self):
+        # a `disagree` bars the step from the ledger for good, so the leg
+        # that samples an atom must not manufacture one out of conditioning
+        for expr, var in (
+                (self.LIVE, '\\cos x'),
+                (r'A(\sin x)^2+B\sin x+C = 3(\sin x)^2-\sin x', '\\sin x'),
+                (r'1 = A(1-\cos x)+B(1+\cos x)', '\\cos x')):
+            r = Equations.match_coefficients(expr, var)
+            self.assertTrue(r['ok'], r.get('error'))
+            self.assertEqual(r['check']['status'], 'agree', expr)
+
+    def test_refuses_when_the_atom_variable_also_occurs_outside_it(self):
+        """Equating powers of `\\cos x` says the identity holds as that atom
+        varies freely. A bare `x`, or a second atom in the same variable,
+        makes the powers dependent — so the matching would state something
+        false. This is the mathematics, not an oracle limitation."""
+        for expr, offender in (
+                (r'A\cos x + x = B\cos x', 'x'),
+                (r'A\cos x + \sin x = B\cos x', '\\sin x')):
+            r = Equations.match_coefficients(expr, '\\cos x')
+            self.assertFalse(r['ok'], expr)
+            self.assertIn('not independent', r['error'])
+            self.assertIn(offender, r['error'])
+
+    def test_a_coefficient_carrying_another_atom_is_written_back(self):
+        # an unrelated atom may sit INSIDE a coefficient; it must be spelled
+        # back out, and the oracle must evaluate the real subexpression
+        r = Equations.match_coefficients(
+            r'A\sin y\cos x + B = 3\sin y \cos x - 1', '\\cos x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('\\sin y', r['result'])
+        self.assertNotIn('zz#', r['result'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_naming_an_absent_atom_is_refused_not_invented(self):
+        r = Equations.match_coefficients(r'A\cos x = B\cos x', '\\tan x')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_the_plain_variable_path_is_unchanged(self):
+        # verdict identity: the rational-fragment case must not acquire the
+        # atom machinery's sampling or its label
+        r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5', 'x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['check']['method'],
+                         'coefficients recovered by evaluation')
+
+    def test_the_two_sibling_tactics_read_one_matching_variable(self):
+        """The defect was a CONSISTENCY GAP, so pin it as one: `collect` and
+        `match_coefficients` now resolve a named matching variable through
+        the same `atom_ratfuncs`, and the coefficients one reports are the
+        ones the other groups by."""
+        grouped = Core.collect(self.LIVE, '\\cos x')
+        matched = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertTrue(grouped['ok'] and matched['ok'])
+        for coefficient in ('-Abn+Cb^{2}+2Ab', '2Cab+Aa+Bb'):
+            self.assertIn(coefficient, grouped['result'])
+            self.assertIn(coefficient, matched['result'])
+
+
 class TestDomainNarrowingAssumptions(unittest.TestCase):
     # gen 60: cancelling a factor drops the points where it vanished. The
     # canonical leg decides equality as rational functions and the numeric

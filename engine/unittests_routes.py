@@ -326,6 +326,24 @@ class TestRendering(unittest.TestCase):
         self.assertEqual(self.block, strategy_routes.render(self.routes))
         self.assertEqual(strategy_routes.render(()), '')
 
+    def test_the_isolate_stage_says_what_to_do_with_coupled_rows(self):
+        """gen 89, from the live run: the agent isolated one constant, then
+        declared the task open saying it could not eliminate among the
+        remaining rows — while `substitute`, already named in this very
+        stage, is exactly that elimination. It also burned a `rewrite_as`
+        trying to flip a derived `value = unknown` row, which
+        `system_assemble` has read in either order since gen 86."""
+        self.assertIn('COUPLED', self.block)
+        self.assertIn('substituting an already-isolated value back', self.block)
+        self.assertIn('read in both orders', self.block)
+
+    def test_the_matching_stage_forbids_a_retyped_identity(self):
+        """The same run hand-typed the identity in a fresh variable because
+        `match_coefficients` refused `\\cos x`. The refusal is gone; the
+        route says not to retype regardless, because a retyped identity is a
+        premise no step derived."""
+        self.assertIn('never a stand-in variable retyped by hand', self.block)
+
 
 class TestDelivery(unittest.TestCase):
     def test_a_matching_run_gets_the_route_in_its_initial_instructions(self):

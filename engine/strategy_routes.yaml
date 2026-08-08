@@ -4,7 +4,9 @@
 # it grants no execution permission and touches no ledger, oracle or replay.
 # See engine/strategy_routes.py for the schema and the trust boundary.
 #
-# `on` and `why` are strategy prose on purpose. What this format makes
+# `target` and `why` are strategy prose on purpose (the field naming the
+# sub-object is `target` - a bare `on` key is YAML 1.1's boolean True).
+# What this format makes
 # testable is everything AROUND that prose: the schema, the tactic/control
 # references, the producer/consumer links, the shape matcher, the rendered
 # delivery, and the recorded historical effect.
@@ -52,11 +54,16 @@ routes:
       - id: form-coefficient-system
         action: tactic
         tactic: match_coefficients
+        target: >-
+          the derivative identity, matched in whatever object it is
+          polynomial in - the trig atom itself (`\cos x`) when there is one,
+          never a stand-in variable retyped by hand
         consumes: derivative-identity
         produces: coefficient-system
         why: >-
           turn the polynomial identity into equations for the unknown
-          constants
+          constants; a retyped identity would be a premise that no step
+          derived, putting the whole system outside what was checked
         required: true
       - id: isolate-assignments
         action: tactic-loop
@@ -65,7 +72,13 @@ routes:
         produces: coefficient-assignments
         why: >-
           isolate one recorded `unknown = value` step per constant; the
-          assembly stage reads exactly those
+          assembly stage reads exactly those. When the rows are COUPLED,
+          substituting an already-isolated value back into the remaining
+          rows and isolating again IS the elimination - there is no separate
+          row-combining move to go looking for. Orientation is not a
+          blocker either: a row derived as `value = unknown` is read in
+          both orders, so it needs no flipping - and none is possible,
+          since `equal?` compares relations side by side
       - id: assemble-answer
         action: tactic
         tactic: system_assemble

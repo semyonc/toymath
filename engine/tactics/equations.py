@@ -16,8 +16,9 @@ from primitives import (
     PrimitiveError, EvalError, parse_latex, write_latex, numeric_eval,
     free_symbols, same_expression, numeric_union_check, _num_agree,
     _sample_point, _result, _error, _composite_disagreement_resolves,
+    Substitutor,
 )
-from tactics.core import equal_exprs, substitute, _comp_split
+from tactics.core import equal_exprs, substitute, atom_ratfuncs, _comp_split
 
 
 def _plain_variable(var):
@@ -960,14 +961,13 @@ def _vandermonde_solve(xs, ys):
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def _numeric_coefficients(sym, notation, var, env, degree):
-    """Coefficients of `sym` as a polynomial in `var`, recovered purely by
-    evaluation — an independent reading of the same object."""
-    xs, ys = [], []
-    for i in range(degree + 1):
-        xv = 0.5 + 0.37 * i
-        point = dict(env)
-        point[var] = xv
+def _numeric_coefficients(sym, notation, xs, points):
+    """Coefficients of `sym` as a polynomial in the matching variable,
+    recovered purely by evaluation — an independent reading of the same
+    object. `xs[i]` is the value the matching variable takes at
+    `points[i]`."""
+    ys = []
+    for point in points:
         try:
             val = numeric_eval(sym, notation, point)
         except (EvalError, PrimitiveError, ZeroDivisionError,
@@ -975,9 +975,88 @@ def _numeric_coefficients(sym, notation, var, env, degree):
             return None
         if val is None or isinstance(val, complex):
             return None
-        xs.append(xv)
         ys.append(float(val))
     return _vandermonde_solve(xs, ys)
+
+
+# an atom's sampled values must stay apart or the Vandermonde system is
+# ill-conditioned and a true identity could be accused of disagreeing
+_ATOM_SEPARATION = 0.05
+_ATOM_DRAWS = 400
+
+
+def _coefficient_grid(var, atom, env, degree, rng):
+    """`(abscissae, points)`: `degree + 1` values of the matching variable,
+    each paired with the sample point that realizes it.
+
+    A plain variable is simply set. An ATOM cannot be set — `\\cos x` is
+    whatever the point makes it — so its OWN variables are drawn and the
+    atom is EVALUATED to discover where the draw landed. The oracle's
+    abscissa is therefore its own measurement rather than a number handed
+    to it by the symbolic side, which is what keeps the two legs
+    independent over atoms.
+    """
+    if atom is None:
+        xs = [0.5 + 0.37 * i for i in range(degree + 1)]
+        return xs, [dict(env, **{var: x}) for x in xs]
+    atom_sym, atom_n = atom
+    atom_vars = sorted(free_symbols(atom_sym, atom_n))
+    if not atom_vars:
+        return None  # a constant atom cannot be varied at all
+    xs, points = [], []
+    for _ in range(_ATOM_DRAWS):
+        if len(xs) > degree:
+            break
+        draw = _sample_point(atom_vars, rng)
+        try:
+            val = numeric_eval(atom_sym, atom_n, draw)
+        except (EvalError, PrimitiveError, ZeroDivisionError,
+                ValueError, OverflowError):
+            continue
+        if val is None or isinstance(val, complex):
+            continue
+        val = float(val)
+        if any(abs(val - x) < _ATOM_SEPARATION for x in xs):
+            continue
+        xs.append(val)
+        points.append(dict(env, **draw))
+    return (xs, points) if len(xs) > degree else None
+
+
+def _coefficient_expr(poly, store):
+    """`(sym, notation)` for a coefficient polynomial, with any opaque atom
+    substituted back so both the emitted equation and the oracle see the
+    real subexpression instead of an internal atom name."""
+    notation = Notation()
+    sym = poly_to_notation(poly, notation)
+    if store is not None and store.exprs:
+        out = Notation()
+        sym = Substitutor(notation, out, store.mapping())(sym)
+        notation = out
+    return sym, notation
+
+
+def _atom_matching_conflict(atom, store, polys):
+    """The atom variable that also occurs OUTSIDE the matching atom, or None.
+
+    Equating coefficients of powers of an opaque atom says the identity
+    holds as that atom varies freely. If anything else in the identity moves
+    with the atom's own variable — a bare `x`, or a second atom such as
+    `\\sin x` — the powers are not independent and the matching would state
+    something false. Refusing is the mathematics here, not a limitation of
+    the oracle."""
+    atom_vars = free_symbols(*store.exprs[atom])
+    if not atom_vars:
+        return None
+    variables = set()
+    for p in polys:
+        variables |= set(p.variables())
+    for name in sorted(variables - {atom}):
+        other = store.exprs.get(name)
+        used = free_symbols(*other) if other else {name}
+        if used & atom_vars:
+            return write_latex(*other) if other else name
+    return None
 
 
 def match_coefficients(expr, var):
@@ -1003,32 +1082,43 @@ def match_coefficients(expr, var):
         return _error('match_coefficients', args,
                       f'coefficients can only be matched across "=", '
                       f'not {rel!r}')
+    named = var
     try:
+        # an agent may match in an opaque subexpression (\cos x) rather than
+        # a plain variable; `collect` has grouped by such an atom since
+        # gen 7 and this is the same reading of the same object
+        rfs, var, store = atom_ratfuncs([lhs, rhs], notation, var)
         polys = []
-        for side in (lhs, rhs):
-            rf = to_ratfunc(side, notation)
+        for rf in rfs:
             if not rf.is_poly():
                 raise NotInFragment('side is not a polynomial')
             polys.append(rf.num)
     except NotInFragment as e:
         return _error('match_coefficients', args,
-                      f'both sides must be polynomials in {var}: {e}')
+                      f'both sides must be polynomials in {named}: {e}')
     except ZeroDivisionError:
         return _error('match_coefficients', args,
                       'expression contains division by zero')
-    left, right = (_coefficient_buckets(p, var) for p in polys)
     if not any(var in p.variables() for p in polys):
         return _error('match_coefficients', args,
-                      f'{var!r} does not occur on either side')
-    equations, out_n = [], Notation()
+                      f'{named!r} does not occur on either side')
+    if store is not None and var in store.exprs:
+        clash = _atom_matching_conflict(var, store, polys)
+        if clash is not None:
+            return _error(
+                'match_coefficients', args,
+                f'{clash} varies with {named}, so powers of {named} are not '
+                f'independent and their coefficients cannot be equated')
+    left, right = (_coefficient_buckets(p, var) for p in polys)
+    equations = []
     for k in sorted(set(left) | set(right), reverse=True):
         a = left.get(k, Poly.const(0))
         b = right.get(k, Poly.const(0))
         if a == b:
             continue  # already identical: it states nothing
         equations.append((k,
-                          write_latex(poly_to_notation(a, out_n), out_n),
-                          write_latex(poly_to_notation(b, out_n), out_n)))
+                          write_latex(*_coefficient_expr(a, store)),
+                          write_latex(*_coefficient_expr(b, store))))
     if not equations:
         return _error('match_coefficients', args,
                       'the two sides already have identical coefficients; '
@@ -1040,25 +1130,46 @@ def match_coefficients(expr, var):
         return _error('match_coefficients', args,
                       f'internal: unparseable result: {e}')
     rec = _result('match_coefficients', args, expr, result,
-                  extra={'matched_in': var,
+                  extra={'matched_in': named,
                          'powers': [k for k, _, _ in equations]})
     rec['check'] = _check_coefficients(lhs, rhs, notation, var,
-                                       left, right, polys)
+                                       left, right, polys, store, named)
     return rec
 
 
-def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
+def _check_coefficients(lhs, rhs, notation, var, left, right, polys,
+                        store=None, named=None):
     """Independent leg: recover each side's coefficients numerically and
     confirm the symbolic extraction reports the same ones."""
-    others = sorted((free_symbols(lhs, notation)
-                     | free_symbols(rhs, notation)) - {var})
+    atom = None
+    if named is not None and named != var:
+        # `var` was resolved to an internal atom name, so the matching
+        # variable is an opaque subexpression. Re-read it from the AGENT's
+        # own spelling rather than borrowing the atomizer's stored object:
+        # this leg should not inherit the symbolic side's reading of which
+        # object it is checking.
+        try:
+            atom = parse_latex(named)
+        except PrimitiveError:
+            return {'status': 'skipped',
+                    'reason': 'the oracle could not read the matching object'}
+    free = free_symbols(lhs, notation) | free_symbols(rhs, notation)
+    # an atom's OWN variables are what the oracle varies in order to move
+    # the matching variable, so they must not be pinned in the environment
+    held = free - (free_symbols(*atom) if atom else {var})
+    others = sorted(held)
     degree = max([p.degree(var) or 0 for p in polys] + [0])
     rng = random.Random(0xC0EFF)
     samples = 0
     for _ in range(6):
         env = _sample_point(others, rng) if others else {}
+        grid = _coefficient_grid(var, atom, env, degree, rng)
+        if grid is None:
+            return {'status': 'skipped',
+                    'reason': 'the oracle could not sample this shape'}
+        xs, points = grid
         for side_sym, buckets in ((lhs, left), (rhs, right)):
-            got = _numeric_coefficients(side_sym, notation, var, env, degree)
+            got = _numeric_coefficients(side_sym, notation, xs, points)
             if got is None:
                 return {'status': 'skipped',
                         'reason': 'the oracle could not sample this shape'}
@@ -1068,9 +1179,8 @@ def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
                     if want is None:
                         expect = 0.0
                     else:
-                        coef_n = Notation()
                         expect = float(numeric_eval(
-                            poly_to_notation(want, coef_n), coef_n, env))
+                            *_coefficient_expr(want, store), points[0]))
                 except (EvalError, PrimitiveError, TypeError, ValueError,
                         ZeroDivisionError, OverflowError):
                     return {'status': 'skipped',
@@ -1079,5 +1189,6 @@ def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
                     return {'status': 'disagree', 'power': k,
                             'symbolic': expect, 'numeric': got[k]}
         samples += 1
-    return {'status': 'agree', 'samples': samples,
-            'method': 'coefficients recovered by evaluation'}
+    method = ('coefficients recovered by evaluation over an opaque atom'
+              if atom else 'coefficients recovered by evaluation')
+    return {'status': 'agree', 'samples': samples, 'method': method}

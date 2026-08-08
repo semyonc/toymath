@@ -31,8 +31,8 @@ denominators first so both sides are polynomials, then equate like powers:
 ```text
 match_coefficients EXPR VAR
 
-# from \frac{x^2}{(1-x^2)^3}, having cleared denominators:
-match_coefficients "x^2 = A(x+1) + B(x-1)" x     ->  1 = A+B, 0 = A-B
+# from \frac{x}{(1-x^2)}, having cleared denominators:
+match_coefficients "x = A(x+1) + B(x-1)" x     ->  1 = A+B, 0 = A-B
 ```
 
 It is not a solver. You say which variable to match in; it reports one
@@ -40,6 +40,26 @@ equation per power, and the values still come from your own later steps —
 feed that system to `system_assemble` once each unknown has a recorded value.
 The coefficients are recovered a second time by evaluation alone, so a
 misread coefficient is refused rather than recorded.
+
+VAR does not have to be a plain letter. It may name an opaque subexpression
+the identity is polynomial in — `\cos x`, `\sin x`, `e^x` — and the powers
+are then powers of that whole object, exactly as `collect` groups by it:
+
+```text
+match_coefficients "1 = A(1-\cos x) + B(1+\cos x)" "\cos x"   ->  0 = -A+B, 1 = A+B
+```
+
+This is what closes an identity that is trigonometric on its face but
+polynomial underneath, so there is no need to retype such an identity by
+hand in a fresh variable — a retyped identity is a premise nothing derived,
+and it moves the whole coefficient system outside what was checked.
+
+The matching object must be the only thing carrying its variable. If
+anything else in the identity moves with `x` too — a bare `x`, or a second
+atom like `\sin x` beside `\cos x` — the powers are not independent, the
+equating would state something false, and the tactic refuses and names the
+offending term. Use a recorded `equal` step to put the identity in one atom
+first (`\sin^2 x = 1 - \cos^2 x`) rather than working around the refusal.
 
 A degree that cannot balance shows up honestly as an impossible equation such
 as `1 = 0`: that means the ansatz itself is wrong, so fix the ansatz rather
