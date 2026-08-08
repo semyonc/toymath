@@ -26,6 +26,33 @@ def _corpus(name=FIXTURE):
     return strategy_routes.fixtures()[name]
 
 
+def _run(instruction):
+    """One `run_instruction` against a backend that only records what it was
+    handed, so the delivery seam is exercised end to end offline."""
+    seen = {}
+
+    class _Handle:
+        cancelled = False
+        status = 'completed'
+        final_text = ''
+        metadata = {}
+
+        def cancel(self, reason):
+            pass
+
+    class _Backend:
+        def start(self, request):
+            seen['instructions'] = request.developer_instructions
+            seen['trace'] = dict(request.trace_metadata or {})
+            return _Handle()
+
+    with mock.patch.object(agent_do, 'resolve_backend',
+                           lambda **kwargs: _Backend()), \
+            mock.patch.object(agent_do, 'wait_interruptibly',
+                              lambda handle, *a, **k: _Handle()):
+        return agent_do.run_instruction(instruction), seen
+
+
 class TestRouteSchema(unittest.TestCase):
     def test_the_committed_file_validates(self):
         self.assertTrue(strategy_routes.validate())
@@ -317,36 +344,10 @@ class TestDelivery(unittest.TestCase):
         unmatched = strategy_routes.match('int! \\int x^2 dx')
         self.assertEqual(agent_do.build_prompt(routes=unmatched), base)
 
-    def _run(self, instruction):
-        """One `run_instruction` against a backend that only records what it
-        was handed, so the delivery seam is exercised end to end offline."""
-        seen = {}
-
-        class _Handle:
-            cancelled = False
-            status = 'completed'
-            final_text = ''
-            metadata = {}
-
-            def cancel(self, reason):
-                pass
-
-        class _Backend:
-            def start(self, request):
-                seen['instructions'] = request.developer_instructions
-                seen['trace'] = dict(request.trace_metadata or {})
-                return _Handle()
-
-        with mock.patch.object(agent_do, 'resolve_backend',
-                               lambda **kwargs: _Backend()), \
-                mock.patch.object(agent_do, 'wait_interruptibly',
-                                  lambda handle, *a, **k: _Handle()):
-            return agent_do.run_instruction(instruction), seen
-
     def test_the_matched_ids_reach_the_run_metadata(self):
         """Non-ledger metadata, always present: a later failure can then say
         whether guidance was absent, mismatched, or delivered and ignored."""
-        result, seen = self._run(_corpus()['positive'][0])
+        result, seen = _run(_corpus()['positive'][0])
         self.assertEqual(result['strategy_routes'], [ROUTE])
         self.assertEqual(seen['trace']['strategy_routes'], ROUTE)
         self.assertIn('Recorded strategy route', seen['instructions'])
@@ -354,7 +355,7 @@ class TestDelivery(unittest.TestCase):
         self.assertEqual(result['steps'], [])
 
     def test_a_non_matching_run_reports_an_empty_route_list(self):
-        result, seen = self._run('expand (x+1)^2')
+        result, seen = _run('expand (x+1)^2')
         self.assertEqual(result['strategy_routes'], [])
         self.assertNotIn('strategy_routes', seen['trace'])
         self.assertNotIn('Recorded strategy route', seen['instructions'])

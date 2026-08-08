@@ -145,51 +145,6 @@ def catalog_markdown(root=SKILL_ROOT, include_core=False):
     return '\n'.join(lines)
 
 
-def crossref_markdown(loaded=(), root=SKILL_ROOT):
-    """Index the subjects that are NOT loaded, from the registry itself.
-
-    A skill body describes only its own subject, so an agent standing in the
-    wrong one cannot tell whether a move exists elsewhere — it can only see
-    that the loaded skill has none, which reads as the task being impossible.
-    The always-on catalog carries each subject's one-line description, and a
-    description is too coarse to answer "does anything differentiate this
-    integral?"; the exact tactic summaries that do answer it are rendered only
-    once their owner is loaded.
-
-    Listing the unloaded subjects with those summaries keeps the question
-    answerable from wherever the agent is standing. It is generated from the
-    registry, so a new subject becomes discoverable from every other subject
-    the moment its tactics are registered — never through cross-references
-    hand-written into each skill, which is quadratic and unverifiable.
-
-    Names and summaries only, deliberately: exact call signatures still come
-    from loading the owning skill, so discovery never becomes authority.
-    """
-    skills = discover(root)
-    seen = {str(name) for name in loaded} | {'core'}
-    sections = []
-    for name in sorted(skills):
-        if name in seen:
-            continue
-        specs = tactic_registry.tactics(name)
-        if not specs:
-            continue
-        sections.append(f'### `{name}`')
-        sections.extend(f'- `{spec.name}` — {spec.summary}.' for spec in specs)
-        sections.append('')
-    if not sections:
-        return ''
-    return '\n'.join([
-        '## Other subjects not loaded',
-        '',
-        'A move missing from the loaded skill does not mean the task has no '
-        'move. If one of these fits, `load_skill` that subject and continue '
-        'there — crossing domains mid-derivation is normal and the ledger '
-        'chain carries across.',
-        '',
-    ] + sections).rstrip()
-
-
 def interface_markdown(name):
     specs = tactic_registry.tactics(name)
     if not specs:

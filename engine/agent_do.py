@@ -663,19 +663,12 @@ def make_api(session):
         except ValueError as exc:
             return f'Cannot load skill: {exc}'
 
-        def with_crossref(text):
-            # Answered from the registry after the load, so the index names
-            # exactly what is still unreached and shrinks as domains load.
-            index = tactic_skills.crossref_markdown(session.loaded_skills)
-            return text + ('\n\n' + index if index else '')
-
         if subject in session.loaded_skills:
-            return with_crossref(f'Skill {subject!r} is already loaded.')
+            return f'Skill {subject!r} is already loaded.'
         session.loaded_skills.add(subject)
         routed = ('' if subject == skill
                   else f' (resolved from {skill!r})')
-        return with_crossref(
-            f'Loaded skill {subject!r}{routed}.\n\n{content}')
+        return f'Loaded skill {subject!r}{routed}.\n\n{content}'
 
     def run_tactic(tactic: str, arguments: list[str]) -> str:
         """Run one tactic from a loaded skill and return its checked record.
