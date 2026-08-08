@@ -175,30 +175,49 @@ runs.
 
 ```text
 backend!             # show the effective backend and why it was selected
-backend! openrouter  # a shared OpenRouter key
-backend! codex       # your own ChatGPT subscription (experimental)
+backend! codex       # recommended — your own ChatGPT subscription (experimental)
+backend! openrouter  # fallback — an OpenRouter API key, billed per token
 backend! auto        # default: resolve from what is configured
 ```
 
-Both drive the *same* tool surface. Names, descriptions, schemas, and
-handlers come from one canonical definition, so the model sees an identical
-set of tactics whichever provider is running, and a parity test fails if the
-two adapters ever diverge. The trust boundary does not move either: the
-tactic registry, the independent oracle, and the ledger remain the only
-authority for a checked result.
+**Codex is the recommended path, and OpenRouter is the fallback.** The reason
+is not backend quality — the two are equivalent by construction. Both drive
+the *same* tool surface: names, descriptions, schemas, and handlers come from
+one canonical definition, so the model sees an identical set of tactics
+whichever provider is running, and a parity test fails if the two adapters
+ever diverge. The trust boundary does not move either; the tactic registry,
+the independent oracle, and the ledger remain the only authority for a checked
+result.
+
+What differs is **which models you will realistically run**, and that matters
+more here than in most agent tools.
+
+- **A weak model does not merely fail more often — it fails worse.** The
+  characteristic failure is not giving up; it is asserting a starting point and
+  then computing confidently past it. Every recorded step checks out, and the
+  conclusion is wrong because its premise was. That is the second failure mode
+  in the table above, and it is the expensive one: a refusal costs a retry,
+  while a green ledger over a mis-stated premise costs your trust in the
+  artifact. Read the premise line, whatever backend you use.
+- **A strong model on OpenRouter is not cheap.** Billing is per token on top of
+  whatever you already subscribe to, and a derivation is many turns — the
+  reduction-formula example below runs to roughly thirty checked steps.
+
+The Codex backend removes that second bill: it runs `do!` through the Codex
+app-server against your personal ChatGPT account, so the work draws on the
+Plus/Pro subscription you already have, under that plan's own quota and rate
+limits, with access to that account's strong models. There is no ToyMath-side
+key, no shared credential, and no per-token charge.
+
+**Reach for OpenRouter when** you have no ChatGPT subscription, when you need a
+specific model that account does not offer, or when you are running headless or
+in CI where an interactive sign-in is impractical.
 
 A run **never fails over**. A Codex rate limit will not silently create
 OpenRouter charges, and an OpenRouter outage will not silently consume a
 Codex allowance. Switching providers is always an explicit act.
 
-### No OpenRouter account? Use the one you already pay for
-
-The OpenRouter backend needs an API key with credits — usage is billed per
-token on top of whatever you already subscribe to. The **Codex backend
-removes that second bill**: it runs `do!` through the Codex app-server against
-your personal ChatGPT account, so the work draws on the Plus/Pro subscription
-you already have, under that plan's own quota and rate limits. There is no
-ToyMath-side key, no shared credential, and no per-token charge.
+### Setting up the recommended path
 
 ```bash
 uv pip install ".[codex]"      # pins the Codex runtime ToyMath was validated against
@@ -265,14 +284,15 @@ Plain math cells work with no credentials at all. `do!` and prompt commands
 need an agent backend — pick one:
 
 ```bash
-# A: OpenRouter — an API key with credits, billed per token
-echo 'OPEN_ROUTER=sk-or-...' >> .env
-
-# B: your own ChatGPT subscription — no OpenRouter account needed
+# A (recommended): your own ChatGPT subscription — no per-token bill
 uv pip install ".[codex]"     # then run `login!` in a notebook cell
+
+# B (fallback): OpenRouter — an API key with credits, billed per token
+echo 'OPEN_ROUTER=sk-or-...' >> .env
 ```
 
-See [Agent backends](#agent-backends) for what each one costs and contains.
+See [Agent backends](#agent-backends) for what each one costs and contains,
+and why the model you end up running matters more than the provider.
 
 ## Read more
 
@@ -285,8 +305,9 @@ See [Agent backends](#agent-backends) for what each one costs and contains.
 - [Notation graph](docs/NOTATION.md) — DAG representation and traversal
 - [Developer guide](AGENTS.md) — classic engine and extension details
 
-Run the offline test suite with `pytest`. Live OpenRouter and sandbox probes
-are opt-in; the commands are documented in the project overview.
+Run the offline test suite with `pytest`. Live provider probes (OpenRouter and
+Codex have separate opt-in switches) and sandbox probes are off by default; the
+commands are documented in the project overview.
 
 ## Environment variables
 
@@ -312,6 +333,12 @@ this notebook → `TOYMATH_AGENT_BACKEND` → the OpenAI-compatible backend if
 `TOYMATH_OPENAI_BASE_URL` or `OPEN_ROUTER` is set → Codex if a managed ChatGPT
 account is signed in. If nothing is configured, the cell says so instead of
 guessing.
+
+Note that this order predates the recommendation above: with **both**
+configured, `auto` selects OpenRouter and starts billing per token. If you keep
+an `OPEN_ROUTER` key around as a fallback, make the recommended path explicit —
+`backend! codex` in the notebook, or `TOYMATH_AGENT_BACKEND=codex` in `.env` —
+rather than relying on `auto`.
 
 Running a local model, for example, is two variables and a `model!`:
 
