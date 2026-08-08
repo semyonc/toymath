@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tests for the agent-scoped verified-derivation primitives."""
+import math
 import os
 import json
 import tempfile
@@ -719,6 +720,125 @@ class TestMatchCoefficients(unittest.TestCase):
             self.assertIn(msg, r['error'], expr)
 
 
+class TestMatchCoefficientsOverAnAtom(unittest.TestCase):
+    # gen 89, externally triggered: a live run on the
+    # `\int dx/(a+b\cos x)^n` reduction cell could not match in `\cos x`
+    # ("both sides must be polynomials in \cos x: operator symbol \cos"), so
+    # the agent HAND-TYPED the identity in a fresh variable. That retyped
+    # identity is a premise no step derived, and the whole coefficient system
+    # then rested on it. `collect` had grouped by an opaque atom since gen 7;
+    # the two sibling tactics simply disagreed about what a matching variable
+    # may be.
+
+    LIVE = (r'1=A\cos x(a+b\cos x)+Ab(n-1)(1-\cos^2x)'
+            r'+B(a+b\cos x)+C(a+b\cos x)^2')
+
+    def test_the_live_identity_matches_in_cos_x(self):
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['result'],
+                         '0 = -Abn+Cb^{2}+2Ab, 0 = 2Cab+Aa+Bb, '
+                         '1 = Abn+Ca^{2}-Ab+Ba')
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_the_atom_result_is_a_system_assemble_can_consume(self):
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        sym, notation = P.parse_latex(r['result'])
+        self.assertIsNotNone(notation.getf(sym, Notation.C_LIST))
+
+    def test_the_recorded_variable_is_the_agents_spelling(self):
+        # the internal atom name must never reach the ledger
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertEqual(r['matched_in'], '\\cos x')
+        self.assertNotIn('zz#', r['result'])
+
+    def test_a_powered_head_counts_as_the_atom_squared(self):
+        # `1-\cos^2x` in the live identity is the atom SQUARED, not a
+        # separate object; that is what makes the degree 2
+        r = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertEqual(r['powers'], [2, 1, 0])
+
+    def test_the_oracle_leg_catches_a_corrupted_atom_coefficient(self):
+        """The risky half. The oracle cannot SET `\\cos x` — it has to draw
+        `x` and evaluate the atom to discover where the sample landed. If it
+        instead bound the sample to a variable named `\\cos x`, every point
+        would share one value of the atom and the recovery would be
+        meaningless."""
+        original = Equations._coefficient_buckets
+
+        def corrupt(poly, var):
+            buckets = original(poly, var)
+            if 1 in buckets:
+                buckets[1] = Poly.const(999)
+            return buckets
+
+        Equations._coefficient_buckets = corrupt
+        try:
+            r = Equations.match_coefficients(self.LIVE, '\\cos x')
+            self.assertEqual(r['check']['status'], 'disagree')
+        finally:
+            Equations._coefficient_buckets = original
+
+    def test_a_true_atom_identity_is_never_accused(self):
+        # a `disagree` bars the step from the ledger for good, so the leg
+        # that samples an atom must not manufacture one out of conditioning
+        for expr, var in (
+                (self.LIVE, '\\cos x'),
+                (r'A(\sin x)^2+B\sin x+C = 3(\sin x)^2-\sin x', '\\sin x'),
+                (r'1 = A(1-\cos x)+B(1+\cos x)', '\\cos x')):
+            r = Equations.match_coefficients(expr, var)
+            self.assertTrue(r['ok'], r.get('error'))
+            self.assertEqual(r['check']['status'], 'agree', expr)
+
+    def test_refuses_when_the_atom_variable_also_occurs_outside_it(self):
+        """Equating powers of `\\cos x` says the identity holds as that atom
+        varies freely. A bare `x`, or a second atom in the same variable,
+        makes the powers dependent — so the matching would state something
+        false. This is the mathematics, not an oracle limitation."""
+        for expr, offender in (
+                (r'A\cos x + x = B\cos x', 'x'),
+                (r'A\cos x + \sin x = B\cos x', '\\sin x')):
+            r = Equations.match_coefficients(expr, '\\cos x')
+            self.assertFalse(r['ok'], expr)
+            self.assertIn('not independent', r['error'])
+            self.assertIn(offender, r['error'])
+
+    def test_a_coefficient_carrying_another_atom_is_written_back(self):
+        # an unrelated atom may sit INSIDE a coefficient; it must be spelled
+        # back out, and the oracle must evaluate the real subexpression
+        r = Equations.match_coefficients(
+            r'A\sin y\cos x + B = 3\sin y \cos x - 1', '\\cos x')
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertIn('\\sin y', r['result'])
+        self.assertNotIn('zz#', r['result'])
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_naming_an_absent_atom_is_refused_not_invented(self):
+        r = Equations.match_coefficients(r'A\cos x = B\cos x', '\\tan x')
+        self.assertFalse(r['ok'])
+        self.assertIn('does not occur', r['error'])
+
+    def test_the_plain_variable_path_is_unchanged(self):
+        # verdict identity: the rational-fragment case must not acquire the
+        # atom machinery's sampling or its label
+        r = Equations.match_coefficients('A x^2 + B x + C = 2x^2 + 5', 'x')
+        self.assertEqual(r['check']['status'], 'agree')
+        self.assertEqual(r['check']['method'],
+                         'coefficients recovered by evaluation')
+
+    def test_the_two_sibling_tactics_read_one_matching_variable(self):
+        """The defect was a CONSISTENCY GAP, so pin it as one: `collect` and
+        `match_coefficients` now resolve a named matching variable through
+        the same `atom_ratfuncs`, and the coefficients one reports are the
+        ones the other groups by."""
+        grouped = Core.collect(self.LIVE, '\\cos x')
+        matched = Equations.match_coefficients(self.LIVE, '\\cos x')
+        self.assertTrue(grouped['ok'] and matched['ok'])
+        for coefficient in ('-Abn+Cb^{2}+2Ab', '2Cab+Aa+Bb'):
+            self.assertIn(coefficient, grouped['result'])
+            self.assertIn(coefficient, matched['result'])
+
+
 class TestDomainNarrowingAssumptions(unittest.TestCase):
     # gen 60: cancelling a factor drops the points where it vanished. The
     # canonical leg decides equality as rational functions and the numeric
@@ -867,6 +987,21 @@ class TestDifferentiate(unittest.TestCase):
 
     def test_chain_ln(self):
         self.check('\\ln(x^2 + 1)')
+
+    def test_minus_over_minus_led_sum_negates_every_term(self):
+        """A minus over a sum whose printed first term is negative: _d_neg
+        must decide sum-ness before collapsing a leading '-', or only the
+        first term flips sign (live: a correct partial-fraction run was
+        refused at its final assembly by the re-differentiation)."""
+        r = self.check(r'- \left( \left( - \ln\left((1-x)\right) \right)'
+                       r' + \ln\left((1+x)\right) \right)')
+        self.assertEqual(
+            Core.equal_exprs(r['result'], '\\frac{2}{x^{2}-1}')['verdict'],
+            'yes')
+
+    def test_double_negation_of_a_single_term_still_collapses(self):
+        r = self.check(r'- \left( - x^{2} \right)')
+        self.assertEqual(r['result'], '2x')
 
     def test_func_power(self):
         self.check('\\sin^2 x')
@@ -1302,6 +1437,20 @@ class TestPointsAssemble(unittest.TestCase):
                                        {'root': '1', 'value': '-2'}])
         self.assertEqual(r['check']['status'], 'agree')
 
+    def test_a_root_may_be_written_either_way_round(self):
+        # same side-order tolerance as an assembled assignment, and
+        # unambiguous here because the variable is named
+        flipped = Equations.points_assemble('x^3-3x', 'x',
+                                            r'-1 = x \lor x=1', ['2', '-2'])
+        self.assertTrue(flipped['ok'], flipped.get('error'))
+        self.assertEqual(flipped['points'], [{'root': '-1', 'value': '2'},
+                                             {'root': '1', 'value': '-2'}])
+        self.assertEqual(flipped['check']['status'], 'agree')
+        naming_neither = Equations.points_assemble(
+            'x^3-3x', 'x', r'y=-1 \lor x=1', ['2', '-2'])
+        self.assertFalse(naming_neither['ok'])
+        self.assertIn("must name 'x' on one side", naming_neither['error'])
+
     def test_result_is_a_typed_collection_of_pairs(self):
         r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
                                       ['2', '-2'])
@@ -1398,6 +1547,42 @@ class TestSystemAssemble(unittest.TestCase):
         self.assertTrue(P.same_expression(
             r['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
 
+    def test_an_assignment_may_be_written_either_way_round(self):
+        # LIVE: a 26-step reduction-formula derivation ended with every
+        # coefficient isolated as "value = A", because the engine's OWN
+        # isolation chain produces that order, and the assembly refused it.
+        flipped = Equations.system_assemble(
+            ANSATZ, [r'\frac{1}{2} = A', r'-\frac{1}{2} = B'])
+        self.assertTrue(flipped['ok'], flipped.get('error'))
+        self.assertEqual(flipped['check']['status'], 'agree')
+        # read identically to the canonical order, and STATED canonically
+        canonical = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertEqual(flipped['unknowns'], canonical['unknowns'])
+        self.assertEqual(flipped['result'], canonical['result'])
+        mixed = Equations.system_assemble(
+            ANSATZ, [r'\frac{1}{2} = A', r'B = -\frac{1}{2}'])
+        self.assertTrue(mixed['ok'], mixed.get('error'))
+
+    def test_the_producer_of_assignments_feeds_the_consumer(self):
+        # match_coefficients was built for system_assemble to consume, and
+        # emits value-first ("0 = A"); the two must agree on orientation.
+        target = '1=A t^2+B t+C'
+        produced = Equations.match_coefficients(target, 't')
+        self.assertTrue(produced['ok'], produced.get('error'))
+        pieces = [p.strip() for p in produced['result'].split(',')]
+        self.assertTrue(any(p.startswith('0 =') or p.startswith('1 =')
+                            for p in pieces), pieces)
+        r = Equations.system_assemble(target, pieces)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_an_ambiguous_assignment_keeps_the_left_reading(self):
+        # both sides are plain symbols and no target is in scope in the
+        # shared reader, so the historical left-hand reading must win
+        pairs = Equations.assignment_pairs(['A = B'])
+        self.assertEqual(pairs, [{'unknown': 'A', 'value': 'B'}])
+
     def test_result_is_a_system_of_equalities(self):
         r = Equations.system_assemble('x+y=3, x-y=1', ['x=2', 'y=1'])
         self.assertTrue(r['ok'], r.get('error'))
@@ -1440,7 +1625,7 @@ class TestSystemAssemble(unittest.TestCase):
         compound = Equations.system_assemble(
             ANSATZ, [r'2A = 1', r'B = -\frac{1}{2}'])
         self.assertFalse(compound['ok'])
-        self.assertIn('plain unknown on the left', compound['error'])
+        self.assertIn('plain unknown on one side', compound['error'])
         twice = Equations.system_assemble(
             ANSATZ, [r'A = \frac{1}{2}', r'A = \frac{1}{2}'])
         self.assertFalse(twice['ok'])
@@ -1823,6 +2008,38 @@ class TestParsingEdges(unittest.TestCase):
         self.assertFalse(P.same_expression('a \\cdot b', 'a + b'))
         sym, n = P.parse_latex('1 \\cdot 2')
         self.assertIn('\\cdot', P.write_latex(sym, n))
+
+    def test_spacing_tokens_are_presentation_only_in_normal_forms(self):
+        # \, \; \quad are the same class as the \cdot prop: every reader
+        # convention filters them, so comparison must too (live: an int!
+        # chain root spelled `\int ... \, dt` could not cover its own
+        # goal spelled `\int ... dt`, and the verified FTC result was
+        # refused at admission)
+        self.assertTrue(P.same_expression('2 \\, x', '2 x'))
+        self.assertTrue(P.same_expression('x \\; + 1', 'x + 1'))
+        self.assertTrue(P.same_expression(
+            '\\int x^{2} \\, dx', '\\int x^{2} dx'))
+        self.assertTrue(P.same_expression(
+            '\\frac{d}{dx}\\int_{0}^{x^{2}}\\sqrt{1+t^{2}}\\,dt',
+            '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'))
+        # the gen-68 capture boundary must survive style-blindness
+        self.assertFalse(P.same_expression('\\cos(x) y', '\\cos(x y)'))
+        self.assertTrue(P.same_expression('\\cos x \\, y', '\\cos x y'))
+
+    def test_leibniz_chain_root_covers_the_rendered_goal(self):
+        # the live trace's exact admission shape: the agent fed the full
+        # Leibniz spelling verbatim (with the textbook \,) and the goal
+        # was the instruction's rendered spelling (without); the chain
+        # must cover
+        from expr_commands import _chains_to_goal
+        rec = Differentiation.differentiate(
+            '\\frac{d}{dx}\\int_{0}^{x^{2}}\\sqrt{1+t^{2}}\\,dt', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        book = ledger_module.Ledger()
+        step = book.record(rec)
+        self.assertTrue(_chains_to_goal(
+            book.steps, step['id'],
+            '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'))
 
     def test_display_latex_prettifies_only_structural_product_stars(self):
         cases = {
@@ -2986,6 +3203,80 @@ class TestDisagreementNeedsEvidence(unittest.TestCase):
             P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
 
 
+class TestAssembledAnswerNeedsEvidenceToo(unittest.TestCase):
+    # The same discipline on the leg that checks an ASSEMBLED answer, where
+    # the two values come from a pipeline (sample point -> each unknown's
+    # recorded value -> the relation) rather than one expression apiece.
+    # LIVE: the reduction-formula ansatz below is the coefficient identity a
+    # 26-step derivation produced; its own correct A, B and C were accused
+    # of not satisfying it. The sampler draws from ~150 small rationals
+    # jittered by <1e-3, so two variables landing on the same rational -
+    # 1.6% of pairs, and draw #2 of this tactic's fixed seed - differ only
+    # by that jitter, and the assembled values' expanded (a^2-b^2)^2(n-1)^2
+    # denominator loses 1e-7 of relative precision there.
+
+    TARGET = '1=A t(a+b t)+A(n-1)b(1-t^2)+B(a+b t)+C(a+b t)^2'
+    DEN = ('a^{4}n^{2}-2a^{2}b^{2}n^{2}+b^{4}n^{2}-2a^{4}n+4a^{2}b^{2}n'
+           '-2b^{4}n+a^{4}-2a^{2}b^{2}+b^{4}')
+    A = r'\frac {-b} {a^{2}n-b^{2}n-a^{2}+b^{2}}'
+    B = (r'\frac {2a^{3}n^{2}-2ab^{2}n^{2}-5a^{3}n+5ab^{2}n+3a^{3}-3ab^{2}} '
+         '{%s}' % DEN)
+    C = (r'\frac {-a^{2}n^{2}+b^{2}n^{2}+3a^{2}n-3b^{2}n-2a^{2}+2b^{2}} '
+         '{%s}' % DEN)
+
+    def assemble(self, a=None, b=None, c=None):
+        return Equations.system_assemble(
+            self.TARGET,
+            [f'{a or self.A} = A', f'{b or self.B} = B',
+             f'{c or self.C} = C'])
+
+    def test_the_derivations_own_coefficients_are_not_accused(self):
+        r = self.assemble()
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_the_guard_is_not_a_hiding_place(self):
+        # every one of these is WRONG and sits in the same cancelling shape
+        for tag, a, b, c in [
+                ('A sign', self.A.replace('{-b}', '{b}'), self.B, self.C),
+                ('A denom', self.A.replace('a^{2}n', 'a^{2}(n+1)'),
+                 self.B, self.C),
+                ('B coeff', self.A, self.B.replace('+3a^{3}', '+4a^{3}'),
+                 self.C),
+                ('B scale', self.A, self.B.replace('-5a^{3}n', '-6a^{3}n'),
+                 self.C),
+                ('B/C swapped', self.A, self.C, self.B),
+                ('C nudged', self.A, self.B, '1.0001' + self.C)]:
+            pairs = Equations.assignment_pairs(
+                [f'{a} = A', f'{b} = B', f'{c} = C'])
+            self.assertEqual(
+                Equations._system_check([self.TARGET], pairs)['status'],
+                'disagree', tag)
+
+    def test_closed_data_still_refuses_without_anything_to_nudge(self):
+        # nothing is sampled, so there is no noise to measure and a wrong
+        # value must still be caught
+        wrong = Equations.system_assemble('x+2y=7', ['x = 4', 'y = 2'])
+        self.assertFalse(wrong['ok'])
+        right = Equations.system_assemble('x+2y=7', ['3 = x', 'y = 2'])
+        self.assertTrue(right['ok'], right.get('error'))
+        self.assertEqual(right['check']['status'], 'agree')
+
+    def test_a_gap_the_pipeline_cannot_resolve_is_undecided(self):
+        # a quiet pipeline: a one-ULP nudge barely moves it, so a gap of 4
+        # is real evidence
+        def quiet(point):
+            return 1.0, 5.0 + (point['x'] - 2.0)
+        self.assertTrue(P._composite_disagreement_resolves(
+            quiet, {'x': 2.0}, 1.0, 5.0))
+        # the same gap inside a pipeline that swings by 0.44 per ULP is
+        # not evidence of anything
+        def noisy(point):
+            return 1.0, 1.05 + (point['x'] - 2.0) * 1e15
+        self.assertFalse(P._composite_disagreement_resolves(
+            noisy, {'x': 2.0}, 1.0, 1.05))
+
+
 class TestAbsoluteValue(unittest.TestCase):
     # gen 12: |...| was parsed as a transparent bracket, so BOTH the
     # symbolic path AND the oracle silently read |x| as x — a soundness
@@ -3383,6 +3674,51 @@ class TestIntegrateAssemble(unittest.TestCase):
         r = Integration.integrate_assemble('\\int (x+x^2) \\, d x', 'x', ['x^2/2'])
         self.assertFalse(r['ok'])
         self.assertIn('expected 2', r['error'])
+
+    def test_minus_led_sum_pieces_assemble(self):
+        """The live cell shape: antiderivative pieces that are minus-led
+        sums under assembly signs — refused before the _d_neg ordering fix
+        because the final re-differentiation lost every sign after the
+        first term."""
+        expr = ('\\int \\left(\\frac{1}{8}\\left(\\frac{1}{(1-x)^{3}}'
+                '+\\frac{1}{(1+x)^{3}}\\right)-\\frac{1}{16}'
+                '\\left(\\frac{1}{(1-x)^{2}}+\\frac{1}{(1+x)^{2}}\\right)'
+                '-\\frac{1}{16}\\left(\\frac{1}{1-x}+\\frac{1}{1+x}\\right)'
+                '\\right) \\, d x')
+        ants = [
+            '\\left ( \\frac {\\frac {1} {16}} {(1-x)^{2}}\\right )'
+            '+ \\left (- \\frac {\\frac {1} {16}} {(1+x)^{2}}\\right )',
+            '\\left ( \\frac {\\frac {1} {16}} {1-x}\\right )'
+            '+ \\left (- \\frac {\\frac {1} {16}} {1+x}\\right )',
+            '\\left (- \\frac {1} {16}\\ln\\left ((1-x) \\right ) \\right )'
+            '+ \\left ( \\frac {1} {16}\\ln\\left ((1+x) \\right ) \\right )',
+        ]
+        r = Integration.integrate_assemble(expr, 'x', ants)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_refuses_a_derivative_that_failed_its_own_check(self):
+        """An internally-consumed record with a disagreeing check is never
+        truth: the final re-differentiation must refuse naming the engine,
+        instead of comparing a wrong derivative downstream and blaming the
+        assembly."""
+        from unittest import mock
+        real = Differentiation.differentiate
+
+        def tampered(expr, var):
+            rec = real(expr, var)
+            if rec.get('ok') and expr.rstrip().endswith('+ C'):
+                rec = dict(rec)
+                rec['check'] = {'status': 'disagree'}
+            return rec
+
+        with mock.patch.object(Integration, 'differentiate',
+                               side_effect=tampered):
+            r = Integration.integrate_assemble(
+                '\\int (x - \\sin x) \\, d x', 'x',
+                ['\\frac{1}{2}x^2', '-\\cos x'])
+        self.assertFalse(r['ok'])
+        self.assertIn('own numeric spot-check', r['error'])
 
 
 class TestPartialFractionsIntegral(unittest.TestCase):
@@ -4864,13 +5200,24 @@ class TestLimitFromSides(unittest.TestCase):
         self.assertIn('contradicts', rec['error'])
 
     def test_unconverged_oracle_defers_to_premises(self):
-        # sampling cannot converge on this oscillating (true) limit; the
+        # an INDEFINITE integral atom has no bounds for the quadrature
+        # evaluator (definite bodies evaluate since gen 77), so the
         # record is exact-by-theorem and only the registry handlers
         # (recorded premises) can admit it
         rec = Limits.limit_from_sides(
-            '\\lim_{x \\to 0} x \\sin\\frac{1}{x}', '0')
+            '\\lim_{x \\to 0} \\left(x + \\int t \\, dt\\right)',
+            '\\int t \\, dt')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertEqual(rec['check']['status'], 'exact')
+
+    def test_oscillating_decay_now_concurs(self):
+        # the decade-spaced approach ladder reaches deep enough that the
+        # x-amplitude bound itself pins x sin(1/x) below tolerance — the
+        # oracle now concurs instead of deferring
+        rec = Limits.limit_from_sides(
+            '\\lim_{x \\to 0} x \\sin\\frac{1}{x}', '0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
 
 
 class TestEllipsisClaim(unittest.TestCase):
@@ -5080,10 +5427,15 @@ class TestFractionalPowerSteering(unittest.TestCase):
         # steering must be truthful: the power rule really does handle this
         self.assertIn('rational literal exponents', rec['error'])
 
-    def test_symbolic_exponent_keeps_its_name(self):
+    def test_symbolic_exponent_now_integrates(self):
+        # gen 81: a var-free symbolic exponent has its own power rule,
+        # recording the exponent != -1 and var > 0
         rec = Integration.integrate_power_rule('\\int x^{n} \\, d x', 'x')
-        self.assertFalse(rec['ok'])
-        self.assertIn('non-integer exponent n', rec['error'])
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('\\ne -1', texts)
+        self.assertIn('x > 0', texts)
 
 
 class TestSubstituteZeroFolding(unittest.TestCase):
@@ -5547,9 +5899,219 @@ class TestNumericDefiniteCheck(unittest.TestCase):
         self.assertEqual(check['status'], 'agree')
         self.assertGreater(check['samples'], 1)
 
-    def test_symbolic_bounds_are_skipped(self):
+    def test_symbolic_bounds_are_sampled(self):
+        # a symbolic bound is a parameter: the identity in (a, b) is
+        # checked at sampled bound values, no longer skipped
         check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
                                          '\\frac{b^2-a^2}{2}')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_symbolic_bound_lie_is_refused(self):
+        check = P.numeric_definite_check('\\int_a^b x \\, dx', 'x',
+                                         '\\frac{b^2-a^2}{3}')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_break_under_a_sampled_bound_is_a_bad_draw(self):
+        # \int_0^t of the endpoint-singular integrand: draws with t > 1
+        # break the domain and must be skipped, not reported as a
+        # witness — the surviving draws agree
+        check = P.numeric_definite_check(
+            '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx', 'x',
+            '\\left(-2 \\arctan\\sqrt{1-t}\\right) - '
+            '\\left(-2 \\arctan\\sqrt{1}\\right)')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_unevaluable_result_still_hunts_the_break(self):
+        # the divergent classic: F(b)-F(a) contains ln(0), which is not
+        # evaluable — the check must still find the interior/endpoint
+        # break instead of skipping on the result
+        check = P.numeric_definite_check('\\int_0^1 \\frac{1}{x} \\, dx',
+                                         'x', '\\ln(1) - \\ln(0)')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('improper', check['reason'])
+
+
+class TestDerivativeOperatorParts(unittest.TestCase):
+    """The Leibniz-prefix reading convention: consulted only at the
+    differentiate boundary, so nothing else re-reads a fraction."""
+
+    def test_prefix_form(self):
+        self.assertEqual(
+            P.derivative_operator_parts('\\frac{d}{d x} (x^2+1)'),
+            ('x', 'x^{2}+1'))
+
+    def test_adjacent_dx_spelling(self):
+        var, operand = P.derivative_operator_parts('\\frac{d}{dx} x^3')
+        self.assertEqual(var, 'x')
+        self.assertEqual(operand, 'x^{3}')
+
+    def test_operand_spanning_several_factors(self):
+        var, operand = P.derivative_operator_parts(
+            '\\frac{d}{d u} u \\sin u')
+        self.assertEqual(var, 'u')
+        self.assertEqual(
+            Core.equal_exprs(operand, 'u \\sin u')['verdict'], 'yes')
+
+    def test_differential_in_numerator_form(self):
+        var, operand = P.derivative_operator_parts('\\frac{d y}{d x}')
+        self.assertEqual((var, operand), ('x', 'y'))
+
+    def test_numerator_operand_with_trailing_factors_is_ambiguous(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('\\frac{d y}{d x} z'))
+
+    def test_macro_named_variable(self):
+        var, _ = P.derivative_operator_parts(
+            '\\frac{d}{d \\alpha} \\alpha^2')
+        self.assertEqual(var, '\\alpha')
+
+    def test_bare_operator_without_operand_is_none(self):
+        self.assertIsNone(P.derivative_operator_parts('\\frac{d}{d x}'))
+
+    def test_ordinary_fraction_is_none(self):
+        self.assertIsNone(P.derivative_operator_parts('\\frac{a}{b} x'))
+        self.assertIsNone(P.derivative_operator_parts('\\frac{d}{b} x'))
+        self.assertIsNone(P.derivative_operator_parts('\\frac{a}{d x} x'))
+
+    def test_higher_order_operator_is_not_misread(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('\\frac{d^2}{d x^2} x^3'))
+
+    def test_fraction_not_in_prefix_position_is_none(self):
+        self.assertIsNone(
+            P.derivative_operator_parts('y \\frac{d}{d x} x'))
+
+
+class TestDifferentiateDefiniteIntegral(unittest.TestCase):
+    """The FTC bound rule as a differentiate branch: d/dx of a
+    variable-bound definite integral, checked by quadrature plus a
+    central difference."""
+
+    ASK = '\\int_0^{x^2} \\sqrt{1+t^2} d t'
+
+    def test_variable_upper_bound_closes(self):
+        rec = Differentiation.differentiate(self.ASK, 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['check']['method'],
+                         'quadrature central-difference')
+        self.assertEqual(rec['method'], 'ftc')
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+
+    def test_leibniz_spelling_names_its_own_variable(self):
+        rec = Differentiation.differentiate(
+            '\\frac{d}{d x} ' + self.ASK, None)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['args']['var'], 'x')
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+        # the record's input stays the typed spelling
+        self.assertIn('\\frac{d}{d x}', rec['input'])
+
+    def test_leibniz_variable_mismatch_refuses(self):
+        rec = Differentiation.differentiate('\\frac{d}{d y} y^2', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('d/dy', rec['error'])
+
+    def test_both_bounds_variable(self):
+        rec = Differentiation.differentiate(
+            '\\int_{x}^{x^2} t^3 d t', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(
+            Core.equal_exprs(rec['result'],
+                             '2 x^{7} - x^{3}')['verdict'], 'yes')
+
+    def test_constant_bounds_differentiate_to_zero(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^1 \\sqrt{1+t^2} d t', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '0')
+
+    def test_continuity_is_recorded_not_proved(self):
+        rec = Differentiation.differentiate(self.ASK, 'x')
+        texts = [a['text'] for a in rec['assumptions']]
+        self.assertTrue(any('continuous between 0 and x^{2}' in t
+                            for t in texts), texts)
+
+    def test_refuses_the_bound_variable(self):
+        rec = Differentiation.differentiate(self.ASK, 't')
+        self.assertFalse(rec['ok'])
+        self.assertIn('integration variable', rec['error'])
+
+    def test_refuses_differentiation_under_the_integral_sign(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^{x^2} x t \\, d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('under the integral sign', rec['error'])
+
+    def test_refuses_a_bound_containing_the_integration_variable(self):
+        rec = Differentiation.differentiate(
+            '\\int_0^{t} t^2 \\, d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bound', rec['error'])
+
+    def test_indefinite_integral_is_never_a_silent_constant(self):
+        # measured before the guard: the polyrat path atomized the
+        # integral and differentiated the atom to a silent, uncheckable 0
+        rec = Differentiation.differentiate('\\int t^2 d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('indefinite', rec['error'])
+
+    def test_rules_never_reach_across_the_integral_sign(self):
+        # measured before the guard: the product rule once returned
+        # `\int 2x dx + \int x^2 d` for this input
+        rec = Differentiation.differentiate('\\int x^2 d x', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('indefinite', rec['error'])
+
+    def test_embedded_definite_integral_names_the_route(self):
+        rec = Differentiation.differentiate(
+            'x + \\int_0^{x^2} \\sqrt{1+t^2} d t', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertIn('its own step', rec['error'])
+
+    def test_leibniz_prefix_on_a_plain_expression(self):
+        rec = Differentiation.differentiate(
+            '\\frac{d}{d x} (x^2+1)', None)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '2x')
+
+
+class TestFtcDerivativeCheck(unittest.TestCase):
+    """The independent leg: quadrature evaluates the integral as a
+    function, a central difference differentiates it, and a planted lie
+    must be refused with evidence."""
+
+    ASK = '\\int_0^{x^2} \\sqrt{1+t^2} d t'
+
+    def test_correct_derivative_agrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '2 x \\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'agree')
+
+    def test_missing_chain_factor_disagrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '\\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_corrupted_coefficient_disagrees(self):
+        check = Differentiation._ftc_derivative_check(
+            self.ASK, '2.001 x \\sqrt{x^{4}+1}', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_parameterized_bounds_sample_the_parameter(self):
+        check = Differentiation._ftc_derivative_check(
+            '\\int_{x}^{a x} t \\, d t', 'a^{2} x - x', 'x')
+        self.assertEqual(check['status'], 'agree')
+        check = Differentiation._ftc_derivative_check(
+            '\\int_{x}^{a x} t \\, d t', 'a^{2} x + x', 'x')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_not_an_integral_is_skipped(self):
+        check = Differentiation._ftc_derivative_check('x^2', '2x', 'x')
         self.assertEqual(check['status'], 'skipped')
 
 
@@ -5736,6 +6298,630 @@ class TestIntegrateDefiniteEndpointDoor(unittest.TestCase):
             '\\int_0^1 x^{2} \\, dx', 'x', '\\frac {1} {3}x^{3} + C')
         self.assertTrue(rec['ok'], rec.get('error'))
         self.assertNotIn('upper_limit', rec['args'])
+
+
+class TestIntegralBearingLimitBodies(unittest.TestCase):
+    """The approach oracle evaluates a variable-bound definite integral
+    by graded quadrature — a capability of the LIMITS oracle leg only,
+    so a limit ABOUT an integral is checkable while the integral's own
+    value still closes only through the integration tactics."""
+
+    TARGET = ('\\lim_{x \\to 0^{+}} x \\int_x^1 '
+              '\\frac{\\cos t}{t^2} d t')
+
+    def test_the_motivating_limit_certifies(self):
+        rec = Limits.limit_evaluate(self.TARGET, '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_wrong_value_is_refused_with_the_estimate(self):
+        rec = Limits.limit_evaluate(self.TARGET, '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_the_two_sided_spelling_stays_honestly_open(self):
+        # for x < 0 the integral crosses the non-integrable pole at 0,
+        # so the left approach cannot evaluate: refuse, never certify
+        rec = Limits.limit_evaluate(
+            '\\lim _{x \\rightarrow 0} x \\int_x^1 '
+            '\\frac{\\cos t}{t^2} d t', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('did not converge', rec['error'])
+
+    def test_lhopital_sees_the_form_through_the_integral(self):
+        # the form gate samples the integral numerator; the derivative
+        # of the numerator is gen 75's FTC bound rule
+        rec = Limits.limit_lhopital(
+            '\\lim_{x \\to 0^{+}} \\frac{\\int_x^1 '
+            '\\frac{\\cos t}{t^2} d t}{\\frac{1}{x}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['indeterminate_form'], 'infinity/infinity')
+        self.assertIn('\\cos', rec['result'])
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_frac_differential_spelling_evaluates(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} x \\int_x^1 '
+            '\\frac{\\cos t \\, d t}{t^2}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_at_infinity_integral_body(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} \\int_1^x \\frac{1}{t^2} d t', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_parameters_sample_through_the_integral(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} x \\int_x^1 \\frac{c}{t^2} d t', 'c')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_record_replays(self):
+        ledger = Ledger()
+        ledger.record(Limits.limit_evaluate(self.TARGET, '1'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_evaluator_declines_integral_free_and_indefinite_bodies(self):
+        s, n = P.parse_latex('x^2 + 1')
+        self.assertIsNone(P.definite_integral_evaluator(s, n))
+        s, n = P.parse_latex('x + \\int t \\, dt')
+        self.assertIsNone(P.definite_integral_evaluator(s, n))
+
+    def test_quadrature_refuses_a_domain_break(self):
+        fs, fn = P.parse_latex('\\frac{1}{t^{2}}')
+        with self.assertRaises(P.EvalError):
+            P._graded_quadrature(fs, fn, 't', -1.0, 1.0, {})
+
+    def test_general_equal_deliberately_does_not_gain_this(self):
+        # the boundary that keeps the door meaningful: equal? must not
+        # start deciding integral values numerically, or a sampled
+        # proposal could close a definite integral around
+        # integrate_definite/integrate_improper
+        rec = Core.equal_exprs('\\int_0^1 t^2 \\, dt', '\\frac{1}{3}')
+        self.assertEqual(rec['verdict'], 'unknown')
+
+
+class TestNumericImproperCheck(unittest.TestCase):
+    """The graded truncation-ladder quadrature leg: uniform Simpson to a
+    cut, then geometric slabs toward the singular bound, iterated Aitken
+    over the rung values, refusing only past its own measured residual."""
+
+    EX = '\\int_0^1 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx'
+
+    def test_certifies_the_definitional_value(self):
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '\\frac{\\pi}{2}')
+        self.assertEqual(check['status'], 'agree')
+        self.assertIn('truncation quadrature', check['method'])
+
+    def test_refuses_a_planted_lie(self):
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '\\frac{\\pi}{2} + 0.01')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_refuses_a_small_corruption(self):
+        # 0.05% above pi/2 — must clear the leg's own error bar
+        check = P.numeric_improper_check(self.EX, 'x', 'upper',
+                                         '1.5715817')
+        self.assertEqual(check['status'], 'disagree')
+
+    def test_divergent_ladder_is_never_evidence(self):
+        check = P.numeric_improper_check(
+            '\\int_0^1 \\frac{1}{x} \\, dx', 'x', 'lower', '5')
+        self.assertEqual(check['status'], 'skipped')
+        self.assertIn('never evidence of divergence', check['reason'])
+
+    def test_interior_break_is_a_witness(self):
+        # declared upper-singular, but the real break is at x = 0: the
+        # oriented probe walks the declared bound LAST, so the witness
+        # is never the declared singularity itself
+        check = P.numeric_improper_check(
+            '\\int_{-1}^{1} \\frac{1}{x^{2}} \\, dx', 'x', 'upper', '5')
+        self.assertEqual(check['status'], 'disagree')
+        self.assertIn('away from the declared improper bound',
+                      check['reason'])
+
+    def test_parameters_are_sampled(self):
+        check = P.numeric_improper_check(
+            '\\int_0^1 \\frac{c}{\\sqrt{1-x}} \\, dx', 'x', 'upper', '2c')
+        self.assertEqual(check['status'], 'agree')
+        self.assertGreater(check['samples'], 1)
+
+    def test_non_singular_integrand_still_certifies(self):
+        # the definitional reading is true of a proper integral too —
+        # the door must not manufacture a false refusal there
+        check = P.numeric_improper_check(
+            '\\int_0^1 x^{2} \\, dx', 'x', 'upper', '\\frac{1}{3}')
+        self.assertEqual(check['status'], 'agree')
+
+
+class TestIntegrateImproper(unittest.TestCase):
+    """The infinite-object door for integrals: an endpoint-singular
+    integral is read as the limit of its truncated integrals, closed
+    from a recorded truncated evaluation and a recorded one-sided
+    limit."""
+
+    EX = '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}'
+    TR = '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x'
+    G = ('\\left(-2 \\arctan\\sqrt{1-t}\\right) - '
+         '\\left(-2 \\arctan\\sqrt{1}\\right)')
+
+    def test_closes_the_endpoint_singular_integral(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '\\frac{\\pi}{2}')
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['singular'], 'upper')
+        self.assertEqual(rec['bound_var'], 't')
+
+    def test_reading_and_continuity_are_recorded_not_proved(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2}')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('definitional limit', texts)
+        self.assertIn('\\lim_{t \\to 1^{-}}', texts)
+        self.assertIn('continuous on [0, 1)', texts)
+
+    def test_lower_side_case(self):
+        rec = Integration.integrate_improper(
+            '\\int_0^1 \\frac{1}{\\sqrt{x}} \\, dx', 'x',
+            '\\int_s^1 \\frac{1}{\\sqrt{x}} \\, dx',
+            '2 - 2\\sqrt{s}', '2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['singular'], 'lower')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('continuous on (0, 1]', texts)
+
+    def test_a_wrong_value_is_refused_by_the_ladder(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{3}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_refuses_a_non_fresh_truncation_variable(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^x \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('must be fresh', rec['error'])
+
+    def test_infinite_upper_bound_closes(self):
+        # the infinite door (gen 78): the truncation point runs away
+        # instead of approaching a finite singularity
+        rec = Integration.integrate_improper(
+            '\\int_1^{\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^t \\frac{1}{x^{2}} \\, dx',
+            '1 - \\frac{1}{t}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['improper_kind'], 'infinite')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('infinite upper bound', texts)
+        self.assertIn('continuous on [1, \\infty)', texts)
+        self.assertIn('\\lim_{t \\to \\infty}', texts)
+
+    def test_plus_infinity_spelling_routes_to_the_infinite_door(self):
+        # \int_0^{+\infty}: the PLUS wrapper must read as infinity — it
+        # previously read as a finite symbol and the whole record
+        # admitted with a skipped check
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x^{2}} \\, dx',
+            '\\left(-\\frac{1}{s}\\right) - \\left(-\\frac{1}{1}\\right)',
+            '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['improper_kind'], 'infinite')
+
+    def test_infinite_wrong_value_is_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x^{2}} \\, dx',
+            '\\left(-\\frac{1}{s}\\right) - \\left(-\\frac{1}{1}\\right)',
+            '2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_infinite_lower_bound_closes(self):
+        rec = Integration.integrate_improper(
+            '\\int_{-\\infty}^0 e^{x} \\, d x', 'x',
+            '\\int_s^0 e^{x} \\, d x', 'e^{0} - e^{s}', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('continuous on (-\\infty, 0]', texts)
+        self.assertIn('\\lim_{s \\to -\\infty}', texts)
+
+    def test_divergent_infinite_ladder_never_certifies(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x} \\, dx', 'x',
+            '\\int_1^s \\frac{1}{x} \\, dx', '\\ln s - \\ln 1', '5')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'skipped')
+        self.assertIn('never evidence of divergence',
+                      rec['check']['reason'])
+
+    def test_both_infinite_bounds_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_{-\\infty}^{+\\infty} \\frac{1}{1+x^{2}} \\, dx', 'x',
+            '\\int_s^{+\\infty} \\frac{1}{1+x^{2}} \\, dx', 'g', '\\pi')
+        self.assertFalse(rec['ok'])
+        self.assertIn('both bounds are infinite', rec['error'])
+
+    def test_replacing_the_finite_bound_is_refused(self):
+        rec = Integration.integrate_improper(
+            '\\int_1^{+\\infty} \\frac{1}{x^{2}} \\, dx', 'x',
+            '\\int_s^{+\\infty} \\frac{1}{x^{2}} \\, dx',
+            '\\frac{1}{s}', '1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('must replace the infinite upper bound',
+                      rec['error'])
+
+    def test_hyperbolic_alias_spelling_closes_the_flagship(self):
+        # \operatorname{ch} normalizes to \cosh at the lexer, so the
+        # continental spelling and the canonical one are one expression
+        self.assertTrue(P.same_expression(
+            '\\operatorname{ch}^{n+1} x', '\\cosh^{n+1} x'))
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\operatorname{ch} x} \\, d x', 'x',
+            '\\sinh x', 'u', '\\frac{1}{1+u^{2}}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_u_free_constant_integrand_is_checked_not_refused(self):
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh^{2} x} \\, d x', 'x',
+            '\\tanh x', 'u', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        wrong = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh^{2} x} \\, d x', 'x',
+            '\\tanh x', 'u', '2')
+        self.assertFalse(wrong['ok'])
+        self.assertIn('does not equal the integrand', wrong['error'])
+
+    def test_overflow_saturates_only_inside_the_mode(self):
+        s, n = P.parse_latex('\\frac{1}{\\cosh^{3} x}')
+        with P._overflow_saturation():
+            self.assertEqual(P.numeric_eval(s, n, {'x': 300.0}), 0.0)
+        with self.assertRaises(OverflowError):
+            P.numeric_eval(s, n, {'x': 300.0})
+
+    def test_growth_bodies_still_refuse_at_infinity(self):
+        # saturation must never leak a false green: a genuinely growing
+        # body raises inside the guarded evaluator and the proposal is
+        # refused, exactly as before
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} e^{e^{x}}', '5')
+        self.assertFalse(rec['ok'])
+        rec = Limits.limit_evaluate(
+            '\\lim_{T \\to \\infty} \\int_0^T '
+            '\\frac{1}{\\cosh^{3} x} \\, d x', '\\frac{\\pi}{4}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_refuses_when_no_bound_is_replaced(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^1 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('fresh variable', rec['error'])
+
+    def test_refuses_a_literal_truncation_bound(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x',
+            '\\int_0^2 \\frac{1}{(2-x) \\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bare fresh variable', rec['error'])
+
+    def test_refuses_a_mismatched_integrand(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', '\\int_0^t \\frac{1}{\\sqrt{1-x}} \\, dx',
+            self.G, '\\frac{\\pi}{2}')
+        self.assertFalse(rec['ok'])
+        self.assertIn('integrand differs', rec['error'])
+
+    def test_refuses_the_truncation_variable_in_the_value(self):
+        rec = Integration.integrate_improper(
+            self.EX, 'x', self.TR, self.G, '\\frac{\\pi}{2} + t')
+        self.assertFalse(rec['ok'])
+        self.assertIn('truncation variable', rec['error'])
+
+
+class TestApplicationPowerReading(unittest.TestCase):
+    """`\\cos(x)^{2}` means the square of the APPLICATION: the parse
+    boundary normalizes head-then-bracketed-group-INDEX onto the
+    powered-head spelling, so no leg can read it as \\cos(x^2) — which
+    both legs coherently did (measured cosh(4) for cosh(2)^2), refusing
+    a live run's correct Pythagorean identity."""
+
+    def test_reads_as_the_square_of_the_application(self):
+        s, n = P.parse_latex('\\cosh(x)^2')
+        self.assertEqual(P.write_latex(s, n), '\\cosh^{2}(x)')
+        self.assertAlmostEqual(P.numeric_eval(s, n, {'x': 2.0}),
+                               math.cosh(2.0) ** 2)
+
+    def test_the_live_identity_now_holds(self):
+        self.assertEqual(Core.equal_exprs(
+            '\\frac{1}{\\cosh(x)^2}', '1-\\tanh(x)^2')['verdict'], 'yes')
+        self.assertEqual(Core.equal_exprs(
+            '\\cosh(x)^2', '\\cosh^{2} x')['verdict'], 'yes')
+
+    def test_provenance_equates_the_two_spellings(self):
+        import tactic_registry
+        self.assertTrue(tactic_registry._same_spelling(
+            '\\cosh(x)^2', '\\cosh^{2} x'))
+
+    def test_capture_boundary_is_untouched(self):
+        # the group still ends the argument: cos(x)^2 y = cos(x)^2 * y
+        s, n = P.parse_latex('\\cos(x)^2 y')
+        self.assertAlmostEqual(
+            P.numeric_eval(s, n, {'x': 2.0, 'y': 3.0}),
+            (math.cos(2.0) ** 2) * 3.0)
+
+    def test_a_bare_group_power_is_not_rewritten(self):
+        s, n = P.parse_latex('y (x)^2')
+        self.assertAlmostEqual(P.numeric_eval(s, n, {'x': 3.0, 'y': 2.0}),
+                               18.0)
+
+    def test_the_canonical_spelling_is_stable(self):
+        s, n = P.parse_latex('\\cosh(x)^2')
+        out = P.write_latex(s, n)
+        s2, n2 = P.parse_latex(out)
+        self.assertEqual(P.write_latex(s2, n2), out)
+
+
+class TestTablePeelSoundness(unittest.TestCase):
+    """A powered function head must never peel as a var-free constant:
+    a live run recorded \\frac{1}{\\cosh^{2}} \\ln(x) + C for
+    \\int \\frac{dx}{\\cosh^{2} x} with a skipped check."""
+
+    def test_the_false_record_is_gone(self):
+        rec = Integration.integrate_table('\\frac{1}{\\cosh^{2} x}', 'x')
+        self.assertFalse(rec['ok'])
+        self.assertNotIn('\\ln', rec.get('error', ''))
+        self.assertIn('no table rule', rec['error'])
+
+    def test_powered_head_product_refuses(self):
+        rec = Integration.integrate_table('\\cosh^{2} x', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_symbolic_constant_peels_still_close(self):
+        rec = Integration.integrate_table(
+            '\\frac{1}{a b\\left(v^{2}+1\\right)}', 'v')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_the_i1_route_closes(self):
+        # the exact route the live agent needed: u = tanh x
+        rec = Integration.integrate_substitute(
+            '\\int \\frac{1}{\\cosh(x)^2} \\, d x', 'x',
+            '\\tanh(x)', 'u', '1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestSymbolicPowerRule(unittest.TestCase):
+    """A var-free symbolic exponent has its own power rule — the wall
+    the live \\ln(1+x)/x^n run died on."""
+
+    def test_shapes(self):
+        for expr in ('x^{-n}', 'x^{1-n}', '\\frac{1}{x^n}', 'x^{p}'):
+            rec = Integration.integrate_power_rule(expr, 'x')
+            self.assertTrue(rec['ok'], (expr, rec.get('error')))
+            self.assertEqual(rec['check']['status'], 'agree', expr)
+
+    def test_literal_paths_unchanged(self):
+        rec = Integration.integrate_power_rule('x^{2}', 'x')
+        self.assertEqual(rec['check']['status'], 'agree')
+        rec = Integration.integrate_power_rule('x^{-1}', 'x')
+        self.assertFalse(rec['ok'])
+
+    def test_by_parts_takes_a_symbolic_dv(self):
+        rec = Integration.integrate_by_parts(
+            '\\frac{\\ln(1+x)}{x^n}', 'x', '\\ln(1+x)', 'x^{-n}')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('remaining_integral', rec)
+
+
+class TestLimitEvaluateAssuming(unittest.TestCase):
+    """The oracle samples parameters only inside the stated region —
+    and agreement needs evidence: Aitken extrapolates a GROWING ladder
+    to its fixed point 0 exactly, with an astronomical self-error."""
+
+    def test_domain_conditional_limit_certifies(self):
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} x^{1-n}', '0', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
+    def test_the_false_green_is_dead(self):
+        # before the evidence bar this CERTIFIED: est = 0 exactly with
+        # err ~ 1e15, and the agreement branch never looked at err
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to \\infty} x^{1-n}', '0', assuming='n < 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('was not confirmed', rec['error'])
+
+    def test_conjunction_constraints_restrict(self):
+        # 1 < n and n < 2 as one constraint: both members must bind
+        rec = Limits.limit_evaluate(
+            '\\lim_{x \\to 0^{+}} \\ln(1+x) \\frac{x^{1-n}}{1-n}', '0',
+            assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+
+class TestIntegrateKnown(unittest.TestCase):
+    """The named known-integral catalog (Euler reflection), checked by
+    doubly-improper quadrature at sampled parameters."""
+
+    def test_reflection_fact_certifies(self):
+        rec = Integration.integrate_known(
+            '\\int_0^{+\\infty} \\frac{x^{s-1}}{1+x} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('> 0', texts)
+        self.assertIn('< 1', texts)
+
+    def test_a_riding_var_free_coefficient_is_carried(self):
+        rec = Integration.integrate_known(
+            '\\int_0^{+\\infty} \\frac {x^{(-n)+1}} {(-n)+1} '
+            '\\frac {1} {x+1} \\, d x', 'x')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertIn('\\frac{1}{(-n)+1}', rec['result'])
+
+    def test_unknown_shapes_refuse(self):
+        for expr in (
+                '\\int_0^{+\\infty} \\frac{x^{s-1}}{2+x} \\, d x',
+                '\\int_1^{+\\infty} \\frac{x^{s-1}}{1+x} \\, d x',
+                '\\int_0^{+\\infty} \\frac{\\ln x}{1+x} \\, d x'):
+            rec = Integration.integrate_known(expr, 'x')
+            self.assertFalse(rec['ok'], expr)
+
+
+class TestIntegrateByPartsDefinite(unittest.TestCase):
+    """By parts over a definite/improper interval from recorded pieces,
+    checked against the original integral by doubly-improper
+    quadrature at sampled parameters."""
+
+    EX = '\\int_0^{+\\infty} \\frac{\\ln (1+x)}{x^n} d x'
+    V = '\\frac {x^{(-n)+1}} {(-n)+1}'
+    REM = ('\\frac{1}{(-n)+1} \\frac{\\pi}{\\sin\\left(\\pi '
+           '\\left(((-n)+1)+1\\right)\\right)}')
+
+    def test_the_live_integral_assembles(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, '0', '0',
+            self.REM, assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('evidence, not proof', texts)
+
+    def test_a_wrong_remaining_value_is_refused_by_the_check(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, '0', '0',
+            '\\frac{\\pi}{2}', assuming='1 \\lt n \\land n \\lt 2')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_gates(self):
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', 'x^{7}', '0', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('not an antiderivative', rec['error'])
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n-1}', self.V, '0', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('u * dv', rec['error'])
+        rec = Integration.integrate_by_parts_definite(
+            self.EX, 'x', '\\ln(1+x)', 'x^{-n}', self.V, 'x', '0',
+            self.REM)
+        self.assertFalse(rec['ok'])
+        self.assertIn('still contains', rec['error'])
+
+
+class TestIntegrateReduction(unittest.TestCase):
+    """A proposed reduction formula — an integral family related to
+    itself at a shifted parameter — certified by parameter-sampled
+    quadrature on both sides, inside the stated domain."""
+
+    REL = ('\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+           ' = \\frac{n-1}{n} '
+           '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n-1} x}')
+
+    def test_the_i_n_recurrence_certifies(self):
+        rec = Integration.integrate_reduction(
+            self.REL, 'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['shift'], 2)
+        texts = ' '.join(a['text'] for a in rec['assumptions'])
+        self.assertIn('assuming n > 1', texts)
+        self.assertIn('evidence, not proof', texts)
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
+    def test_the_wallis_family_certifies(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n-1}{n} '
+            '\\int_0^{\\pi/2} \\cos^{n-2} x \\, d x',
+            'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_negative_shift_relates_upward(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n+2}{n+1} '
+            '\\int_0^{\\pi/2} \\cos^{n+2} x \\, d x',
+            'x', 'n', '-2', assuming='n > 0')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_a_wrong_coefficient_is_refused(self):
+        rec = Integration.integrate_reduction(
+            self.REL.replace('\\frac{n-1}{n}', '\\frac{n-2}{n}'),
+            'x', 'n', '2', assuming='n > 1')
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'disagree')
+
+    def test_the_shifted_integrand_fence(self):
+        # sech^{n} on the right is NOT the left integrand at n := n-2 —
+        # the step can state a recurrence and nothing else
+        rec = Integration.integrate_reduction(
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+            ' = \\frac{n-1}{n} '
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n} x}',
+            'x', 'n', '2', assuming='n > 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('only a recurrence', rec['error'])
+
+    def test_differing_bounds_are_refused(self):
+        rec = Integration.integrate_reduction(
+            '\\int_0^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n+1} x}'
+            ' = \\frac{n-1}{n} '
+            '\\int_1^{+\\infty} \\frac{d x}{\\operatorname{ch}^{n-1} x}',
+            'x', 'n', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('bounds differ', rec['error'])
+
+    def test_shift_and_param_hygiene(self):
+        rec = Integration.integrate_reduction(self.REL, 'x', 'n', '0')
+        self.assertFalse(rec['ok'])
+        self.assertIn('nonzero integer', rec['error'])
+        rec = Integration.integrate_reduction(self.REL, 'x', 'x', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('other than the integration variable',
+                      rec['error'])
+        rec = Integration.integrate_reduction(
+            self.REL, 'x', 'q', '2', assuming='q > 1')
+        self.assertFalse(rec['ok'])
+        self.assertIn('does not occur', rec['error'])
+
+    def test_only_an_equality_is_accepted(self):
+        rec = Integration.integrate_reduction(
+            self.REL.replace('=', '\\le'), 'x', 'n', '2')
+        self.assertFalse(rec['ok'])
+        self.assertIn('equality', rec['error'])
+
+    def test_record_replays(self):
+        ledger = Ledger()
+        ledger.record(Integration.integrate_reduction(
+            self.REL, 'x', 'n', '2', assuming='n > 1'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 class TestSideConditionSplit(unittest.TestCase):

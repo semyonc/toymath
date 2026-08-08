@@ -351,10 +351,18 @@ class AppServerTransport(CodexTransport):
             env['CODEX_HOME'] = str(self.home)
         env.update(self.extra_env)
         try:
+            # Own process group (POSIX session): Jupyter's Interrupt sends
+            # SIGINT to the KERNEL'S WHOLE GROUP (jupyter_client
+            # LocalProvisioner uses killpg), so a runtime left in that
+            # group dies on the first Stop press and every later run fails
+            # with "the Codex runtime closed". Detaching does not leak the
+            # child: stdio transport means kernel death closes its stdin
+            # (EOF ends the app-server), and close() still terminates it.
             self._process = subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding='utf-8',
-                bufsize=1, cwd=self.cwd, env=env)
+                bufsize=1, cwd=self.cwd, env=env,
+                start_new_session=(os.name == 'posix'))
         except OSError as exc:
             raise CodexUnavailable(f'could not start the Codex runtime: {exc}')
         self._reader = threading.Thread(target=self._reader_loop,

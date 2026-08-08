@@ -13,6 +13,10 @@ from primitives import (
     FRAC_NAMES, PrimitiveError, parse_latex, write_latex, free_symbols,
     _result, _error, _peel_groups, _strip_integral, _paren, _is_sum_str,
     definite_integral_parts, numeric_definite_check,
+    same_expression, _infinity_sign, _limit_latex, _int_literal,
+    _plain_symbol_name, numeric_improper_check,
+    _relation_parts, _IntegralPlaceholderer, numeric_reduction_check,
+    numeric_known_integral_check,
 )
 from tactics.core import (
     equal_exprs, substitute, _merge_checks,
@@ -220,6 +224,25 @@ def _table_integrate(sym, notation, var, assumptions):
         raise
 
 
+def _is_func_head_factor(a, notation):
+    """A product factor that is a function HEAD — bare (`\\cosh`) or
+    powered (`\\cosh^{2}`, an INDEX whose base is a function name).
+    Under the application reading convention such a factor BINDS what
+    follows it, so a constant-peel that treats it as a var-free factor
+    reads `\\frac{1}{\\cosh^{2} x}` as `\\frac{1}{\\cosh^{2}} \\cdot
+    \\frac{1}{x}` — a live run recorded exactly that false
+    antiderivative with a skipped check."""
+    if (isinstance(a, Symbol) and notation.get(a) is None
+            and a.name in FUNC_NAMES):
+        return True
+    idx = notation.getf(a, Notation.INDEX)
+    if idx is None:
+        return False
+    base = idx.args[0]
+    return (isinstance(base, Symbol) and notation.get(base) is None
+            and base.name in FUNC_NAMES)
+
+
 def _table_structural(sym, notation, var, assumptions):
     """The spelling-structural half of the table: unwraps groups and
     signs, splits sums, peels var-free (possibly symbolic) constant
@@ -265,8 +288,7 @@ def _table_structural(sym, notation, var, assumptions):
         i = 0
         while i < len(args):
             a = args[i]
-            if (isinstance(a, Symbol) and notation.get(a) is None
-                    and a.name in FUNC_NAMES):
+            if _is_func_head_factor(a, notation):
                 break
             if var in free_symbols(a, notation):
                 break
@@ -304,8 +326,7 @@ def _table_structural(sym, notation, var, assumptions):
             df = notation.getf(dcore, Notation.P_LIST)
             dconsts, dvars = [], []
             if df is not None and not any(
-                    isinstance(a, Symbol) and notation.get(a) is None
-                    and a.name in FUNC_NAMES for a in df.args):
+                    _is_func_head_factor(a, notation) for a in df.args):
                 for a in df.args:
                     if isinstance(a, Symbol) and a.name in Notation.styles:
                         continue
@@ -537,11 +558,66 @@ def _rational_power_integrate(sym, notation, var, assumptions):
     return out
 
 
+def _symbolic_power_integrate(sym, notation, var, assumptions):
+    """Antiderivative latex (no constant) for one monomial whose
+    exponent is a VAR-FREE SYMBOLIC expression: ``x^{p}`` or
+    ``\\frac{1}{x^{p}}`` with ``p`` free of the integration variable.
+    Records ``p \\ne -1`` (the logarithm case) as a sampling
+    constraint and ``var > 0`` (symbolic powers live on the positive
+    axis, like fractional literals). Raises PrimitiveError for any
+    other shape — sums, coefficients, and literal exponents belong to
+    the existing branches."""
+    inner = _peel_groups(sym, notation)
+    reciprocal = False
+    f = notation.get(inner)
+    if f is not None and (f.sym == Notation.SLASH
+                          or f.sym.name in FRAC_NAMES):
+        if _int_literal(f.args[0], notation) != 1:
+            raise PrimitiveError(
+                'symbolic power rule takes a bare x^p or 1/x^p')
+        reciprocal = True
+        inner = _peel_groups(f.args[1], notation)
+    idx = notation.getf(inner, Notation.INDEX)
+    if idx is None:
+        raise PrimitiveError('not a symbolic power of the variable')
+    sub, sup_l, power, sup_r = idx.args[1]
+    if (power is None or sub is not None or sup_l is not None
+            or sup_r is not None
+            or not _is_bare_var(idx.args[0], notation, var)):
+        raise PrimitiveError('not a symbolic power of the variable')
+    if isinstance(power, Symbol):
+        exponent_free = free_symbols(power, notation)
+    else:
+        exponent_free = set()
+    if not exponent_free:
+        raise PrimitiveError(
+            'the exponent is literal; the rational branches own it')
+    if var in exponent_free:
+        raise PrimitiveError(
+            f'the exponent depends on {var!r}; no power rule applies')
+    p_latex = write_latex(_peel_groups(power, notation), notation)
+    if reciprocal:
+        p_latex = f'-({p_latex})' if ('+' in p_latex or '-' in p_latex) \
+            else f'-{p_latex}'
+    up = f'({p_latex})+1' if ('+' in p_latex or '-' in p_latex) \
+        else f'{p_latex}+1'
+    assumptions.append({
+        'text': f'{p_latex} \\ne -1 (the exponent -1 integrates to a '
+                'logarithm)',
+        'display': f'${p_latex} \\ne -1$ (exponent $-1$ is the '
+                   'logarithm case)',
+        'constraint': f'{p_latex} \\ne -1'})
+    assumptions.append({'text': f'{var} > 0', 'nonzero': var})
+    return f'\\frac{{{var}^{{{up}}}}}{{{up}}}'
+
+
 def integrate_power_rule(expr, var):
     """Term-by-term power rule for polynomials and rational expressions
     with a constant or single-power denominator, plus rational-literal
-    exponents (``x^{1/2}``; records var > 0). Refuses the exponent -1
-    case (that is integrate_table's logarithm rule)."""
+    exponents (``x^{1/2}``; records var > 0) and var-free SYMBOLIC
+    exponents (``x^{-n}``; records the exponent != -1 and var > 0).
+    Refuses the literal exponent -1 case (that is integrate_table's
+    logarithm rule)."""
     args = {'expr': expr, 'var': var}
     try:
         sym, notation, integrand_latex = _integrand(expr, var)
@@ -551,6 +627,15 @@ def integrate_power_rule(expr, var):
     except ZeroDivisionError:
         return _error('integrate_power_rule', args, 'division by zero')
     except NotInFragment as e:
+        assumptions = []
+        try:
+            body = _symbolic_power_integrate(sym, notation, var,
+                                             assumptions)
+            return _finish_integration('integrate_power_rule', args, expr,
+                                       integrand_latex, body, var,
+                                       assumptions)
+        except PrimitiveError:
+            pass
         if 'non-integer exponent' in str(e):
             # rational-literal exponents: direct power rule with var > 0
             assumptions = []
@@ -617,9 +702,15 @@ def integrate_by_parts(expr, var, u, dv):
     try:
         v = _table_integrate(dvsym, dvnotation, var, assumptions)
     except PrimitiveError as e:
-        return _error('integrate_by_parts', args,
-                      f'cannot integrate dv mechanically: {e}; '
-                      'choose a simpler dv')
+        try:
+            # a var-free symbolic exponent (dv = x^{-n}) has its own
+            # power rule; the derivative check below verifies v either way
+            v = _symbolic_power_integrate(dvsym, dvnotation, var,
+                                          assumptions)
+        except PrimitiveError:
+            return _error('integrate_by_parts', args,
+                          f'cannot integrate dv mechanically: {e}; '
+                          'choose a simpler dv')
     du = du_rec['result']
     uv = _d_mul(_paren(u) if _is_sum_str(u) else u,
                 _paren(v) if _is_sum_str(v) or v.startswith('-') else v)
@@ -679,20 +770,26 @@ def integrate_substitute(expr, var, u_expr, u_var, new_integrand):
         return _error('integrate_substitute', args,
                       f'the new integrand must not mention {var!r}; '
                       f'write it in terms of {u_var!r} only')
-    if u_var not in free_symbols(nsym, nnotation):
-        return _error('integrate_substitute', args,
-                      f'the new integrand must be written in terms of '
-                      f'{u_var!r}')
+    # a u-free new integrand is NOT refused: `u = \tanh x` turns
+    # \int \frac{1}{\cosh^2 x} dx into \int 1 \, du, and the mechanical
+    # gate below (new_integrand[u := u_expr] * du/dx == integrand) is
+    # the authority either way — a wrong constant fails it
     du_rec = differentiate(u_expr, var)
     if not du_rec.get('ok'):
         return _error('integrate_substitute', args,
                       f'cannot differentiate u: {du_rec.get("error")}')
-    back_rec = substitute(new_integrand, u_var, u_expr)
-    if not back_rec.get('ok'):
-        return _error('integrate_substitute', args,
-                      f'cannot check the rewrite: {back_rec.get("error")}')
+    if u_var in free_symbols(nsym, nnotation):
+        back_rec = substitute(new_integrand, u_var, u_expr)
+        if not back_rec.get('ok'):
+            return _error('integrate_substitute', args,
+                          f'cannot check the rewrite: '
+                          f'{back_rec.get("error")}')
+        back = back_rec['result']
+    else:
+        # u-free integrand: the back-substitution is the identity
+        back = new_integrand
     du = du_rec['result']
-    reconstructed = _d_mul(_paren(back_rec['result']), _paren(du))
+    reconstructed = _d_mul(_paren(back), _paren(du))
     eq = equal_exprs(reconstructed, integrand_latex)
     if not (eq.get('ok') and eq.get('verdict') == 'yes'):
         return _error(
@@ -894,6 +991,16 @@ def integrate_assemble(expr, var, antiderivatives):
         return _error('integrate_assemble', args,
                       'cannot differentiate the assembled result: '
                       + derivative.get('error', 'unknown error'))
+    if (derivative.get('check') or {}).get('status') == 'disagree':
+        # An internally-consumed record whose own spot-check failed must
+        # never be trusted as truth. Live: a sign bug made differentiate
+        # return ok with a disagreeing check, this function compared the
+        # wrong derivative downstream, and the refusal blamed the
+        # assembly the agent had built correctly.
+        return _error('integrate_assemble', args,
+                      'internal: the derivative of the assembled result '
+                      'failed its own numeric spot-check; the engine, not '
+                      'the assembly, is suspect')
     equality = equal_exprs(derivative['result'], original_integrand)
     if not (equality.get('ok') and equality.get('verdict') == 'yes'):
         return _error('integrate_assemble', args,
@@ -1017,4 +1124,540 @@ def integrate_definite(expr, var, antiderivative, upper_limit=None,
         assumptions=assumptions,
         extra={'integrand': integrand, 'lower': lower, 'upper': upper})
     rec['check'] = numeric_definite_check(expr, var, result)
+    return rec
+
+
+def _improper_parts(expr, var, truncated):
+    """Shared reader for the improper endpoint door: which bound of
+    ``expr`` the ``truncated`` integral replaces, with what variable,
+    approached from which side.  Returns a dict, or an error string.
+    One reader on purpose — the tactic, the session adapter, and the
+    replay validator must never disagree about this boundary."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return ('expr must be a definite integral \\int_a^b f \\, d<var> '
+                'with both bounds present')
+    _var, integrand, lower, upper = parts
+    infinities = {}
+    for tag, bound in (('lower', lower), ('upper', upper)):
+        try:
+            bsym, bn = parse_latex(bound)
+        except PrimitiveError as e:
+            return f'bound {bound!r} is malformed: {e}'
+        infinities[tag] = _infinity_sign(bsym, bn)
+    if infinities['lower'] is not None and infinities['upper'] is not None:
+        return ('both bounds are infinite; split the integral at a '
+                'finite point first')
+    if infinities['upper'] == -1 or infinities['lower'] == 1:
+        return ('the infinite bound is on the wrong side; reorient the '
+                'integral first')
+    tparts = definite_integral_parts(truncated, var)
+    if tparts is None:
+        return ('truncated must be a definite integral over the same '
+                'variable')
+    _tvar, t_integrand, t_lower, t_upper = tparts
+    if not same_expression(integrand, t_integrand):
+        return ('the truncated integrand differs from the integral '
+                'being closed')
+    lower_kept = same_expression(lower, t_lower)
+    upper_kept = same_expression(upper, t_upper)
+    if lower_kept and upper_kept:
+        return ('the truncated integral must replace the singular bound '
+                'with a fresh variable')
+    if not (lower_kept or upper_kept):
+        return ('the truncated integral must keep one bound and replace '
+                'only the other')
+    if lower_kept:
+        side, bound, replaced, direction = 'upper', upper, t_upper, 'left'
+    else:
+        side, bound, replaced, direction = 'lower', lower, t_lower, 'right'
+    other = 'lower' if side == 'upper' else 'upper'
+    if infinities[other] is not None:
+        return (f'the truncated integral must replace the infinite '
+                f'{other} bound, not the finite one')
+    if infinities[side] is not None:
+        # the infinite door: the truncation point runs away instead of
+        # approaching a finite singularity, and the at-infinity limit
+        # spelling is two-sided (no direction marker)
+        kind = 'infinite'
+        bound = '\\infty' if infinities[side] > 0 else '-\\infty'
+        direction = 'two-sided'
+    else:
+        kind = 'singular'
+    try:
+        tsym, tn = parse_latex(replaced)
+    except PrimitiveError as e:
+        return f'truncation bound {replaced!r} is malformed: {e}'
+    bound_var = _plain_symbol_name(tsym, tn)
+    if bound_var is None or _int_literal(tsym, tn) is not None:
+        return ('the truncation bound must be a bare fresh variable, '
+                f'not {replaced!r}')
+    taken = set(free_symbols(*parse_latex(integrand)))
+    for latex in (lower, upper):
+        taken |= free_symbols(*parse_latex(latex))
+    if bound_var == var or bound_var in taken:
+        return (f'the truncation variable {bound_var!r} must be fresh: '
+                'it appears in the integral itself')
+    return {'integrand': integrand, 'lower': lower, 'upper': upper,
+            'side': side, 'bound': bound, 'bound_var': bound_var,
+            'direction': direction, 'kind': kind}
+
+
+def integrate_improper(expr, var, truncated, truncated_value,
+                       limit_value):
+    """Close an improper endpoint integral by its definitional reading
+    (the infinite-object door: value = limit of the truncated integrals
+    from inside the interval).
+
+    ``expr`` is the definite integral whose integrand is singular at one
+    finite bound; ``truncated`` is the same integral with that bound
+    replaced by a fresh variable, ``truncated_value`` its RECORDED
+    evaluation (an earlier `integrate_definite` step — the do! tool and
+    the CLI supply both from a ledger step id), and ``limit_value`` the
+    RECORDED one-sided limit of that evaluation at the replaced bound.
+    The step computes nothing new: it certifies that the two cited
+    pieces compose into exactly the definitional limit, records the
+    reading and the half-open continuity assumption, and is checked by
+    an independent leg that re-integrates the integrand itself over a
+    graded truncation ladder and extrapolates — never touching either
+    cited piece.  A ladder that does not settle certifies nothing: a
+    divergent integral has no recordable limit step to cite, and its
+    check finds no finite value in evidence."""
+    args = {'expr': expr, 'var': var, 'truncated': truncated,
+            'truncated_value': truncated_value,
+            'limit_value': limit_value}
+    info = _improper_parts(expr, var, truncated)
+    if isinstance(info, str):
+        return _error('integrate_improper', args, info)
+    for tag, value in (('truncated_value', truncated_value),
+                       ('limit_value', limit_value)):
+        if not isinstance(value, str) or not value.strip():
+            return _error('integrate_improper', args,
+                          f'{tag} must be a recorded result')
+        try:
+            vsym, vn = parse_latex(value)
+        except PrimitiveError as e:
+            return _error('integrate_improper', args,
+                          f'{tag} is malformed: {e}')
+        if var in free_symbols(vsym, vn):
+            return _error('integrate_improper', args,
+                          f'{tag} still contains {var}')
+    lsym, lnot = parse_latex(limit_value)
+    if info['bound_var'] in free_symbols(lsym, lnot):
+        return _error('integrate_improper', args,
+                      'limit_value still contains the truncation '
+                      f'variable {info["bound_var"]}')
+    definitional = _limit_latex(info['bound_var'], info['bound'],
+                                info['direction'], truncated)
+    if info['kind'] == 'infinite':
+        interval = (f'[{info["lower"]}, \\infty)'
+                    if info['side'] == 'upper'
+                    else f'(-\\infty, {info["upper"]}]')
+        improper_at = (f'the integral has an infinite {info["side"]} '
+                       'bound')
+        improper_at_display = (f'infinite {info["side"]} bound')
+    else:
+        interval = (f'[{info["lower"]}, {info["upper"]})'
+                    if info['side'] == 'upper'
+                    else f'({info["lower"]}, {info["upper"]}]')
+        improper_at = (f'the integral is improper at the {info["side"]} '
+                       f'bound {var} = {info["bound"]}')
+        improper_at_display = (f'improper at the {info["side"]} bound '
+                               f'${var} = {info["bound"]}$')
+    assumptions = [
+        {'text': (f'{improper_at}; its value is read '
+                  f'as {definitional} (the definitional limit of the '
+                  'truncated integrals)'),
+         'display': (f'{improper_at_display}: read as '
+                     f'${definitional}$ (definitional limit)')},
+        {'text': (f'{info["integrand"]} is continuous on {interval}'),
+         'display': (f'${info["integrand"]}$ is continuous on '
+                     f'${interval}$')},
+    ]
+    rec = _result(
+        'integrate_improper', args, expr, limit_value,
+        assumptions=assumptions,
+        extra={'integrand': info['integrand'], 'lower': info['lower'],
+               'upper': info['upper'], 'singular': info['side'],
+               'improper_kind': info['kind'],
+               'bound_var': info['bound_var']})
+    rec['check'] = numeric_improper_check(expr, var, info['side'],
+                                          limit_value,
+                                          kind=info['kind'])
+    return rec
+
+
+def _uv_latex(u, v):
+    """The boundary-term product spelling — ONE construction shared by
+    the tactic, the session adapter, and the replay validator."""
+    return _d_mul(_paren(u) if _is_sum_str(u) else u,
+                  _paren(v) if _is_sum_str(v) or v.startswith('-') else v)
+
+
+def _definite_bounds_info(expr, var):
+    """(integrand, lower, upper, lo_inf, hi_inf) for a definite
+    integral with at most one infinite bound, or an error string.
+    Shared reader for the definite by-parts family."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return ('expr must be a definite integral \\int_a^b f \\, '
+                'd<var> with both bounds present')
+    _v, integrand, lower, upper = parts
+    try:
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+    except PrimitiveError as e:
+        return f'malformed bound: {e}'
+    lo_inf = _infinity_sign(ls, ln)
+    hi_inf = _infinity_sign(us, un)
+    if lo_inf is not None and hi_inf is not None:
+        return ('both bounds are infinite; split the integral at a '
+                'finite point first')
+    if lo_inf == 1 or hi_inf == -1:
+        return ('the infinite bound is on the wrong side; reorient the '
+                'integral first')
+    return integrand, lower, upper, lo_inf, hi_inf
+
+
+def _by_parts_boundary(bound_latex, bound_inf, side):
+    """(point_latex, direction) for the boundary term's limit at one
+    end: at an infinite bound the plain at-infinity limit, at a finite
+    bound the one-sided limit from inside the interval."""
+    if bound_inf is not None:
+        return ('\\infty' if bound_inf > 0 else '-\\infty'), 'two-sided'
+    return bound_latex, ('left' if side == 'upper' else 'right')
+
+
+def integrate_by_parts_definite(expr, var, u, dv, antiderivative,
+                                upper_boundary, lower_boundary,
+                                remaining, assuming=None):
+    """Integration by parts over a DEFINITE (possibly improper)
+    interval, assembled from recorded pieces:
+    ``\\int_a^b u\\,dv = [uv]_a^b - \\int_a^b v\\,du``.
+
+    ``antiderivative`` is v, a recorded integration of dv (re-verified
+    here by differentiation); ``upper_boundary``/``lower_boundary`` are
+    the recorded LIMIT values of the product u·v at each end (cited as
+    limit steps by the do! tool and the CLI — at an improper end the
+    boundary term IS a limit, and a finite-end value is the one-sided
+    limit from inside); ``remaining`` is the recorded value of
+    ``\\int_a^b v\\,du`` over the same bounds.  The step computes
+    ``(upper - lower) - remaining`` and is checked by evaluating the
+    ORIGINAL integral by doubly-improper quadrature at parameters
+    sampled inside the stated ``assuming`` domain — never touching any
+    cited piece.  Convergence at sampled parameters is evidence, not
+    proof, and the record says so."""
+    args = {'expr': expr, 'var': var, 'u': u, 'dv': dv,
+            'antiderivative': antiderivative,
+            'upper_boundary': upper_boundary,
+            'lower_boundary': lower_boundary, 'remaining': remaining}
+    if assuming is not None:
+        args['assuming'] = assuming
+    info = _definite_bounds_info(expr, var)
+    if isinstance(info, str):
+        return _error('integrate_by_parts_definite', args, info)
+    integrand, lower, upper, lo_inf, hi_inf = info
+    try:
+        usym, unotation = parse_latex(u)
+        parse_latex(dv)
+        parse_latex(antiderivative)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts_definite', args, str(e))
+    if var not in free_symbols(usym, unotation):
+        return _error('integrate_by_parts_definite', args,
+                      f'u must depend on {var!r}')
+    eq = equal_exprs(f'{_paren(u)} {_paren(dv)}', integrand)
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return _error('integrate_by_parts_definite', args,
+                      f'u * dv must equal the integrand (verdict: '
+                      f'{eq.get("verdict", "error")})')
+    dv_check = differentiate(antiderivative, var)
+    if not dv_check.get('ok'):
+        return _error('integrate_by_parts_definite', args,
+                      'cannot differentiate the antiderivative: '
+                      + dv_check.get('error', 'unknown error'))
+    veq = equal_exprs(dv_check['result'], dv)
+    if not (veq.get('ok') and veq.get('verdict') == 'yes'):
+        return _error('integrate_by_parts_definite', args,
+                      'the recorded value is not an antiderivative of '
+                      f'dv (verdict: {veq.get("verdict", "error")})')
+    for tag, value in (('upper_boundary', upper_boundary),
+                       ('lower_boundary', lower_boundary),
+                       ('remaining', remaining)):
+        if not isinstance(value, str) or not value.strip():
+            return _error('integrate_by_parts_definite', args,
+                          f'{tag} must be a recorded result')
+        try:
+            vsym, vn = parse_latex(value)
+        except PrimitiveError as e:
+            return _error('integrate_by_parts_definite', args,
+                          f'{tag} is malformed: {e}')
+        if var in free_symbols(vsym, vn):
+            return _error('integrate_by_parts_definite', args,
+                          f'{tag} still contains {var}')
+    result = (f'\\left({_paren(upper_boundary)} - '
+              f'{_paren(lower_boundary)}\\right) - '
+              f'{_paren(remaining)}')
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts_definite', args,
+                      f'internal: unparseable result: {e}')
+    assumptions = []
+    if assuming is not None:
+        assumptions.append({'text': f'assuming {assuming}',
+                            'display': f'assuming ${assuming}$',
+                            'constraint': assuming})
+    assumptions.append({
+        'text': ('by parts over the whole interval: any improper bound '
+                 'is read as a definitional limit, and the boundary '
+                 'term values are the cited one-sided/at-infinity '
+                 'limits of u*v; convergence at the sampled parameter '
+                 'values is evidence, not proof'),
+        'display': ('by parts over the interval; improper bounds and '
+                    'boundary terms read as limits; convergence at '
+                    'sampled parameters is evidence, not proof')})
+    rec = _result(
+        'integrate_by_parts_definite', args, expr, result,
+        assumptions=assumptions,
+        extra={'integrand': integrand, 'lower': lower, 'upper': upper,
+               'u': u, 'dv': dv})
+    rec['check'] = numeric_known_integral_check(expr, var, result,
+                                                assumptions)
+    return rec
+
+
+def integrate_known(expr, var):
+    """Close an improper integral by a NAMED known-integral fact.
+
+    The catalog is code-side and deliberately tiny — one fact today,
+    Euler's reflection integral
+    ``\\int_0^{+\\infty} \\frac{x^{s-1}}{1+x}\\,dx =
+    \\frac{\\pi}{\\sin(\\pi s)}`` for ``0 < s < 1`` — and each fact is
+    a narrow structural match (bounds 0 to +infinity, denominator
+    ``1+x``, numerator a var-free-exponent power of the variable), with
+    the domain recorded as sampling constraints and the value checked
+    by doubly-improper quadrature at sampled parameters.  Like
+    `limit_table`: named exact knowledge, mechanically re-checked,
+    never a search."""
+    args = {'expr': expr, 'var': var}
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return _error('integrate_known', args,
+                      'expr must be a definite integral')
+    _v, integrand, lower, upper = parts
+    try:
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        fs, fn = parse_latex(integrand)
+    except PrimitiveError as e:
+        return _error('integrate_known', args, str(e))
+    if _int_literal(ls, ln) != 0 or _infinity_sign(us, un) != 1:
+        return _error('integrate_known', args,
+                      'no known fact matches these bounds (the catalog '
+                      'covers \\int_0^{+\\infty})')
+    def power_of_var(a):
+        """Exponent latex when ``a`` is the bare variable or a var-free
+        power of it, else None."""
+        ap = _peel_groups(a, fn)
+        if _is_bare_var(ap, fn, var):
+            return '1'
+        idx = fn.getf(ap, Notation.INDEX)
+        if idx is None:
+            return None
+        sub, sup_l, power, sup_r = idx.args[1]
+        if (power is None or sub is not None or sup_l is not None
+                or sup_r is not None
+                or not _is_bare_var(idx.args[0], fn, var)):
+            return None
+        psym = _peel_groups(power, fn) if isinstance(power, Symbol) \
+            else power
+        if isinstance(psym, Symbol) and var in free_symbols(psym, fn):
+            return None
+        return write_latex(psym, fn)
+
+    inner = _peel_groups(fs, fn)
+    plist = fn.getf(inner, Notation.P_LIST)
+    factors = list(plist.args) if plist is not None else [inner]
+    no_match = _error('integrate_known', args,
+                      'no known fact matches this integrand (the '
+                      'catalog holds c * \\frac{x^{s-1}}{1+x} with a '
+                      'var-free c)')
+    exp_latex = None
+    seen_den = False
+    consts = []
+    for a in factors:
+        if isinstance(a, Symbol) and fn.get(a) is None \
+                and a.name in Notation.styles:
+            continue
+        if var not in free_symbols(a, fn):
+            consts.append(write_latex(_peel_groups(a, fn), fn))
+            continue
+        af = fn.get(_peel_groups(a, fn))
+        if af is not None and (af.sym == Notation.SLASH
+                               or af.sym.name in FRAC_NAMES):
+            num, den = af.args[0], af.args[1]
+            den_latex = write_latex(_peel_groups(den, fn), fn)
+            num_pow = power_of_var(num)
+            den_eq = equal_exprs(den_latex, f'1+{var}')
+            den_is_shift = (den_eq.get('ok')
+                            and den_eq.get('verdict') == 'yes')
+            if (num_pow is not None and den_is_shift
+                    and exp_latex is None and not seen_den):
+                exp_latex = num_pow
+                seen_den = True
+                continue
+            if (num_pow is not None and exp_latex is None
+                    and var not in free_symbols(den, fn)):
+                exp_latex = num_pow
+                consts.append(f'\\frac{{1}}{{{den_latex}}}')
+                continue
+            if (_int_literal(num, fn) == 1 and den_is_shift
+                    and not seen_den):
+                seen_den = True
+                continue
+            return no_match
+        pw = power_of_var(a)
+        if pw is not None and exp_latex is None:
+            exp_latex = pw
+            continue
+        return no_match
+    if exp_latex is None or not seen_den:
+        return no_match
+    s_latex = (f'({exp_latex})+1' if ('+' in exp_latex
+                                      or '-' in exp_latex)
+               else f'{exp_latex}+1')
+    core_value = (f'\\frac{{\\pi}}{{\\sin\\left(\\pi '
+                  f'\\left({s_latex}\\right)\\right)}}')
+    value = _d_mul(*(consts + [core_value])) if consts else core_value
+    assumptions = [
+        {'text': f'{s_latex} > 0 (the reflection fact holds for '
+                 f'0 < s < 1)',
+         'display': f'${s_latex} > 0$',
+         'constraint': f'{s_latex} > 0'},
+        {'text': f'{s_latex} < 1 (the reflection fact holds for '
+                 f'0 < s < 1)',
+         'display': f'${s_latex} < 1$',
+         'constraint': f'{s_latex} < 1'},
+        {'text': ('Euler reflection: '
+                  '\\int_0^{+\\infty} \\frac{x^{s-1}}{1+x} dx = '
+                  '\\frac{\\pi}{\\sin(\\pi s)}; the improper bounds '
+                  'are read as definitional limits'),
+         'display': ('Euler reflection fact; improper bounds read as '
+                     'definitional limits')},
+    ]
+    rec = _result('integrate_known', args, expr, value,
+                  assumptions=assumptions,
+                  extra={'fact': 'euler-reflection',
+                         'integrand': integrand, 's': s_latex})
+    rec['check'] = numeric_known_integral_check(expr, var, value,
+                                                assumptions)
+    return rec
+
+
+def integrate_reduction(relation, var, param, shift, assuming=None):
+    """Certify a proposed REDUCTION FORMULA: one definite/improper
+    integral family related to itself at a shifted parameter.
+
+    ``relation`` is the equality, e.g.
+    ``\\int_0^{+\\infty} \\cosh^{-(n+1)}x\\,dx =
+    \\frac{n-1}{n} \\int_0^{+\\infty} \\cosh^{-(n-1)}x\\,dx`` with
+    ``param='n'``, ``shift=2``.  The structural fence is what keeps
+    this narrower than an integral-equality oracle: the left side must
+    be ONE integral, the right side exactly one integral with verbatim
+    the same bounds and variable, whose integrand is mechanically equal
+    to the LEFT integrand with ``param := param - shift`` — so the step
+    can state a recurrence and nothing else.  The independent leg
+    samples the parameter inside the stated ``assuming`` domain and
+    evaluates BOTH sides by truncation quadrature.  Convergence at the
+    sampled parameters is evidence, not proof, and the record says so;
+    a divergent side stalls the ladder and certifies nothing."""
+    args = {'relation': relation, 'var': var, 'param': param,
+            'shift': shift}
+    if assuming is not None:
+        args['assuming'] = assuming
+    try:
+        shift_n = int(str(shift).strip())
+    except ValueError:
+        shift_n = None
+    if not shift_n:
+        return _error('integrate_reduction', args,
+                      'shift must be a nonzero integer literal')
+    try:
+        parts = _relation_parts(relation)
+    except PrimitiveError as e:
+        return _error('integrate_reduction', args, str(e))
+    if parts is None:
+        return _error('integrate_reduction', args,
+                      'relation must be a top-level relation')
+    lsym, rsym, rel, rnot = parts
+    if rel != '=':
+        return _error('integrate_reduction', args,
+                      'relation must be an equality')
+    lhs_latex = write_latex(_peel_groups(lsym, rnot), rnot)
+    rhs_latex = write_latex(_peel_groups(rsym, rnot), rnot)
+    lparts = definite_integral_parts(lhs_latex, var)
+    if lparts is None:
+        return _error('integrate_reduction', args,
+                      f'the left side must be a single definite '
+                      f'integral in {var!r}')
+    _lv, f_latex, lower, upper = lparts
+    scratch = Notation()
+    walker = _IntegralPlaceholderer(rnot, scratch)
+    walker(rsym)
+    if len(walker.specs) != 1:
+        return _error('integrate_reduction', args,
+                      'the right side must contain exactly one integral')
+    _name, rvar, g_latex, r_lower, r_upper = walker.specs[0]
+    if rvar != var:
+        return _error('integrate_reduction', args,
+                      'both sides must integrate over the same variable')
+    if not (same_expression(lower, r_lower)
+            and same_expression(upper, r_upper)):
+        return _error('integrate_reduction', args,
+                      'the bounds differ between the sides; a reduction '
+                      'formula keeps them verbatim')
+    if param == var or not param.strip():
+        return _error('integrate_reduction', args,
+                      'param must be a variable other than the '
+                      'integration variable')
+    fsym, fnot = parse_latex(f_latex)
+    if param not in free_symbols(fsym, fnot):
+        return _error('integrate_reduction', args,
+                      f'{param!r} does not occur in the left integrand')
+    spelled = (f'{param}-{shift_n}' if shift_n > 0
+               else f'{param}+{-shift_n}')
+    shifted = substitute(f_latex, param, spelled)
+    if not shifted.get('ok'):
+        return _error('integrate_reduction', args,
+                      'cannot shift the left integrand: '
+                      + shifted.get('error', 'unknown error'))
+    gate = equal_exprs(shifted['result'], g_latex)
+    if not (gate.get('ok') and gate.get('verdict') == 'yes'):
+        return _error(
+            'integrate_reduction', args,
+            f'the right integrand is not the left integrand with '
+            f'{param} := {spelled} (verdict: '
+            f'{gate.get("verdict", "error")}) — only a recurrence of '
+            'the same family can be stated here')
+    assumptions = []
+    if assuming is not None:
+        assumptions.append({
+            'text': f'assuming {assuming}',
+            'display': f'assuming ${assuming}$',
+            'constraint': assuming})
+    assumptions.append({
+        'text': ('both sides are read as definitional limits at any '
+                 'improper bound; convergence at the sampled parameter '
+                 'values is evidence, not proof'),
+        'display': ('both sides read as definitional limits; '
+                    'convergence at sampled parameters is evidence, '
+                    'not proof')})
+    rec = _result(
+        'integrate_reduction', args, relation, relation,
+        assumptions=assumptions,
+        extra={'integrand': f_latex, 'lower': lower, 'upper': upper,
+               'shift': shift_n})
+    rec['check'] = numeric_reduction_check(lhs_latex, rhs_latex,
+                                           assumptions=assumptions)
     return rec

@@ -55,10 +55,64 @@ fragment, an independent probabilistic oracle beyond it, and an honest
 `unknown` where neither applies. Strategy — the part no algorithm can
 complete — goes to the agent.
 
-Results are described as **mechanically checked**, not proved. Canonical
-algebra is exact where supported; the independent oracle is reproducible but
-probabilistic outside that fragment. Assumptions such as `a + b \ne 0` remain
-attached to the derivation.
+## What a checked derivation actually asserts
+
+Results are described as **mechanically checked**, never *proved*, and the
+distinction is precise rather than modest.
+
+A ledger is a finite sequence of steps `s₁ … sₙ`. Each `sᵢ` records an input
+`eᵢ`, a result `e'ᵢ`, an operation drawn from a fixed allowlist, and a set of
+side conditions `Aᵢ`. Write `P` for the derivation's **premises**: the inputs
+that no earlier step produced. What the artifact asserts is
+
+```text
+    for each i:   A₁ … Aᵢ  ⊢  eᵢ ≡ e'ᵢ        (mechanically checked)
+    conclusion holds relative to P
+```
+
+and three qualifications come with it.
+
+**1. Per step, and conditional on `P`.** Each step is checked on its own; the
+ledger checks *transformations*, so an input nothing derived is never checked
+at all. A derivation must start somewhere, so premises are legitimate — but
+they are exactly where verification stops, and every view lists them. A green
+ledger over a mis-stated premise is honestly green and materially wrong. Read
+the premise list before the answer.
+
+**2. Two verification strengths, not one.** On the polynomial/rational
+fragment, `e ≡ e'` is decided by canonical form: a decision procedure, exact,
+no sampling. Outside it, the oracle evaluates both sides at reproducible
+sample points. The design intent is the Schwartz–Zippel bound — for a nonzero
+polynomial of total degree `d` and a finite sample set `S`,
+`Pr[p(r) = 0] ≤ d/|S|` — but the implemented evaluator works in floating
+point, so that bound is indicative rather than attained, and the oracle
+additionally measures its own numerical noise before reporting a difference.
+Agreement over sampled points is *quantified evidence*, not a proof.
+
+**3. Side conditions are recorded, not discharged.** Dividing by `a + b`
+records `a + b ≠ 0`; it does not prove it. The derivation is honestly
+conditional, and the conditions travel with it.
+
+### Where a wrong answer can still survive
+
+A guarantee is only worth what its failure modes are. There are three, and
+the second and third are **immune to oracle independence by construction** —
+independence governs how consequences are *computed*, never what is *assumed*
+or what the notation *means*:
+
+| | failure | defended by |
+|---|---|---|
+| 1 | a step's transformation is wrong and both legs miss it | the two independent legs; the oracle shares no algebra with the symbolic path |
+| 2 | every step is valid but rests on an asserted premise | premises are derived and displayed — visibility, not prevention |
+| 3 | both legs read the input the same wrong way | nothing; unambiguous notation is the only defence |
+
+The design target is (1), and that is where the two-leg structure earns its
+cost. (2) and (3) are boundaries of the method, not defects to be patched
+away, and they are documented in [docs/PRIMITIVES.md](docs/PRIMITIVES.md).
+
+The honest summary: **ToyMath removes hallucinated algebra from the chain. It
+does not certify the chain's starting point, and it does not know what you
+meant.**
 
 ## Surfaces
 

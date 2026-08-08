@@ -51,6 +51,25 @@ chain that lets the cell accept your final value.
    per-piece step ids (the C := 0 results), in the exact piece order the
    linearity step returned.
 
+## Hyperbolic reciprocals
+
+There is no sech/csch vocabulary and no table rule for
+`\frac{1}{\cosh x}` — these close by substitution, one move each:
+
+- `\int \frac{dx}{\cosh x}`: substitute `u = \sinh x` proposing
+  `\frac{1}{1+u^{2}}` (since `\cosh^2 = 1+\sinh^2`); the arctan table
+  rule closes it; back-substitute.
+- `\int \frac{dx}{\cosh^{2} x}`: substitute `u = \tanh x` proposing the
+  constant `1`; back-substitute gives `\tanh x + C`.
+- Higher powers `\frac{1}{\cosh^{m} x}` for literal `m`: peel one
+  `\frac{1}{\cosh^{2} x}` factor and use `integrate_by_parts`, or state
+  the family's recurrence with `integrate_reduction`.
+
+`\cosh(x)^2` and `\cosh^{2} x` are the same expression (the power
+applies to the application); the continental `\operatorname{ch}`,
+`\operatorname{sh}`, `\operatorname{th}` spellings are the
+`\cosh`/`\sinh`/`\tanh` heads.
+
 ## Roots of the variable inside a fraction
 
 Pure power terms like `x^{1/2}` integrate directly with
@@ -107,10 +126,106 @@ exactly that antiderivative or it is refused.
 
 Continuity of the integrand on `[a, b]` is recorded as an assumption; a
 pole strictly inside the bounds makes the check refuse (the integral is
-improper there). Truly improper integrals — infinite bounds or an
-integrand singularity inside or at the interval — still have no closing
-tactic: report the verified stopping point with the open outcome
-instead of forcing a value.
+improper there).
+
+## Improper integrals (endpoint singularity or an infinite bound)
+
+An integrand singular at ONE finite bound
+(`\int_0^1 \frac{dx}{(2-x)\sqrt{1-x}}` blows up at `x = 1`), or an
+integral with ONE infinite bound (`\int_0^{+\infty} \frac{dx}{\cosh
+x}`), closes by its definition — the limit of the truncated
+integrals — in four moves:
+
+1. Derive the ANTIDERIVATIVE of the integrand with the indefinite
+   tactics above.
+2. Evaluate the TRUNCATED integral: replace the improper bound with a
+   fresh variable (`\int_0^t`, keeping the other bound verbatim) and
+   call `integrate_definite` citing the antiderivative step. The
+   symbolic bound is fine — the check samples it.
+3. Load the `limits` skill and record the limit of that step's FULL
+   result at the replaced bound: one-sided from inside for a singular
+   bound (`t \to 1^{-}` for an upper bound, `t \to 0^{+}` for a
+   lower), plain `t \to \infty` (or `t \to -\infty`) for an infinite
+   one. Spell the limit body exactly as the truncated step returned
+   it; `limit_evaluate` certifies your proposed value when no named
+   rule reaches it.
+4. Call `integrate_improper` with the ORIGINAL integral, citing the
+   truncated step and the limit step. It records the definitional
+   reading and the half-open continuity assumption, and an independent
+   truncation-ladder quadrature re-derives the value from the
+   integrand alone.
+
+If the limit in move 3 does not exist, nothing can certify it and the
+integral has no finite value in evidence: report the verified stopping
+point with the open outcome — a refusal is never evidence of
+divergence. A singularity strictly INSIDE the interval and two
+INFINITE ends still have no closing tactic; use the open outcome
+there. An integral improper at both ends in the singular-plus-infinite
+way (`\int_0^{+\infty} \frac{\ln(1+x)}{x^n} dx`) closes through the
+definite by-parts route below when its pieces exist.
+
+## By parts over the whole interval (parameterized/improper integrals)
+
+`integrate_by_parts_definite` assembles
+`\int_a^b u\,dv = [uv]_a^b - \int_a^b v\,du` from recorded pieces —
+the route for parameterized improper integrals with no elementary
+antiderivative. The worked shape, exactly the reflection family:
+
+1. Integrate dv: `integrate_power_rule` handles a var-free SYMBOLIC
+   exponent (`\int x^{-n} dx`, recording the exponent `\ne -1` and
+   `x > 0`); pin its `+ C` to zero with core `substitute`.
+2. Record BOTH boundary limits of `u \cdot v` — spell each limit body
+   as `(u) v` with v exactly as step 1 returned it: at an infinite
+   bound `\lim_{x \to \infty}`, at a finite bound the one-sided limit
+   from inside (`x \to 0^{+}` for a lower bound). Pass `--assuming`
+   with the parameter domain that makes each boundary term vanish
+   (`n > 1`, `n < 2`) — the oracle samples only inside it.
+3. Evaluate the remaining integral `\int_a^b v\,du` as its own step.
+   `integrate_known` closes the named catalog forms — Euler's
+   reflection integral `\int_0^{+\infty} \frac{x^{s-1}}{1+x} dx =
+   \frac{\pi}{\sin(\pi s)}` for `0 < s < 1`, var-free coefficients
+   carried — and records the domain as sampling constraints.
+4. Call `integrate_by_parts_definite` with the ORIGINAL integral, u,
+   dv, and the four step ids (`ANTIDERIVATIVE_STEP UPPER_STEP
+   LOWER_STEP REMAINING_STEP`), plus `--assuming` with the combined
+   domain (`1 \lt n \land n \lt 2`). The check re-evaluates the whole
+   improper integral by quadrature at sampled parameters against the
+   assembled value; a follow-up core `expand` tidies the answer.
+
+State the TIGHTEST parameter domain at every step: agreement at
+sampled parameters is evidence about the stated region, not a proof,
+and every record says so.
+
+## Reduction formulas (a parameterized family)
+
+When the task is a family `I_n` rather than one integral, the honest
+complete answer is a RECURRENCE plus recorded base cases — three
+separate statements (`I_n = \frac{n-1}{n} I_{n-2}` assuming `n > 1`,
+then `I_0`, then `I_1`), never one conjunction. State the recurrence
+with `integrate_reduction`: the relation (left side ONE integral;
+right side a coefficient times the SAME integral with the parameter
+shifted — anything else is refused), the variable, the parameter, the
+integer shift, and `--assuming` with the TIGHTEST parameter domain you
+can state. The check samples parameters only inside that domain, and
+its agreement is evidence about the sampled region, not a proof —
+overclaiming the domain weakens the record's honesty, never its
+greenness. Close each base case as its own cell through the definite
+or improper recipe above. A divergent side stalls the check's ladder
+and certifies nothing — a refusal is never evidence of divergence.
+
+An INDEFINITE reduction formula that carries a boundary term
+(`\int \frac{dx}{(a+b\cos x)^n} = \frac{A\sin x}{(a+b\cos x)^{n-1}}
++ B\int\frac{dx}{(a+b\cos x)^{n-1}} + C\int\frac{dx}{(a+b\cos x)^{n-2}}`,
+"find A, B, C") is outside `integrate_reduction`'s scope — that is a
+fact about ONE tactic's fence, never a reason to declare the task open.
+Prove it by DIFFERENTIATION and coefficient matching: `diff` the
+boundary term, use `equal` to certify the algebraic identities you
+rely on, let `match_coefficients` turn the polynomial identity into
+the coefficient system, and close the constants through the equations
+skill (`apply`, `expand`, `equal --assuming`, `system_assemble`),
+then `set_result` with the assembled constants. The certified content is the mechanically checked
+derivative identity plus the constants — no integration step is
+recorded, and none is needed when the ask is the constants.
 
 Never type an assembled sum into core `expand`: that checks only the
 expression you typed, not whether it contains the recorded pieces. Assembly

@@ -15,9 +15,10 @@ from polyrat import NotInFragment, Poly, to_ratfunc, poly_to_notation
 from primitives import (
     PrimitiveError, EvalError, parse_latex, write_latex, numeric_eval,
     free_symbols, same_expression, numeric_union_check, _num_agree,
-    _sample_point, _result, _error,
+    _sample_point, _result, _error, _composite_disagreement_resolves,
+    Substitutor,
 )
-from tactics.core import equal_exprs, substitute, _comp_split
+from tactics.core import equal_exprs, substitute, atom_ratfuncs, _comp_split
 
 
 def _plain_variable(var):
@@ -213,18 +214,34 @@ def assignment_pairs(assignments):
                 f'assignment {index} ({assignment!r}) is not an equality; '
                 'each unknown needs a recorded step ending at '
                 '"unknown = value"')
-        left = comp.args[0]
-        if not isinstance(left, Symbol) or notation.get(left) is not None:
+        # An equality states its association in EITHER order, and the engine's
+        # own isolation chains routinely end value-first: `match_coefficients`
+        # — the producer this tactic was built to consume — emits `0 = A`, and
+        # `expand` of a divided relation gives `\frac{b}{c} = A`.  Reading only
+        # the left made the engine refuse the association it had just written,
+        # with no move available to turn it round (`equal?` compares relations
+        # per-side, so `rewrite_as` cannot flip one).  The `handed` guard below
+        # and `_same_relation` already read both orders; this reader is the
+        # odd one out.  Left is tried FIRST so an ambiguous `A = B` — where
+        # either side could be the unknown and no target is in scope here —
+        # keeps its historical reading.
+        unknown = value = None
+        for side, other in ((comp.args[0], comp.args[1]),
+                            (comp.args[1], comp.args[0])):
+            if isinstance(side, Symbol) and notation.get(side) is None:
+                unknown, value = side, other
+                break
+        if unknown is None:
             raise PrimitiveError(
                 f'assignment {index} ({assignment!r}) must name a plain '
-                'unknown on the left')
+                'unknown on one side')
         for seen in out:
-            if seen['unknown'] == left.name:
+            if seen['unknown'] == unknown.name:
                 raise PrimitiveError(
-                    f'{left.name!r} is assigned twice; give one recorded '
+                    f'{unknown.name!r} is assigned twice; give one recorded '
                     'step per unknown')
-        out.append({'unknown': left.name,
-                    'value': write_latex(comp.args[1], notation)})
+        out.append({'unknown': unknown.name,
+                    'value': write_latex(value, notation)})
     # An answer names each unknown once, on the left. A value that still
     # mentions one of them is a half-solved system, not an answer, and the
     # order the values were substituted in would silently decide it.
@@ -303,9 +320,18 @@ def _system_check(relations, pairs, samples=8, seed=20260728, tol=1e-6):
     rng = random.Random(seed)
     agreed = 0
     tried = 0
+
+    def _bind(point):
+        """A sample point with every unknown bound to its recorded value."""
+        local = dict(point)
+        for name, vsym, vnotation in values:
+            local[name] = numeric_eval(vsym, vnotation, point)
+        return local
+
     while agreed < wanted and tried < wanted * 8:
         tried += 1
-        env = _sample_point(variables, rng)
+        base_env = _sample_point(variables, rng)
+        env = dict(base_env)
         usable = True
         try:
             for name, vsym, vnotation in values:
@@ -339,6 +365,23 @@ def _system_check(relations, pairs, samples=8, seed=20260728, tol=1e-6):
                 usable = False
                 break
             if not agree:
+                # A `disagree` bars the assembled answer from the ledger for
+                # good, so the gap has to outrun the oracle's own arithmetic
+                # first. The sampler draws from ~150 small rationals jittered
+                # by <1e-3, so two variables landing on the SAME rational —
+                # 1.6% of pairs, and draw #2 of this tactic's fixed seed —
+                # differ only by that jitter; an `a^2-b^2` denominator there
+                # loses most of its significant digits. Measured live: the
+                # reduction-formula ansatz's own correct A, B, C were
+                # accused at exactly such a point.
+                def _sides(point, _lhs=lhs, _rhs=rhs, _n=rnotation):
+                    local = _bind(point)
+                    return (numeric_eval(_lhs, _n, local),
+                            numeric_eval(_rhs, _n, local))
+                if not _composite_disagreement_resolves(
+                        _sides, base_env, left, right):
+                    usable = False
+                    break
                 return {'status': 'disagree', 'relation': relation,
                         'left': left, 'right': right, 'point': env}
         if usable:
@@ -700,11 +743,19 @@ def _root_values(roots, var_name):
         if comp is None or comp.sym.props.get('op') != '=':
             raise PrimitiveError(
                 f'every solution must be an equality {var_name}=value')
-        left = comp.args[0]
-        if not isinstance(left, Symbol) or left.name != var_name:
+        # Same side-order tolerance as `assignment_pairs`, and unambiguous
+        # here because the variable is named: whichever side IS `var_name`
+        # names the root, so a hand-isolated `1 = x` states the same solution
+        # as `x = 1`.
+        left, right = comp.args[0], comp.args[1]
+        if isinstance(left, Symbol) and left.name == var_name:
+            value_sym = right
+        elif isinstance(right, Symbol) and right.name == var_name:
+            value_sym = left
+        else:
             raise PrimitiveError(
-                f'every solution must name {var_name!r} on the left')
-        solution = write_latex(comp.args[1], notation)
+                f'every solution must name {var_name!r} on one side')
+        solution = write_latex(value_sym, notation)
         # a complete answer lists each solution once; a repeat (in any
         # spelling) would print the same point twice and there is no
         # collection algebra to fold it back together
@@ -910,14 +961,13 @@ def _vandermonde_solve(xs, ys):
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def _numeric_coefficients(sym, notation, var, env, degree):
-    """Coefficients of `sym` as a polynomial in `var`, recovered purely by
-    evaluation — an independent reading of the same object."""
-    xs, ys = [], []
-    for i in range(degree + 1):
-        xv = 0.5 + 0.37 * i
-        point = dict(env)
-        point[var] = xv
+def _numeric_coefficients(sym, notation, xs, points):
+    """Coefficients of `sym` as a polynomial in the matching variable,
+    recovered purely by evaluation — an independent reading of the same
+    object. `xs[i]` is the value the matching variable takes at
+    `points[i]`."""
+    ys = []
+    for point in points:
         try:
             val = numeric_eval(sym, notation, point)
         except (EvalError, PrimitiveError, ZeroDivisionError,
@@ -925,9 +975,88 @@ def _numeric_coefficients(sym, notation, var, env, degree):
             return None
         if val is None or isinstance(val, complex):
             return None
-        xs.append(xv)
         ys.append(float(val))
     return _vandermonde_solve(xs, ys)
+
+
+# an atom's sampled values must stay apart or the Vandermonde system is
+# ill-conditioned and a true identity could be accused of disagreeing
+_ATOM_SEPARATION = 0.05
+_ATOM_DRAWS = 400
+
+
+def _coefficient_grid(var, atom, env, degree, rng):
+    """`(abscissae, points)`: `degree + 1` values of the matching variable,
+    each paired with the sample point that realizes it.
+
+    A plain variable is simply set. An ATOM cannot be set — `\\cos x` is
+    whatever the point makes it — so its OWN variables are drawn and the
+    atom is EVALUATED to discover where the draw landed. The oracle's
+    abscissa is therefore its own measurement rather than a number handed
+    to it by the symbolic side, which is what keeps the two legs
+    independent over atoms.
+    """
+    if atom is None:
+        xs = [0.5 + 0.37 * i for i in range(degree + 1)]
+        return xs, [dict(env, **{var: x}) for x in xs]
+    atom_sym, atom_n = atom
+    atom_vars = sorted(free_symbols(atom_sym, atom_n))
+    if not atom_vars:
+        return None  # a constant atom cannot be varied at all
+    xs, points = [], []
+    for _ in range(_ATOM_DRAWS):
+        if len(xs) > degree:
+            break
+        draw = _sample_point(atom_vars, rng)
+        try:
+            val = numeric_eval(atom_sym, atom_n, draw)
+        except (EvalError, PrimitiveError, ZeroDivisionError,
+                ValueError, OverflowError):
+            continue
+        if val is None or isinstance(val, complex):
+            continue
+        val = float(val)
+        if any(abs(val - x) < _ATOM_SEPARATION for x in xs):
+            continue
+        xs.append(val)
+        points.append(dict(env, **draw))
+    return (xs, points) if len(xs) > degree else None
+
+
+def _coefficient_expr(poly, store):
+    """`(sym, notation)` for a coefficient polynomial, with any opaque atom
+    substituted back so both the emitted equation and the oracle see the
+    real subexpression instead of an internal atom name."""
+    notation = Notation()
+    sym = poly_to_notation(poly, notation)
+    if store is not None and store.exprs:
+        out = Notation()
+        sym = Substitutor(notation, out, store.mapping())(sym)
+        notation = out
+    return sym, notation
+
+
+def _atom_matching_conflict(atom, store, polys):
+    """The atom variable that also occurs OUTSIDE the matching atom, or None.
+
+    Equating coefficients of powers of an opaque atom says the identity
+    holds as that atom varies freely. If anything else in the identity moves
+    with the atom's own variable — a bare `x`, or a second atom such as
+    `\\sin x` — the powers are not independent and the matching would state
+    something false. Refusing is the mathematics here, not a limitation of
+    the oracle."""
+    atom_vars = free_symbols(*store.exprs[atom])
+    if not atom_vars:
+        return None
+    variables = set()
+    for p in polys:
+        variables |= set(p.variables())
+    for name in sorted(variables - {atom}):
+        other = store.exprs.get(name)
+        used = free_symbols(*other) if other else {name}
+        if used & atom_vars:
+            return write_latex(*other) if other else name
+    return None
 
 
 def match_coefficients(expr, var):
@@ -953,32 +1082,43 @@ def match_coefficients(expr, var):
         return _error('match_coefficients', args,
                       f'coefficients can only be matched across "=", '
                       f'not {rel!r}')
+    named = var
     try:
+        # an agent may match in an opaque subexpression (\cos x) rather than
+        # a plain variable; `collect` has grouped by such an atom since
+        # gen 7 and this is the same reading of the same object
+        rfs, var, store = atom_ratfuncs([lhs, rhs], notation, var)
         polys = []
-        for side in (lhs, rhs):
-            rf = to_ratfunc(side, notation)
+        for rf in rfs:
             if not rf.is_poly():
                 raise NotInFragment('side is not a polynomial')
             polys.append(rf.num)
     except NotInFragment as e:
         return _error('match_coefficients', args,
-                      f'both sides must be polynomials in {var}: {e}')
+                      f'both sides must be polynomials in {named}: {e}')
     except ZeroDivisionError:
         return _error('match_coefficients', args,
                       'expression contains division by zero')
-    left, right = (_coefficient_buckets(p, var) for p in polys)
     if not any(var in p.variables() for p in polys):
         return _error('match_coefficients', args,
-                      f'{var!r} does not occur on either side')
-    equations, out_n = [], Notation()
+                      f'{named!r} does not occur on either side')
+    if store is not None and var in store.exprs:
+        clash = _atom_matching_conflict(var, store, polys)
+        if clash is not None:
+            return _error(
+                'match_coefficients', args,
+                f'{clash} varies with {named}, so powers of {named} are not '
+                f'independent and their coefficients cannot be equated')
+    left, right = (_coefficient_buckets(p, var) for p in polys)
+    equations = []
     for k in sorted(set(left) | set(right), reverse=True):
         a = left.get(k, Poly.const(0))
         b = right.get(k, Poly.const(0))
         if a == b:
             continue  # already identical: it states nothing
         equations.append((k,
-                          write_latex(poly_to_notation(a, out_n), out_n),
-                          write_latex(poly_to_notation(b, out_n), out_n)))
+                          write_latex(*_coefficient_expr(a, store)),
+                          write_latex(*_coefficient_expr(b, store))))
     if not equations:
         return _error('match_coefficients', args,
                       'the two sides already have identical coefficients; '
@@ -990,25 +1130,46 @@ def match_coefficients(expr, var):
         return _error('match_coefficients', args,
                       f'internal: unparseable result: {e}')
     rec = _result('match_coefficients', args, expr, result,
-                  extra={'matched_in': var,
+                  extra={'matched_in': named,
                          'powers': [k for k, _, _ in equations]})
     rec['check'] = _check_coefficients(lhs, rhs, notation, var,
-                                       left, right, polys)
+                                       left, right, polys, store, named)
     return rec
 
 
-def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
+def _check_coefficients(lhs, rhs, notation, var, left, right, polys,
+                        store=None, named=None):
     """Independent leg: recover each side's coefficients numerically and
     confirm the symbolic extraction reports the same ones."""
-    others = sorted((free_symbols(lhs, notation)
-                     | free_symbols(rhs, notation)) - {var})
+    atom = None
+    if named is not None and named != var:
+        # `var` was resolved to an internal atom name, so the matching
+        # variable is an opaque subexpression. Re-read it from the AGENT's
+        # own spelling rather than borrowing the atomizer's stored object:
+        # this leg should not inherit the symbolic side's reading of which
+        # object it is checking.
+        try:
+            atom = parse_latex(named)
+        except PrimitiveError:
+            return {'status': 'skipped',
+                    'reason': 'the oracle could not read the matching object'}
+    free = free_symbols(lhs, notation) | free_symbols(rhs, notation)
+    # an atom's OWN variables are what the oracle varies in order to move
+    # the matching variable, so they must not be pinned in the environment
+    held = free - (free_symbols(*atom) if atom else {var})
+    others = sorted(held)
     degree = max([p.degree(var) or 0 for p in polys] + [0])
     rng = random.Random(0xC0EFF)
     samples = 0
     for _ in range(6):
         env = _sample_point(others, rng) if others else {}
+        grid = _coefficient_grid(var, atom, env, degree, rng)
+        if grid is None:
+            return {'status': 'skipped',
+                    'reason': 'the oracle could not sample this shape'}
+        xs, points = grid
         for side_sym, buckets in ((lhs, left), (rhs, right)):
-            got = _numeric_coefficients(side_sym, notation, var, env, degree)
+            got = _numeric_coefficients(side_sym, notation, xs, points)
             if got is None:
                 return {'status': 'skipped',
                         'reason': 'the oracle could not sample this shape'}
@@ -1018,9 +1179,8 @@ def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
                     if want is None:
                         expect = 0.0
                     else:
-                        coef_n = Notation()
                         expect = float(numeric_eval(
-                            poly_to_notation(want, coef_n), coef_n, env))
+                            *_coefficient_expr(want, store), points[0]))
                 except (EvalError, PrimitiveError, TypeError, ValueError,
                         ZeroDivisionError, OverflowError):
                     return {'status': 'skipped',
@@ -1029,5 +1189,6 @@ def _check_coefficients(lhs, rhs, notation, var, left, right, polys):
                     return {'status': 'disagree', 'power': k,
                             'symbolic': expect, 'numeric': got[k]}
         samples += 1
-    return {'status': 'agree', 'samples': samples,
-            'method': 'coefficients recovered by evaluation'}
+    method = ('coefficients recovered by evaluation over an opaque atom'
+              if atom else 'coefficients recovered by evaluation')
+    return {'status': 'agree', 'samples': samples, 'method': method}

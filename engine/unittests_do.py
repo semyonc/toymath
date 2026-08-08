@@ -29,6 +29,7 @@ os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
 
 import agent_config
 import agent_do
+import mathShell
 import observability
 import plot_sandbox
 import tactic_registry
@@ -333,6 +334,29 @@ class TestDoSessionApi(unittest.TestCase):
         topology = session.ledger.presentation_topology()
         self.assertEqual(topology['spine'], ['s1', 's4'])
         self.assertEqual(topology['abandoned_paths'][0]['steps'], ['s2'])
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_wedged_marker_refusal_teaches_the_fresh_start(self):
+        """Live int! trace shape: the agent marked from_step=s1 meaning
+        'the whole ansatz was wrong', then had every fresh start refused
+        and went open without finding either escape. The refusal must name
+        the unwedging move, and the move must actually work."""
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['expand']('(x+1)^2'))
+        marker = json.loads(api['comment']('the ansatz itself was wrong',
+                                           's1'))
+        self.assertEqual(marker['op'], 'branch')
+        refused = json.loads(api['expand']('(z+5)^2'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('first resolve the marker', refused['error'])
+        # the taught escape: one tactic on the marked step's recorded
+        # input resolves the marker...
+        resolved = json.loads(api['expand']('(x+1)^2'))
+        self.assertTrue(resolved['ok'], resolved.get('error'))
+        # ...and the fresh line is then admitted
+        fresh = json.loads(api['expand']('(z+5)^2'))
+        self.assertTrue(fresh['ok'], fresh.get('error'))
         self.assertEqual(session.ledger.replay()['status'], 'verified')
 
     def test_pending_marker_note_downgrades_and_refusal_steers(self):
@@ -1800,6 +1824,24 @@ class TestBackendToolParity(unittest.TestCase):
         names = {tool['name']
                  for tool in codex_backend.dynamic_tools(dispatcher)}
         self.assertFalse(names & set(tactic_registry.BY_NAME))
+
+
+class TestCodexRuntimeSpawn(unittest.TestCase):
+    def test_runtime_starts_in_its_own_process_group(self):
+        """Jupyter's Interrupt sends SIGINT to the kernel's WHOLE process
+        group (jupyter_client LocalProvisioner uses killpg): a runtime left
+        in that group dies on the first Stop press, the interrupted cell
+        errors with 'the Codex runtime closed' instead of a clean
+        interrupted outcome, and every later run fails the same way. The
+        spawn must detach the runtime into its own group."""
+        transport = codex_transport.AppServerTransport(binary='/fake/codex')
+        with mock.patch.object(codex_transport.subprocess, 'Popen') as popen, \
+                mock.patch.object(codex_transport.AppServerTransport,
+                                  'initialize'), \
+                mock.patch.object(codex_transport.threading, 'Thread',
+                                  return_value=mock.Mock()):
+            transport.start()
+        self.assertTrue(popen.call_args.kwargs.get('start_new_session'))
 
 
 class TestCodexToolCallBridge(unittest.TestCase):
@@ -5172,7 +5214,7 @@ class TestMathShellDo(unittest.TestCase):
         self.assertIn('literal * prose', mixed)
         self.assertIn('$x \\cdot y$', mixed)
 
-    def test_chain_table_skips_comments_and_short_runs(self):
+    def test_chain_table_skips_runs_with_nothing_checked(self):
         comment = {'id': 's1', 'hash': 'h1', 'op': 'comment',
                    'args': {'text': 'strategy note'}, 'input': None,
                    'result': None, 'check': {'status': 'note'},
@@ -5182,8 +5224,37 @@ class TestMathShellDo(unittest.TestCase):
                   'input': None, 'result': None,
                   'check': {'status': 'note'}, 'assumptions': []}
         self.assertIsNone(self.shell.render_do_chain([]))
-        self.assertIsNone(self.shell.render_do_chain(
-            [comment, branch, self._chain_step('s3', 'expand', '5')]))
+        self.assertIsNone(self.shell.render_do_chain([comment, branch]))
+
+    def test_single_step_run_renders_its_receipt(self):
+        # a one-step derivation still shows the kernel-rendered check
+        # verdict: without its row, the only on-screen "verified" is
+        # agent prose — exactly what the table exists to replace (live:
+        # the one-step FTC cell showed its result with no receipt)
+        html = self.shell.render_do_chain(
+            [self._chain_step('s1', 'differentiate',
+                              '2x \\sqrt{x^{4}+1}')])
+        self.assertIn('verified chain', html)
+        self.assertIn('<code>s1</code>', html)
+        self.assertIn('<code>differentiate</code>', html)
+        self.assertIn('agree', html)
+
+    def test_goal_restatement_is_not_a_stated_premise(self):
+        # the task is not a given: a premise naming the requested
+        # expression (or a piece the goal wraps) says nothing beyond the
+        # cell the reader typed; genuine givens never cover the goal
+        premises = [
+            {'step': 's1',
+             'input': '\\frac{d}{dx}\\int_{0}^{x^{2}}'
+                      '\\sqrt{1+t^{2}}\\,dt'},
+            {'step': 's2', 'input': 'A = 3'},
+        ]
+        goal = '\\frac  {d} {dx}\\int_{0}^{x^{2}}\\sqrt{{1}+t^{2}}dt'
+        kept = agent_do._stated_premises(premises, goal)
+        self.assertEqual([p['step'] for p in kept], ['s2'])
+        # with no goal to compare (plain do!), every premise stands
+        self.assertEqual(agent_do._stated_premises(premises, None),
+                         premises)
 
     def test_branch_marker_stream_render_is_plain_annotation(self):
         html = self.shell.render_do_step({
@@ -5742,6 +5813,22 @@ class TestExprComposite(unittest.TestCase):
         for s in self.shell.ledger.steps:
             self.assertEqual(s['check']['status'], 'agree')
 
+    def test_leibniz_prefixed_definite_integral_is_zero_token(self):
+        # the user's exact spelling: the operator names the variable (so
+        # inference never sees the free 'd'), the FTC bound rule closes
+        # the integral, and no agent runs
+        self.shell.exec(
+            'diff! \\frac{d}{d x} \\int_0^{x^2} \\sqrt{1+t^2} d t',
+            1, add_to_history=True)
+        ops = [s['op'] for s in self.shell.ledger.steps]
+        self.assertEqual(ops, ['differentiate'])
+        step = self.shell.ledger.steps[0]
+        self.assertEqual(step['check']['status'], 'agree')
+        self.assertEqual(core_tactics.equal_exprs(
+            step['result'], '2 x \\sqrt{x^{4}+1}')['verdict'], 'yes')
+        texts = [a['text'] for a in step.get('assumptions', [])]
+        self.assertTrue(any('continuous' in t for t in texts), texts)
+
     def test_history_backrefs_do_not_accumulate_index_braces(self):
         # Final do!/composite output is future [[n]] input.  Every old plain
         # writer hop added one transparent group around powers/subscripts.
@@ -5994,6 +6081,168 @@ class TestExprComposite(unittest.TestCase):
                          'yes')
         # the pattern-continuation assumption is surfaced on the cell
         self.assertIn('continues the pattern', html)
+
+
+class TestLiveLogFolding(unittest.TestCase):
+    """The streamed turn log is decoration; the chain table is the record.
+
+    A closed run therefore re-emits its stream collapsed, so the artifact is
+    not buried under its own rehearsal (measured: 60 streamed lines above the
+    table that restates them). A run that did not close keeps the stream
+    expanded — there it is the only account of what happened.
+    """
+
+    def setUp(self):
+        import engine
+        self.displays = []
+        # the kernel clears with wait=True, so a fold really does replace
+        # everything shown so far; a handler that only appends would hide
+        # exactly the duplication these tests are about
+        def handler(*objs, **kw):
+            if kw.get('clear_output'):
+                self.displays.clear()
+            self.displays.extend(objs)
+        engine.setHandler(handler)
+        from mathShell import MathShell
+        self.shell = MathShell()
+
+    def tearDown(self):
+        import engine
+        import IPython.display
+        engine.setHandler(IPython.display.display)
+
+    def _html(self):
+        return ''.join(getattr(d, 'data', str(d)) for d in self.displays)
+
+    def _steps(self, n):
+        return [{'id': f's{i}', 'hash': f'h{i}', 'op': 'expand',
+                 'check': {'status': 'agree'}, 'input': f'x^{i}',
+                 'result': f'x^{i + 1}', 'assumptions': [], 'continues': True}
+                for i in range(1, n + 1)]
+
+    def _run(self, steps, result='x^{4}'):
+        """A fake run that streams like a real one before returning."""
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            for step in steps:
+                if on_step is not None:
+                    on_step(step)
+            return {'ok': True, 'final_result': result, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'status': 'verified',
+                                         'source': 'ledger', 'step': 's1',
+                                         'method': 'test-fixture'}}
+        return fake
+
+    def test_closed_run_folds_the_live_log_into_one_group(self):
+        steps = self._steps(4)
+        with mock.patch.object(agent_do, 'run_instruction',
+                               self._run(steps)):
+            self.shell.exec('do! integrate x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertEqual(1, html.count('<details'))
+        self.assertIn('agent turns', html)
+        self.assertIn('4 steps', html)
+        self.assertIn('4 checked', html)
+        # every streamed line survives, once, inside the group
+        head, _, tail = html.partition('</details>')
+        for step in steps:
+            self.assertEqual(1, html.count(f"{step['id']}#{step['hash']}"),
+                             step['id'])
+            self.assertIn(f"{step['id']}#{step['hash']}", head)
+        # and the record itself is still published, outside the fold
+        self.assertIn('verified chain', tail)
+
+    def _chain(self, goal, result, n=4):
+        """`n` LINKED steps from `goal` to `result`.
+
+        The composite resolver refuses a final value that no checked chain
+        connects to the request, so a fixture of unlinked steps never
+        reaches the fold at all — it errors first.
+        """
+        points = ([goal] + [f'u_{{{i}}}' for i in range(1, n)] + [result])
+        return [{'id': f's{i + 1}', 'hash': f'h{i + 1}', 'op': 'expand',
+                 'check': {'status': 'agree'}, 'input': points[i],
+                 'result': points[i + 1], 'assumptions': [],
+                 'continues': True}
+                for i in range(n)]
+
+    def test_an_expr_command_cell_folds_too(self):
+        """`int!` declares `expr: true`, so a whole-cell `int! ...` is
+        resolved by exec_composite, NOT exec_do — the reported cell took
+        that path. Gen 67's lesson is that a fix landing only in exec_do
+        gets missed here, three times over."""
+        result = '\\frac{x^{4}}{4} + C'
+        seen = {}
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            steps = self._chain(_arg_of(instruction), result)
+            seen['steps'] = steps
+            for step in steps:
+                on_step(step)
+            return {'ok': True, 'final_result': result, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'status': 'verified',
+                                         'source': 'ledger', 'step': 's4',
+                                         'method': 'test-fixture'}}
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('int! x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertEqual(1, html.count('<details'), html[:400])
+        self.assertIn('4 steps', html)
+        head, _, tail = html.partition('</details>')
+        for step in seen['steps']:
+            self.assertIn(f"{step['id']}#{step['hash']}", head)
+        self.assertIn('verified chain', tail)
+
+    def test_a_run_that_did_not_close_keeps_its_log_expanded(self):
+        steps = self._steps(3)
+
+        def fake(instruction, ledger=None, on_step=None, **kw):
+            for step in steps:
+                on_step(step)
+            return {'ok': True, 'final_result': None, 'assumptions': [],
+                    'steps': steps, 'summary': None,
+                    'final_provenance': {'source': 'open',
+                                         'reason': 'no route closed it'}}
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('do! integrate x^3', 1, add_to_history=True)
+        html = self._html()
+        self.assertNotIn('<details', html)
+        for step in steps:
+            self.assertIn(f"{step['id']}#{step['hash']}", html)
+
+    def test_a_handler_that_cannot_clear_never_duplicates_the_log(self):
+        """Console and embedding handlers reject the clear keyword. There the
+        fold must decline outright, not print the log a second time."""
+        import engine
+        shown = []
+
+        def console(*objs, **kw):
+            if 'clear_output' in kw:
+                raise TypeError('unexpected keyword')
+            shown.extend(objs)
+        engine.setHandler(console)
+        log = mathShell._LiveLog(self.shell)
+        for step in self._steps(3):
+            log(step)
+        self.assertEqual(3, len(shown))
+        self.assertFalse(log.fold(True))
+        self.assertEqual(3, len(shown))
+
+    def test_evidence_published_mid_cell_forfeits_the_fold(self):
+        """Resolving inline commands inside another command's argument shows
+        the inner chains and only then runs the outer instruction. The swap
+        clears the cell wholesale, so it must not fire afterwards."""
+        log = mathShell._LiveLog(self.shell)
+        for step in self._steps(3):
+            log(step)
+        log.disable()
+        self.assertFalse(log.fold(True))
+
+    def test_one_streamed_line_is_left_alone(self):
+        log = mathShell._LiveLog(self.shell)
+        log(self._steps(1)[0])
+        self.assertFalse(log.fold(True))
 
 
 class TestChainsToGoal(unittest.TestCase):

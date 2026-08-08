@@ -361,5 +361,73 @@ class TestRenderComm(unittest.TestCase):
         self.assertIsNone(comm.send.call_args[0][0]['segments'])
 
 
+class TestCellOutputParent(unittest.TestCase):
+    """Streamed cell output is parented to the executing cell, not to the
+    last shell message anyone dispatched.
+
+    The live step log is display()ed from provider worker threads. A worker
+    thread resolves get_parent() through a shared last-message fallback, and
+    a comm handled on a kernel subshell mid-run (JupyterLab runs comms over
+    subshells by default) re-points that fallback — from then on the log
+    arrives parented to the comm message, which the notebook can route to no
+    cell, so it silently disappears while the end-of-run output still
+    renders. The parent pinned at do_execute entry is what keeps the live
+    log visible.
+    """
+
+    def make_kernel(self, pinned):
+        from toymathkernel import MathKernel
+        kernel = mock.Mock(spec=['session', 'iopub_socket', 'log',
+                                 'redirect_to_log', '_cell_parent',
+                                 'get_parent', '_send_cell_output', 'repr'])
+        kernel.session = mock.Mock(spec=['send'])
+        kernel.redirect_to_log = False
+        kernel._cell_parent = pinned
+        # what send-time resolution sees after a mid-run subshell comm
+        kernel.get_parent.return_value = {'msg_id': 'comm-clobber'}
+        kernel.repr = repr
+        kernel._send_cell_output = (
+            lambda *args: MathKernel._send_cell_output(kernel, *args))
+        return kernel
+
+    def sent_parent(self, kernel):
+        return kernel.session.send.call_args.kwargs['parent']
+
+    def test_worker_thread_display_keeps_the_cell_parent(self):
+        import threading
+        from toymathkernel import MathKernel
+        kernel = self.make_kernel({'msg_id': 'cell-7'})
+        worker = threading.Thread(
+            target=lambda: MathKernel.Display(kernel, 'streamed step'))
+        worker.start()
+        worker.join()
+        self.assertEqual(self.sent_parent(kernel), {'msg_id': 'cell-7'})
+
+    def test_stream_write_keeps_the_cell_parent(self):
+        from toymathkernel import MathKernel
+        kernel = self.make_kernel({'msg_id': 'cell-7'})
+        MathKernel.Write(kernel, 'partial line')
+        self.assertEqual(self.sent_parent(kernel), {'msg_id': 'cell-7'})
+
+    def test_output_outside_any_cell_still_resolves_a_parent(self):
+        from toymathkernel import MathKernel
+        kernel = self.make_kernel({})
+        MathKernel.Write(kernel, 'banner')
+        self.assertEqual(self.sent_parent(kernel), {'msg_id': 'comm-clobber'})
+
+    def test_do_execute_pins_the_dispatch_parent(self):
+        from toymathkernel import MathKernel
+        kernel = mock.Mock(spec=['mathShell', 'log', 'execution_count',
+                                 '_allow_stdin', '_cell_parent',
+                                 'get_parent', 'Error'])
+        kernel.mathShell = mock.Mock(spec=['exec'])
+        kernel.execution_count = 3
+        kernel.get_parent.return_value = {'msg_id': 'exec-3'}
+        reply = MathKernel.do_execute(kernel, 'x + 1', silent=False)
+        self.assertEqual(reply['status'], 'ok')
+        self.assertEqual(kernel._cell_parent, {'msg_id': 'exec-3'})
+        kernel.get_parent.assert_called_once_with('shell')
+
+
 if __name__ == '__main__':
     unittest.main()

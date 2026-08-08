@@ -114,6 +114,31 @@ independent numeric sampling for probabilistic evidence. Canonical inequality
 between opaque atoms is never conclusive: distinct forms may still be related
 by an identity the canonicalizer does not know.
 
+### What independence does not cover
+
+The two legs check **transformations**. Two failure modes therefore lie outside
+their reach by construction, and no amount of strengthening the oracle reduces
+either — independence governs how consequences are *computed*, never what is
+*assumed* or what the notation *means*.
+
+1. **An input no step derived.** A chain can be perfect and still rest on an
+   asserted starting point. There is no transformation at a premise, so there
+   is nothing for a second leg to disagree with; a mis-stated premise yields a
+   ledger that is honestly green and materially wrong. `Ledger.premises`
+   derives these inputs and every view displays them. That is visibility, not
+   prevention: a reader who skips the premise list cannot distinguish a
+   derivation from a restatement.
+2. **A reading both legs share.** Function application is a reading convention
+   over a flat product, unknown macro names bind as variables, and
+   `\frac{d}{dx}` is an operator only at the differentiation boundary. Where
+   the symbolic path and the oracle read an input the same wrong way, they
+   agree — correctly, under a meaning the author did not intend. The defence is
+   refusing or flagging ambiguous notation at the parse boundary, not more
+   independence downstream.
+
+Both are boundaries of the method rather than defects awaiting a patch, and
+both are listed under **Known boundaries** below.
+
 Domain changes are surfaced. A value agreement on a common domain does not
 erase the fact that one expression is defined where the other is not.
 
@@ -308,6 +333,11 @@ Important verified-layer behaviors include:
 - rational powers of positive plain-variable bases have a limited Puiseux
   fold; composite bases remain opaque because identities such as
   `(x^2)^(1/2)=|x|` are domain-sensitive;
+- a function head followed by a bracketed argument carrying a power —
+  `\cos(x)^{2}` — reads as the power of the APPLICATION and normalizes
+  to the powered-head spelling `\cos^{2}(x)` at the parse boundary, so
+  the numeric and symbolic legs cannot read the spelling apart; write
+  `\cos(x^{2})` when the power belongs inside the argument;
 - ellipsis tokens have no semantics and are rejected except by the explicit
   finite-sum/product interpretation tactics, which record continuation as an
   assumption;
@@ -322,6 +352,20 @@ writer, comparer, and replicator landmines.
 
 ## Known boundaries
 
+- **The premise boundary.** A derivation is checked relative to its inputs, so
+  an input no step produced is unverified by construction. A run that asserts
+  an identity and then transforms it correctly records every step as agreeing:
+  the checks are sound, the assumptions are honest, and the conclusion can
+  still be false because its starting point was. This is observed behaviour,
+  not a hypothetical — a proposal that types a coefficient identity instead of
+  deriving it, with a sign wrong in the typing, produces a fully checked chain
+  ending at a wrong answer, and the recorded assembly agrees because it
+  verifies values against the *stated* target. `Ledger.premises` lists such
+  inputs in every view; a claim closed from one carries the
+  `derived-from-premise` shape and stays conditional on it. A designated
+  result that records no claim currently gets no equivalent marking, and a
+  premise containing free variables cannot be refuted by evaluation. Prefer a
+  derivation whose premises are the problem statement alone.
 - Partial multivariate common factors may remain uncancelled, although exact
   cross-multiplication keeps equality checking sound.
 - Moving an inequality by a symbolic factor requires the agent to state the
@@ -343,10 +387,73 @@ writer, comparer, and replicator landmines.
   consumes a recorded antiderivative step, substitutes both bounds itself,
   and is checked by independent quadrature over the integrand; continuity
   on the interval is recorded, not proved, and an interior domain break
-  makes the quadrature leg refuse. Improper integrals (infinite bounds or
-  an interior/endpoint singularity) have no closing tactic. A chain rooted
+  makes the quadrature leg refuse. A symbolic bound is sampled by that
+  leg as a parameter. A chain rooted
   at the bare integrand — or the bare body of any value-bearing binder,
   such as a limit — is never accepted as the bounded expression's value.
+- An integrand singular at one finite endpoint — or an integral with
+  one infinite bound — closes through `integrate_improper`, the
+  definitional door: the integral is read as the limit of its
+  truncated integrals, consuming a recorded truncated
+  `integrate_definite` step (the improper bound replaced by a fresh
+  variable) and a recorded limit of that evaluation (one-sided from
+  inside at a singular bound; at ±infinity for an infinite one). The
+  definitional reading and half-open continuity are recorded, not
+  proved; the independent leg re-integrates the integrand over a
+  graded truncation ladder and extrapolates, refusing only past its
+  own measured residual, with genuinely-huge growth saturating to
+  infinity inside the quadrature so an exponentially decaying
+  integrand stays evaluable at deep truncation points. A ladder that
+  does not settle certifies nothing — a refusal is never evidence of
+  divergence, and a divergent integral has no finite limit step to
+  cite in the first place. Interior singularities and doubly-infinite
+  intervals still have no closing tactic.
+- Integration by parts extends over a definite or improper interval
+  through `integrate_by_parts_definite`, assembled from recorded
+  pieces: an antiderivative of dv (re-verified by differentiation),
+  the two boundary limits of u·v cited as recorded limit steps, and
+  the recorded value of the remaining integral over the same bounds.
+  The power rule accepts a var-free symbolic exponent (recording the
+  exponent != -1), `limit_evaluate` accepts an `assuming` parameter
+  domain that both restricts the oracle's sampling and is recorded,
+  and a small named known-integral catalog (`integrate_known`,
+  currently Euler's reflection integral with var-free coefficients
+  carried) closes the remaining integrals no elementary antiderivative
+  reaches. Every such record states that convergence at sampled
+  parameters is evidence, not proof, over the stated domain.
+- A parameterized reduction formula is stated by `integrate_reduction`:
+  one integral family related to itself at an integer parameter shift,
+  with the coefficient proposed by the agent. The structural fence —
+  same bounds and variable verbatim, the right integrand mechanically
+  equal to the left integrand at the shifted parameter — means the
+  step can state a recurrence and nothing else; it is not an
+  integral-equality oracle. Both sides are evaluated by truncation
+  quadrature at parameter values sampled inside the stated `assuming`
+  domain; agreement is evidence about the sampled region, not a proof,
+  and the record says so. The continental hyperbolic
+  spellings `\operatorname{ch}`, `\operatorname{sh}`,
+  `\operatorname{th}`, `\operatorname{cth}` normalize to
+  `\cosh`/`\sinh`/`\tanh`/`\coth` at the lexer; other `\operatorname`
+  names are unchanged.
+- A limit whose body contains a variable-bound definite integral is
+  checkable: the limit tactics' approach oracle evaluates such an
+  integral by graded quadrature (and l'Hôpital's form gate samples
+  through it, with the FTC bound rule differentiating it). This
+  evaluator belongs to the limits oracle leg only — general equality
+  checking deliberately does not gain it, so a definite integral's own
+  value still closes only through the integration tactics, never
+  through a sampled proposal.
+- In the other direction, `differentiate` closes the derivative of a
+  variable-bound definite integral through the FTC bound rule
+  (`f(b(x)) b'(x) - f(a(x)) a'(x)`), recording continuity of the integrand
+  between the bounds; the check leg evaluates the integral as a function
+  by quadrature and central-differences it. An integrand that itself
+  depends on the differentiation variable is refused — differentiation
+  under the integral sign is not in the rule set — as is an unevaluated
+  indefinite integral, which the derivative rules never reach across. The
+  Leibniz operator spelling `\frac{d}{d x} (...)` is a reading convention
+  at the differentiate boundary (and diff! variable inference), not a
+  notation node; elsewhere it remains an ordinary fraction.
 - Matrix arithmetic is literal-only and cell-wise: the named tactics add,
   scale, multiply (ordered, exactly two factors), transpose, and take 2x2
   determinants of written-out matrices, delegating each cell to checked

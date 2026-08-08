@@ -13,6 +13,8 @@ Deliberately absent: solve, simplify, autonomous integrate, general factor.
 import math
 import random
 import re
+import threading
+from contextlib import contextmanager
 
 from notation import Notation, Symbol, Func
 from LatexParser import MathParser
@@ -67,6 +69,10 @@ def parse_latex(latex, allow_ellipsis=False, command_names=None):
         raise PrimitiveError(f'cannot parse {latex!r}: {e}')
     if sym is None:
         raise PrimitiveError(f'cannot parse {latex!r}')
+    if ')^' in normalized:
+        fresh = Notation()
+        sym = _ApplicationPowerNormalizer(notation, fresh)(sym)
+        notation = fresh
     return sym, notation
 
 
@@ -182,17 +188,26 @@ class _GroupStripper(Replicator):
         return super(_GroupStripper, self).enter_oper(sym, f)
 
     def enter_plist(self, sym, f):
-        # explicit-\cdot marking is presentation only (the structural
-        # comparer ignores it); the comparison normal form must too, or
-        # linkage refuses honest respellings of one product
+        # explicit-\cdot marking and spacing tokens (\, \; \quad ...) are
+        # presentation only — every reader convention filters them, so the
+        # comparison normal form must too, or linkage refuses honest
+        # respellings of one product (live: a chain root spelled
+        # `\int ... \, dt` could not cover its own goal spelled
+        # `\int ... dt`, and the verified result was refused at admission)
         spans = self._explicit_func_spans(list(f.args))
         if spans is not None:
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
             return self.output_notation.repf(
                 self.mapsym(sym), Func(Notation.P_LIST, spans, **props))
-        if 'cdot' in f.props:
-            args = self.build_list(f, self.enter_expr)
+        kept = [a for a in f.args
+                if not (isinstance(a, Symbol) and a.name in Notation.styles)]
+        if len(kept) != len(f.args) or 'cdot' in f.props:
             props = {k: v for k, v in f.props.items() if k != 'cdot'}
+            if len(kept) == 1:
+                # a product reduced to one factor is that factor, exactly
+                # as enter_group unwraps a transparent group
+                return self.enter_formula(kept[0])
+            args = tuple(self.enter_expr(a) for a in (kept or f.args))
             return self.output_notation.repf(
                 self.mapsym(sym), Func(Notation.P_LIST, args, **props))
         return super(_GroupStripper, self).enter_plist(sym, f)
@@ -460,6 +475,415 @@ def definite_integral_parts(latex, var=None):
     return (var, integrand_latex,
             write_latex(_peel_groups(lower, notation), notation),
             write_latex(_peel_groups(upper, notation), notation))
+
+
+class _ApplicationPowerNormalizer(Replicator):
+    """`\\cos(x)^{2}` means the SQUARE OF THE APPLICATION.  The capture
+    convention alone reads the `(x)^{2}` INDEX as one factor — the
+    argument — so both legs coherently evaluated `\\cosh(x)^2` as
+    `\\cosh(x^2)` (measured 27.31 = cosh(4) at x = 2), and a live run's
+    correct Pythagorean identity was refused as false.  This normalizer
+    rewrites a function head followed by a bracketed-group INDEX onto
+    the powered-head spelling (`\\cos^{2}(x)`) that every reader
+    already handles, at the parse boundary, so no two legs can ever
+    read the spelling apart.  A head that is itself already powered is
+    left untouched (genuinely ambiguous, and unseen in the wild)."""
+
+    def _head_name(self, a):
+        if not (isinstance(a, Symbol) and self.notation.get(a) is None):
+            return None
+        if a.name in _UNARY_TABLE or a.name in FUNC_NAMES:
+            return a.name
+        return None
+
+    def _powered_group(self, a):
+        idx = self.notation.getf(a, Notation.INDEX)
+        if idx is None:
+            return None
+        sub, sup_l, power, sup_r = idx.args[1]
+        if (power is None or sub is not None or sup_l is not None
+                or sup_r is not None):
+            return None
+        base = idx.args[0]
+        g = self.notation.vgetf(base, [Notation.GROUP, Notation.V_GROUP])
+        if (g is None or Notation.is_semantic_bracket(g)
+                or g.props.get('br') != '()'):
+            return None
+        return base, power
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        out = []
+        i = 0
+        changed = False
+        while i < len(args):
+            a = args[i]
+            if self._head_name(a) is not None and i + 1 < len(args):
+                pg = self._powered_group(args[i + 1])
+                if pg is not None:
+                    group_sym, power = pg
+                    mapped_power = (self.enter_expr(power)
+                                    if isinstance(power, Symbol)
+                                    else power)
+                    powered_head = self.output_notation.setf(
+                        Notation.INDEX,
+                        (a, (None, None, mapped_power, None)))
+                    out.append(powered_head)
+                    out.append(self.enter_expr(group_sym))
+                    i += 2
+                    changed = True
+                    continue
+            out.append(self.enter_expr(a))
+            i += 1
+        if not changed:
+            return super(_ApplicationPowerNormalizer,
+                         self).enter_plist(sym, f)
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, tuple(out), **f.props))
+
+
+class _IntegralPlaceholderer(Replicator):
+    """Copy a graph replacing each definite-integral term — the ``\\int``
+    INDEX head through its differential — with a fresh placeholder
+    symbol, collecting (name, var, integrand, lower, upper) specs.
+
+    This walk decides only WHERE a term starts and ends inside a
+    product; what the term MEANS is delegated to
+    ``definite_integral_parts`` on the sliced spelling, so the reading
+    can never disagree with the other structure readers.  A slice the
+    reader refuses is left in place untouched (its evaluation will
+    raise, which downstream treats as oracle ignorance)."""
+
+    def __init__(self, notation, output_notation):
+        super(_IntegralPlaceholderer, self).__init__(
+            notation, output_notation)
+        self.specs = []
+
+    def _int_head(self, sym):
+        idx = self.notation.getf(sym, Notation.INDEX)
+        if idx is None:
+            return False
+        base = idx.args[0]
+        return (isinstance(base, Symbol) and self.notation.get(base) is None
+                and base.name == '\\int')
+
+    def _slice_end(self, args, start):
+        """One past the differential of the integral starting at
+        ``start``: the first bare ``d`` + plain-symbol pair, else the end
+        of the product (the frac-differential spelling)."""
+        k = start + 1
+        while k < len(args) - 1:
+            if (_is_bare_d(args[k], self.notation)
+                    and isinstance(args[k + 1], Symbol)
+                    and self.notation.get(args[k + 1]) is None):
+                return k + 2
+            k += 1
+        return len(args)
+
+    def _placeholder(self, term):
+        scratch = Notation()
+        rep = Replicator(self.notation, scratch)
+        mapped = tuple(rep(a) for a in term)
+        sub = (mapped[0] if len(mapped) == 1
+               else scratch.setf(Notation.P_LIST, mapped))
+        parts = definite_integral_parts(write_latex(sub, scratch))
+        if parts is None:
+            return None
+        name = f'zz#lim{len(self.specs) + 1}'
+        self.specs.append((name,) + parts)
+        return Symbol(name)
+
+    def enter_plist(self, sym, f):
+        args = list(f.args)
+        out = []
+        i = 0
+        changed = False
+        while i < len(args):
+            if self._int_head(args[i]):
+                end = self._slice_end(args, i)
+                placeholder = self._placeholder(args[i:end])
+                if placeholder is not None:
+                    out.append(placeholder)
+                    i = end
+                    changed = True
+                    continue
+            out.append(self.enter_expr(args[i]))
+            i += 1
+        if not changed:
+            return super(_IntegralPlaceholderer, self).enter_plist(sym, f)
+        if len(out) == 1:
+            return out[0]
+        return self.output_notation.repf(
+            self.mapsym(sym), Func(Notation.P_LIST, tuple(out), **f.props))
+
+
+def _graded_quadrature(fs, fn, var, a, b, env, panels=64):
+    """The signed value of ``\\int_a^b`` under ``env`` by composite
+    Simpson over slabs graded geometrically from BOTH bounds all the
+    way to the midpoint, so an integrand whose scale-length is the
+    distance to a nearby singularity (``1/t^2`` on ``[x, 1]`` as
+    ``x -> 0``) stays resolvable in every slab — uniform panels
+    measurably cannot, and grading only an outer fringe of the span
+    fails the same way once the bound moves inside it.  The two-grid
+    Richardson residual is its own honesty bar: raises EvalError
+    whenever it cannot vouch for the value (domain break,
+    non-convergence), which approach-sampling treats as ignorance,
+    never as evidence."""
+    if a == b:
+        return 0.0
+    sign = 1.0
+    if b < a:
+        a, b = b, a
+        sign = -1.0
+    span = b - a
+    rel = [0.5] + [10.0 ** (-k) for k in range(1, 7)]
+    cuts = ([a] + [a + r * span for r in reversed(rel)]
+            + [b - r * span for r in rel[1:]] + [b])
+    total = 0.0
+    err = 0.0
+    with _overflow_saturation():
+        for lo, hi in zip(cuts, cuts[1:]):
+            coarse, _bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                           panels)
+            fine, _bad2 = _simpson_panels(fs, fn, var, lo, hi, env,
+                                          panels * 2)
+            if coarse is None or fine is None:
+                raise EvalError(
+                    'integrand is not evaluable on the interval')
+            total += fine
+            err += abs(fine - coarse) / 15.0
+    if not math.isfinite(total):
+        raise EvalError('the integral value overflows')
+    if err > 1e-6 * max(1.0, abs(total)):
+        raise EvalError('quadrature over the interval did not converge')
+    return sign * total
+
+
+def _ladder_value(vals):
+    """Iterated-Aitken value of a truncation ladder, with the
+    extrapolation spread as its own honesty gate: raises EvalError when
+    the rung differences stop decaying (no finite value in evidence —
+    the divergent shape) or the spread cannot vouch for the value."""
+    diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+    tail = [abs(d) for d in diffs[-2:]]
+    if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
+            and tail[1] > 1e-6 * max(1.0, abs(vals[-1])):
+        raise EvalError('the truncation ladder does not settle')
+    lvl1 = [_aitken_accel(*vals[k:k + 3]) for k in range(len(vals) - 2)]
+    if any(v is None for v in lvl1):
+        est = vals[-1]
+        spread = abs(vals[-1] - vals[-2])
+    else:
+        lvl2 = [_aitken_accel(*lvl1[k:k + 3])
+                for k in range(len(lvl1) - 2)]
+        if not lvl2 or any(v is None for v in lvl2):
+            est = lvl1[-1]
+            spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
+        else:
+            est = lvl2[-1]
+            spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
+                      else abs(lvl2[-1] - lvl1[-1]))
+    if spread > 1e-5 * max(1.0, abs(est)):
+        raise EvalError('the truncation extrapolation did not converge')
+    return est
+
+
+def _truncation_ladder_value(fs, fn, ivar, finite, sign, env, rungs=7):
+    """The definitional value of an integral with one infinite bound:
+    graded quadrature to truncation points growing by decades away from
+    the finite bound, iterated Aitken over the rungs (seven decades —
+    slow power-law tails like x^{-1.2} need the depth).  Raises
+    EvalError when no finite value is in evidence; callers treat that
+    as oracle ignorance, never as evidence."""
+    scale = max(1.0, abs(finite))
+    vals = []
+    for t in [scale * 10.0 ** k for k in range(1, rungs + 1)]:
+        lo, hi = (finite, t) if sign > 0 else (-t, finite)
+        vals.append(_graded_quadrature(fs, fn, ivar, lo, hi, env))
+    return _ladder_value(vals)
+
+
+def _singular_ladder_value(fs, fn, ivar, a, b, side, env):
+    """The definitional value of an integral whose integrand is singular
+    at the ``side`` (``'lower'``/``'upper'``) bound: cumulative graded
+    slabs approaching the singular bound geometrically, iterated Aitken
+    over the running sums — the gen-76 singular ladder as a VALUE.
+    Raises EvalError when no finite value is in evidence."""
+    span = b - a
+    deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(7)]
+    if side == 'lower':
+        regions = [(a + deltas[0], b)]
+        regions += [(a + deltas[k + 1], a + deltas[k]) for k in range(6)]
+    else:
+        regions = [(a, b - deltas[0])]
+        regions += [(b - deltas[k], b - deltas[k + 1]) for k in range(6)]
+    vals = []
+    run = 0.0
+    for lo, hi in regions:
+        run += _graded_quadrature(fs, fn, ivar, lo, hi, env, panels=64)
+        vals.append(run)
+    return _ladder_value(vals)
+
+
+def _improper_value(fs, fn, ivar, a, b_infinite_sign, env):
+    """Numeric value of ``\\int_a^{+\\infty}`` (or the mirrored
+    ``\\int_{-\\infty}^{b}`` when the sign is negative, with ``a`` the
+    finite bound) tolerating a singular finite endpoint: the finite
+    part is tried as plain graded quadrature and falls back to the
+    singular ladder, the tail is the decade truncation ladder.  Oracle
+    infrastructure for the known-integral and definite-by-parts checks;
+    raises EvalError when no finite value is in evidence."""
+    sign = b_infinite_sign
+    mid = a + (1.0 if sign > 0 else -1.0) * max(1.0, abs(a))
+    lo, hi = (a, mid) if sign > 0 else (mid, a)
+    try:
+        finite_part = _graded_quadrature(fs, fn, ivar, lo, hi, env)
+    except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+        finite_part = _singular_ladder_value(
+            fs, fn, ivar, lo, hi, 'lower' if sign > 0 else 'upper', env)
+    tail = _truncation_ladder_value(fs, fn, ivar, mid, sign, env)
+    return finite_part + tail
+
+
+def definite_integral_evaluator(sym, notation):
+    """A callable ``env -> float`` for a limit body containing
+    variable-bound definite integrals: each integral is computed by
+    ``_graded_quadrature`` under the ambient environment (bounds
+    evaluated per call, the bound variable lexically shadowed; one
+    infinite bound routes through the decade truncation ladder), then
+    the surrounding expression is evaluated with the values in place.
+    Returns None when the body contains no definite integral, so
+    callers keep plain ``numeric_eval``.
+
+    Deliberately LIMITS/QUADRATURE-ORACLE infrastructure: general
+    ``equal?`` does not gain this evaluator — a definite integral's
+    VALUE still closes only through
+    `integrate_definite`/`integrate_improper`, and letting the sampling
+    comparator decide integrals numerically would open a proposal route
+    around that boundary."""
+    scratch = Notation()
+    walker = _IntegralPlaceholderer(notation, scratch)
+    skeleton = walker(sym)
+    if not walker.specs:
+        return None
+    parsed = []
+    for name, ivar, integrand, lower, upper in walker.specs:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        parsed.append((name, ivar, fs, fn,
+                       (ls, ln, _infinity_sign(ls, ln)),
+                       (us, un, _infinity_sign(us, un))))
+
+    def evaluate(env):
+        e = dict(env)
+        for name, ivar, fs, fn, lo_spec, hi_spec in parsed:
+            ls, ln, lo_inf = lo_spec
+            us, un, hi_inf = hi_spec
+            if lo_inf is not None and hi_inf is not None:
+                raise EvalError('both bounds are infinite')
+            if lo_inf == 1 or hi_inf == -1:
+                raise EvalError('reversed infinite bound')
+            if hi_inf == 1 or lo_inf == -1:
+                fin_s, fin_n = (ls, ln) if hi_inf == 1 else (us, un)
+                finite = numeric_eval(fin_s, fin_n, e)
+                if (isinstance(finite, list)
+                        or not math.isfinite(finite)):
+                    raise EvalError('integral bound is not evaluable')
+                sign = 1 if hi_inf == 1 else -1
+                e[name] = _truncation_ladder_value(fs, fn, ivar,
+                                                   finite, sign, e)
+                continue
+            a = numeric_eval(ls, ln, e)
+            b = numeric_eval(us, un, e)
+            if (isinstance(a, list) or isinstance(b, list)
+                    or not (math.isfinite(a) and math.isfinite(b))):
+                raise EvalError('integral bound is not evaluable')
+            e[name] = _graded_quadrature(fs, fn, ivar, a, b, e)
+        return numeric_eval(skeleton, scratch, e)
+
+    return evaluate
+
+
+def _is_bare_d(sym, notation):
+    return (isinstance(sym, Symbol) and notation.get(sym) is None
+            and sym.name == 'd')
+
+
+def _differential_denominator_var(den, notation):
+    """The <var> of a ``d<var>`` fraction denominator, or None."""
+    f = notation.getf(_peel_groups(den, notation), Notation.P_LIST)
+    if f is None:
+        return None
+    items = [a for a in f.args if not (isinstance(a, Symbol)
+                                       and a.name in Notation.styles)]
+    if len(items) != 2 or not _is_bare_d(items[0], notation):
+        return None
+    v = items[1]
+    if not (isinstance(v, Symbol) and notation.get(v) is None):
+        return None
+    return v.name
+
+
+def derivative_operator_parts(latex):
+    """(var, operand_latex) when ``latex`` is a Leibniz-prefixed
+    derivative — ``\\frac{d}{d x} <expr>`` or the differential-in-
+    numerator form ``\\frac{d <expr>}{d x}`` — else None.
+
+    A reading convention, not a DAG node: the parser sees an ordinary
+    fraction whose ``d``s are one-letter symbols, exactly as an
+    integral's trailing differential is an ordinary product tail.  As
+    there, a genuine variable named ``d`` is indistinguishable from the
+    operator and the human reading wins (see
+    ``_split_trailing_differential``).  Only the derivative-taking
+    boundary — the ``differentiate`` tactic and the diff! variable
+    inference — consults this reader, so nothing else re-reads a
+    fraction; both consumers share this one function so the two
+    readings can never disagree."""
+    try:
+        sym, notation = parse_latex(latex)
+    except PrimitiveError:
+        return None
+    inner = _peel_groups(sym, notation)
+    items = None
+    f = notation.getf(inner, Notation.P_LIST)
+    if f is not None:
+        items = [a for a in f.args if not (isinstance(a, Symbol)
+                                           and a.name in Notation.styles)]
+        if not items:
+            return None
+        head = items[0]
+    else:
+        head = inner
+    fr = notation.get(head)
+    if fr is None or len(fr.args) != 2 \
+            or not (fr.sym == Notation.SLASH
+                    or fr.sym.name in FRAC_NAMES):
+        return None
+    dvar = _differential_denominator_var(fr.args[1], notation)
+    if dvar is None or dvar == 'd':
+        return None
+    num = _peel_groups(fr.args[0], notation)
+    if _is_bare_d(num, notation):
+        # prefix form: the operand is everything after the fraction
+        if items is None or len(items) < 2:
+            return None
+        rest = items[1:]
+    else:
+        # differential-in-numerator: \frac{d <expr>}{d x}, nothing after
+        if items is not None and len(items) > 1:
+            return None
+        nf = notation.getf(num, Notation.P_LIST)
+        if nf is None:
+            return None
+        nitems = [a for a in nf.args if not (isinstance(a, Symbol)
+                                             and a.name in Notation.styles)]
+        if len(nitems) < 2 or not _is_bare_d(nitems[0], notation):
+            return None
+        rest = nitems[1:]
+    operand = rest[0] if len(rest) == 1 else \
+        notation.setf(Notation.P_LIST, tuple(rest))
+    return dvar, write_latex(_peel_groups(operand, notation), notation)
 
 
 def _integral_parts_latex(latex):
@@ -973,6 +1397,47 @@ def _is_func_name(sym, notation):
             and sym.name in _UNARY_TABLE)
 
 
+_SATURATE_OVERFLOW = threading.local()
+
+
+@contextmanager
+def _overflow_saturation():
+    """Evaluation mode in which a genuinely-huge overflow saturates to
+    IEEE infinity and propagates (`1/\\cosh^{3}(300)` is 0, not an
+    error), for the quadrature and approach-ladder legs whose deep
+    rungs measurably die on `\\cosh`-family growth otherwise.
+
+    Deliberately NOT the default: the comparison legs (`equal?`,
+    spot checks) must keep seeing overflow as an evaluation failure —
+    `inf` on both sides of `_num_agree` is nan-arithmetic, a false
+    DISAGREE between identical spellings.  Every consumer of this mode
+    re-raises when the final value itself is non-finite, so the mode
+    never widens what a caller can observe, only what can cancel
+    inside."""
+    prev = getattr(_SATURATE_OVERFLOW, 'on', False)
+    _SATURATE_OVERFLOW.on = True
+    try:
+        yield
+    finally:
+        _SATURATE_OVERFLOW.on = prev
+
+
+def _apply_unary(fname, v):
+    """One table application, saturating only the genuinely monotone
+    overflow shapes (sinh/cosh/exp); `coth` saturates to ±1, never
+    infinity, so its overflow stays an error."""
+    try:
+        return _UNARY_TABLE[fname](v)
+    except OverflowError:
+        if not getattr(_SATURATE_OVERFLOW, 'on', False):
+            raise
+        if fname == '\\sinh':
+            return math.copysign(math.inf, v)
+        if fname in ('\\cosh', '\\exp'):
+            return math.inf
+        raise
+
+
 # ---------------------------------------------------------------------------
 # matrix-aware oracle arithmetic. Matrices evaluate to lists of lists of
 # floats; the helpers keep multiplication ORDERED, so the oracle can
@@ -1044,7 +1509,14 @@ def _num_pow(b, p):
         raise ZeroDivisionError
     if b < 0 and p != int(p):
         raise ValueError('negative base, fractional power')
-    return math.pow(b, p)
+    try:
+        return math.pow(b, p)
+    except OverflowError:
+        if not getattr(_SATURATE_OVERFLOW, 'on', False):
+            raise
+        if b > 0:
+            return math.inf
+        return math.inf if int(p) % 2 == 0 else -math.inf
 
 
 def _num_abs(v):
@@ -1117,6 +1589,51 @@ def _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
     if noise1 is None or noise2 is None:
         return False
     return gap > _RESOLUTION_MARGIN * max(noise1, noise2)
+
+
+def _composite_disagreement_resolves(evaluate, base_env, v1, v2):
+    """The same question as ``_disagreement_resolves`` for a check whose two
+    values come from a PIPELINE rather than one expression apiece.
+
+    ``evaluate(point) -> (left, right)`` may derive intermediates of its own
+    — an assembled answer evaluates each unknown's recorded value before
+    binding it into the relation — and that is exactly where the significant
+    digits go: measured on the live ansatz, the denominator's expanded
+    spelling cancels 2.3e8 to 1, costing 1e-7 of relative precision, and the
+    relation's own terms then cancel a further 5.9e5 to 1.  Nudging only the
+    relation's inputs would report the pipeline as quiet, so the whole
+    pipeline is re-run at the nudged point.
+
+    ``base_env`` holds the SAMPLED coordinates only; the derived values must
+    not be nudged directly, or their own noise would be measured twice and
+    the check would never accuse anything.  An empty ``base_env`` means
+    nothing was sampled, so noise stays 0.0 and closed data still refuses —
+    honest ignorance is for evidence the oracle cannot get, not for evidence
+    it never needed."""
+    gap = _num_gap(v1, v2)
+    if gap is None:
+        return True
+    worst = 0.0
+    probed = False
+    for key, coord in base_env.items():
+        if not isinstance(coord, float):
+            continue
+        for toward in (math.inf, -math.inf):
+            nudged = dict(base_env)
+            nudged[key] = math.nextafter(coord, toward)
+            try:
+                moved1, moved2 = evaluate(nudged)
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                continue
+            for base, moved in ((v1, moved1), (v2, moved2)):
+                shift = _num_gap(base, moved)
+                if shift is None:
+                    continue
+                probed = True
+                worst = max(worst, shift)
+    if base_env and not probed:
+        return False
+    return gap > _RESOLUTION_MARGIN * worst
 
 
 def _num_agree(v1, v2, tol):
@@ -1246,7 +1763,7 @@ def numeric_eval(sym, notation, env):
             v = numeric_eval(arg, notation, env)
             if isinstance(v, list):
                 raise EvalError('matrix argument to a function')
-            return _UNARY_TABLE[fname.name](v)
+            return _apply_unary(fname.name, v)
         raise EvalError(f'unknown function {fname!r}')
     if op.name in FRAC_NAMES:
         d = numeric_eval(f.args[1], notation, env)
@@ -1391,9 +1908,9 @@ def _eval_plist(args, notation, env):
                 inner = _num_mul(inner, numeric_eval(t, notation, env))
             if isinstance(inner, list):
                 raise EvalError('matrix argument to a function')
-            v = _UNARY_TABLE[fname](inner)
+            v = _apply_unary(fname, inner)
             if power is not None:
-                v = math.pow(v, numeric_eval(power, notation, env))
+                v = _num_pow(v, numeric_eval(power, notation, env))
             result = _num_mul(result, v)
             i = j
         else:
@@ -1578,6 +2095,16 @@ def _sample_guards(assumptions):
                 parts = None
             if parts is not None:
                 constraints.append(parts)
+                continue
+            # a chained/conjunction constraint (1 < n < 2 desugars to an
+            # A_LIST): every member restricts the sample region — a
+            # silently dropped constraint would sample the whole space
+            try:
+                members = _conjunction_parts(relation)
+            except PrimitiveError:
+                members = None
+            if members is not None:
+                constraints.extend(members)
     return nonzero, constraints
 
 
@@ -1776,6 +2303,47 @@ def _union_truths_at(env, tparts, dparts, tol):
     return t, any(conjunctions)
 
 
+def _simpson_panels(fs, fn, var, a, b, env, n):
+    """One composite-Simpson pass over ``fs`` for ``var`` in [a, b] under
+    ``env``: (value, bad_node).  ``bad_node`` is the first node where the
+    integrand leaves its domain while other nodes evaluate — an
+    x-dependent domain break inside the bounds, a witness rather than
+    ignorance; value None with no bad node is oracle ignorance (an
+    unevaluable draw), never evidence.  Shared oracle infrastructure:
+    the definite-integral evaluation check and the FTC derivative check
+    both integrate through here, neither shares a computation with any
+    symbolic leg."""
+    h = (b - a) / n
+    total = 0.0
+    evaluated = 0
+    domain_break = None
+    unknown = False
+    for i in range(n + 1):
+        x = a + i * h
+        node_env = dict(env)
+        node_env[var] = x
+        kind, value = _eval_kind(fs, fn, node_env)
+        if kind is None and (isinstance(value, list)
+                             or not math.isfinite(value)):
+            kind = 'oracle'
+        if kind == 'domain':
+            if domain_break is None:
+                domain_break = x
+            continue
+        if kind is not None:
+            unknown = True     # oracle ignorance, not a witness
+            continue
+        evaluated += 1
+        weight = 1 if i in (0, n) else (4 if i % 2 else 2)
+        total += weight * value
+    if domain_break is not None:
+        # every node failing is a bad parameter draw, not a witness
+        return None, (domain_break if evaluated else None)
+    if unknown:
+        return None, None
+    return total * h / 3.0, None
+
+
 def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
                            panels=64, tol=1e-4):
     """Quadrature leg for a definite-integral evaluation: composite
@@ -1792,10 +2360,18 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
     x-dependent domain break inside [a,b] — the Fundamental Theorem's
     own hypothesis fails there, and F(b)-F(a) is exactly the classic
     wrong answer (``\\int_{-1}^{1} x^{-2} = -2``) — so that point is
-    reported as a refusal, never sampled around.  A sample whose every
-    node fails is a bad parameter draw and is skipped.  Convergence is
-    estimated from two grids; a non-converged estimate is oracle
-    ignorance, never a counterexample."""
+    reported as a refusal, never sampled around.  The hunt for that
+    witness runs even when the claimed result itself is unevaluable —
+    a divergent integral's F(b)-F(a) typically contains the very
+    singularity (``\\ln(0)``), and skipping on it would admit the
+    nonsense the break refusal exists to bar.  A symbolic bound is
+    sampled like any parameter (the identity is then claimed for the
+    bound as a variable), but a domain break under a sampled bound is
+    a bad draw — the claim's own continuity assumption excludes that
+    region — never a witness.  A sample whose every node fails is a
+    bad parameter draw and is skipped.  Convergence is estimated from
+    two grids; a non-converged estimate is oracle ignorance, never a
+    counterexample."""
     parts = definite_integral_parts(expr, var)
     if parts is None:
         return {'status': 'skipped', 'reason': 'not a definite integral'}
@@ -1807,50 +2383,21 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
         rs, rn = parse_latex(result)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
-    if free_symbols(ls, ln) | free_symbols(us, un):
+    bound_syms = free_symbols(ls, ln) | free_symbols(us, un)
+    if var in bound_syms:
         return {'status': 'skipped',
-                'reason': 'symbolic bounds are outside this check'}
-    try:
-        a = numeric_eval(ls, ln, {})
-        b = numeric_eval(us, un, {})
-    except (EvalError, ValueError, ZeroDivisionError, OverflowError):
-        return {'status': 'skipped', 'reason': 'bounds are not evaluable'}
-    if not (math.isfinite(a) and math.isfinite(b)):
-        return {'status': 'skipped', 'reason': 'bounds are not finite'}
-    params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
-
-    def simpson(env, n):
-        # returns (value, bad_node); bad_node is the first x where the
-        # integrand leaves its domain while other nodes evaluate
-        h = (b - a) / n
-        total = 0.0
-        evaluated = 0
-        domain_break = None
-        unknown = False
-        for i in range(n + 1):
-            x = a + i * h
-            node_env = dict(env)
-            node_env[var] = x
-            kind, value = _eval_kind(fs, fn, node_env)
-            if kind is None and (isinstance(value, list)
-                                 or not math.isfinite(value)):
-                kind = 'oracle'
-            if kind == 'domain':
-                if domain_break is None:
-                    domain_break = x
-                continue
-            if kind is not None:
-                unknown = True     # oracle ignorance, not a witness
-                continue
-            evaluated += 1
-            weight = 1 if i in (0, n) else (4 if i % 2 else 2)
-            total += weight * value
-        if domain_break is not None:
-            # every node failing is a bad parameter draw, not a witness
-            return None, (domain_break if evaluated else None)
-        if unknown:
-            return None, None
-        return total * h / 3.0, None
+                'reason': 'a bound contains the integration variable'}
+    if not bound_syms:
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return {'status': 'skipped', 'reason': 'bounds are not finite'}
+    params = ((free_symbols(fs, fn) | free_symbols(rs, rn) | bound_syms)
+              - {var})
 
     rng = random.Random(seed)
     rounds = samples if params else 1
@@ -1859,18 +2406,52 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
     while agreed < rounds and tried < rounds * 6:
         tried += 1
         env = _sample_point(params, rng) if params else {}
+        if bound_syms:
+            try:
+                a = numeric_eval(ls, ln, env)
+                b = numeric_eval(us, un, env)
+            except (EvalError, ValueError, ZeroDivisionError,
+                    OverflowError):
+                continue
+            if any(isinstance(v, list) or not math.isfinite(v)
+                   for v in (a, b)):
+                continue
+
+        def simpson(env, n):
+            return _simpson_panels(fs, fn, var, a, b, env, n)
+
+        def break_refusal(bad):
+            near = 1e-9 * max(1.0, abs(a), abs(b))
+            if abs(bad - a) <= near or abs(bad - b) <= near:
+                reason = (f'integrand is not evaluable at the bound '
+                          f'{var} = {bad:.6g}; the integral is improper '
+                          'there — a singular endpoint closes through '
+                          'integrate_improper (evaluate the truncated '
+                          'integral, then cite its recorded one-sided '
+                          'limit)')
+            else:
+                reason = (f'integrand is not evaluable at '
+                          f'{var} = {bad:.6g} inside the bounds; '
+                          'the integral is improper there')
+            return {'status': 'disagree', 'point': {var: bad},
+                    'reason': reason}
+
         try:
             expected = numeric_eval(rs, rn, env)
         except (EvalError, ValueError, ZeroDivisionError, OverflowError):
-            continue
-        if isinstance(expected, list) or not math.isfinite(expected):
+            expected = None
+        if (expected is None or isinstance(expected, list)
+                or not math.isfinite(expected)):
+            if not bound_syms:
+                _value, bad = simpson(env, panels)
+                if bad is not None:
+                    return break_refusal(bad)
             continue
         coarse, bad = simpson(env, panels)
         if bad is not None:
-            return {'status': 'disagree', 'point': {var: bad},
-                    'reason': f'integrand is not evaluable at '
-                              f'{var} = {bad:.6g} inside the bounds; '
-                              'the integral is improper there'}
+            if bound_syms:
+                continue
+            return break_refusal(bad)
         fine, bad = simpson(env, panels * 2)
         if coarse is None or fine is None:
             continue
@@ -1886,6 +2467,439 @@ def numeric_definite_check(expr, var, result, samples=4, seed=20260731,
         return {'status': 'skipped', 'reason': 'no evaluable sample points'}
     return {'status': 'agree', 'samples': agreed,
             'method': 'composite-simpson quadrature'}
+
+
+def _aitken_accel(x, y, z):
+    d = (z - y) - (y - x)
+    if abs(d) < 1e-15 * max(abs(x), abs(y), abs(z), 1e-300):
+        return None
+    return z - (z - y) ** 2 / d
+
+
+def _ladder_verdict(vals, quad_err, expected, tol):
+    """One truncation ladder against one expected value, by iterated
+    Aitken with the accumulated quadrature residual as the honesty bar:
+    ('agree'|'undecided'|'disagree'|'stalled', estimate).  'stalled'
+    means the rung differences stop decaying — no finite value is in
+    evidence, which is the divergent shape and never a counterexample."""
+    diffs = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+    tail = [abs(d) for d in diffs[-2:]]
+    if len(tail) == 2 and tail[1] > 0.95 * tail[0] \
+            and tail[1] > tol * max(1.0, abs(vals[-1])):
+        return 'stalled', None
+    lvl1 = [_aitken_accel(*vals[k:k + 3]) for k in range(len(vals) - 2)]
+    if any(v is None for v in lvl1):
+        est = vals[-1]
+        spread = abs(vals[-1] - vals[-2])
+    else:
+        lvl2 = [_aitken_accel(*lvl1[k:k + 3])
+                for k in range(len(lvl1) - 2)]
+        if not lvl2 or any(v is None for v in lvl2):
+            est = lvl1[-1]
+            spread = abs(lvl1[-1] - lvl1[-2]) if len(lvl1) > 1 else 0.0
+        else:
+            est = lvl2[-1]
+            spread = (abs(lvl2[-1] - lvl2[-2]) if len(lvl2) > 1
+                      else abs(lvl2[-1] - lvl1[-1]))
+    bar = 16.0 * (quad_err + spread)
+    scale = max(1.0, abs(est), abs(expected))
+    delta = abs(est - expected)
+    if delta / scale <= tol:
+        return 'agree', est
+    if delta <= bar:
+        return 'undecided', est
+    return 'disagree', est
+
+
+def numeric_improper_check(expr, var, side, result, samples=4,
+                           seed=20260805, panels=128, rungs=7, tol=1e-4,
+                           kind='singular'):
+    """Truncation-quadrature leg for an improper integral: ``result``
+    claims the definitional value — the limit of the truncated
+    integrals.  ``kind='singular'``: the integrand is singular at the
+    ``side`` (``'upper'``/``'lower'``) finite bound, and the ladder's
+    cut points approach it geometrically from inside, each rung adding
+    one graded slab.  ``kind='infinite'``: the ``side`` bound is
+    ``±\\infty``, and the ladder's truncation points grow by decades
+    away from the finite bound, each rung a full graded quadrature
+    (under overflow saturation, so an exponentially decaying integrand
+    is 0 at deep nodes rather than an error).  Both ladders share one
+    verdict: iterated Aitken against the leg's own accumulated
+    residual.  Never touches any antiderivative or recorded limit — it
+    shares only the structure readers with the symbolic path.
+
+    A gap that does not clear the bar is undecided, never a
+    counterexample; a ladder whose rung differences stop decaying has
+    no finite value in evidence (the divergent shape) and reports
+    ``skipped`` — a refusal is never evidence of divergence.  A domain
+    break at a node away from the declared improper bound is a witness
+    that the integrand is improper elsewhere too, and refuses — under
+    sampled parameters it is a bad draw instead."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    _var, integrand, lower, upper = parts
+    if side not in ('upper', 'lower'):
+        return {'status': 'skipped', 'reason': 'unknown singular side'}
+    if kind not in ('singular', 'infinite'):
+        return {'status': 'skipped', 'reason': 'unknown improper kind'}
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    if kind == 'infinite':
+        fin_s, fin_n = (ls, ln) if side == 'upper' else (us, un)
+        if free_symbols(fin_s, fin_n):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            finite = numeric_eval(fin_s, fin_n, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if isinstance(finite, list) or not math.isfinite(finite):
+            return {'status': 'skipped',
+                    'reason': 'the finite bound is not evaluable'}
+        cut_scale = max(1.0, abs(finite))
+        ladder_ts = [cut_scale * 10.0 ** k for k in range(1, 6)]
+        a = b = finite
+    else:
+        if free_symbols(ls, ln) | free_symbols(us, un):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return {'status': 'skipped', 'reason': 'bounds are not finite'}
+        if not b > a:
+            return {'status': 'skipped', 'reason': 'bounds are not ordered'}
+        span = b - a
+        deltas = [span * 1e-2 * 10.0 ** (-k) for k in range(rungs)]
+    params = (free_symbols(fs, fn) | free_symbols(rs, rn)) - {var}
+
+    def piece(lo, hi, env):
+        """(fine value, richardson error, bad node) for one region."""
+        with _overflow_saturation():
+            coarse, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                          panels)
+            if coarse is None:
+                return None, None, bad
+            fine, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                        panels * 2)
+        if fine is None:
+            return None, None, bad
+        return fine, abs(fine - coarse) / 15.0, None
+
+    def singular_ladder(env):
+        """(rung values, accumulated quadrature error, bad node)."""
+        if side == 'upper':
+            regions = [(a, b - deltas[0])]
+            regions += [(b - deltas[k], b - deltas[k + 1])
+                        for k in range(rungs - 1)]
+        else:
+            regions = [(a + deltas[0], b)]
+            regions += [(a + deltas[k + 1], a + deltas[k])
+                        for k in range(rungs - 1)]
+        vals = []
+        total = 0.0
+        err = 0.0
+        for lo, hi in regions:
+            value, piece_err, bad = piece(lo, hi, env)
+            if value is None:
+                return None, None, bad
+            total += value
+            err += piece_err
+            vals.append(total)
+        return vals, err, None
+
+    def infinite_ladder(env):
+        """(rung values, accumulated quadrature error, None) — each rung
+        a full graded quadrature to a decade-farther truncation point."""
+        vals = []
+        err = 0.0
+        for t in ladder_ts:
+            lo, hi = (a, t) if side == 'upper' else (-t, b)
+            try:
+                value = _graded_quadrature(fs, fn, var, lo, hi, env)
+            except (EvalError, ValueError, ZeroDivisionError,
+                    OverflowError):
+                return None, None, None
+            vals.append(value)
+            err += 1e-6 * max(1.0, abs(value))
+        return vals, err, None
+
+    rng = random.Random(seed)
+    rounds = samples if params else 1
+    agreed = 0
+    tried = 0
+    last_reason = 'no evaluable sample points'
+    while agreed < rounds and tried < rounds * 6:
+        tried += 1
+        env = _sample_point(params, rng) if params else {}
+        try:
+            expected = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if isinstance(expected, list) or not math.isfinite(expected):
+            continue
+        # break-hunt probe walked so the declared improper bound is the
+        # LAST node (singular) or not a node at all (infinite): the
+        # first domain break found is then never the declared one, i.e.
+        # a witness that the integrand is improper somewhere else too
+        if kind == 'infinite':
+            lo, hi = ((a, ladder_ts[0]) if side == 'upper'
+                      else (-ladder_ts[0], b))
+            with _overflow_saturation():
+                _probe, bad = _simpson_panels(fs, fn, var, lo, hi, env,
+                                              panels)
+            witness = bad is not None
+        else:
+            with _overflow_saturation():
+                if side == 'upper':
+                    _probe, bad = _simpson_panels(fs, fn, var, a, b,
+                                                  env, panels)
+                    declared = b
+                else:
+                    _probe, bad = _simpson_panels(fs, fn, var, b, a,
+                                                  env, panels)
+                    declared = a
+            witness = bad is not None and (
+                abs(bad - declared) > 1e-9 * max(1.0, abs(declared)))
+        if witness:
+            if not params:
+                return {'status': 'disagree', 'point': {var: bad},
+                        'reason': f'integrand is not evaluable at '
+                                  f'{var} = {bad:.6g}, away from the '
+                                  'declared improper bound; the integral '
+                                  'is improper there too'}
+            continue
+        if kind == 'infinite':
+            vals, quad_err, bad = infinite_ladder(env)
+        else:
+            vals, quad_err, bad = singular_ladder(env)
+        if vals is None:
+            if bad is not None and not params:
+                return {'status': 'disagree', 'point': {var: bad},
+                        'reason': f'integrand is not evaluable at '
+                                  f'{var} = {bad:.6g}, away from the '
+                                  'declared improper bound; the integral '
+                                  'is improper there too'}
+            last_reason = 'truncated integrals were not evaluable'
+            continue
+        status, est = _ladder_verdict(vals, quad_err, expected, tol)
+        if status == 'stalled':
+            last_reason = ('the truncation ladder does not settle — no '
+                           'finite value is in evidence (a refusal is '
+                           'never evidence of divergence)')
+            if params:
+                continue
+            break
+        if status == 'undecided':
+            last_reason = ('the truncation quadrature could not '
+                           'resolve the gap within its own error bar')
+            continue
+        if status == 'disagree':
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': expected, 'numeric': est}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': last_reason}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'graded truncation quadrature with iterated '
+                      'Aitken extrapolation'}
+
+
+def numeric_reduction_check(lhs, rhs, assumptions=None, samples=4,
+                            seed=20260805, tol=1e-4):
+    """Two-sided quadrature leg for a proposed reduction relation: both
+    sides are evaluated through `definite_integral_evaluator` (finite
+    bounds by graded quadrature, one infinite bound by the decade
+    truncation ladder) at parameter values sampled inside the recorded
+    ``constraint`` assumptions — the gen-55 vocabulary.  The two sides
+    share only the structure readers and the quadrature core with each
+    other, and nothing with the symbolic gates.
+
+    A side with no finite value in evidence at a draw (a stalled
+    ladder) skips that draw — a refusal is never evidence of
+    divergence, and agreement covers only the sampled region, which the
+    step's own assumption says.  A gap must clear the ladders' combined
+    evidence bar before it accuses."""
+    try:
+        ls, ln = parse_latex(lhs)
+        rs, rn = parse_latex(rhs)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    lhs_eval = definite_integral_evaluator(ls, ln)
+    rhs_eval = definite_integral_evaluator(rs, rn)
+    if lhs_eval is None or rhs_eval is None:
+        return {'status': 'skipped',
+                'reason': 'a side contains no integral to evaluate'}
+    guards = _sample_guards(assumptions)
+    variables = (free_symbols(ls, ln) | free_symbols(rs, rn)
+                 | _guard_variables(guards))
+    rng = random.Random(seed)
+    rounds = samples if variables else 1
+    budget = _sample_budget(rounds, guards)
+    agreed = 0
+    tried = 0
+    last_reason = 'no evaluable sample points'
+    while agreed < rounds and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng) if variables else {}
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            v1 = lhs_eval(env)
+            v2 = rhs_eval(env)
+        except (EvalError, ValueError, ZeroDivisionError,
+                OverflowError):
+            last_reason = ('a side had no finite value in evidence at '
+                           'a sampled parameter (a refusal is never '
+                           'evidence of divergence)')
+            continue
+        if any(isinstance(v, list) or not math.isfinite(v)
+               for v in (v1, v2)):
+            continue
+        scale = max(1.0, abs(v1), abs(v2))
+        delta = abs(v1 - v2)
+        if delta / scale > tol:
+            # the ladders vouch for ~1e-5 relative each; a gap inside
+            # 16x their combined bar is undecided, never an accusation
+            if delta <= 3.2e-4 * scale:
+                last_reason = ('the quadrature could not resolve the '
+                               'gap within its own error bar')
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'lhs': v1, 'rhs': v2}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': last_reason}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'parameter-sampled truncation quadrature on '
+                      'both sides'}
+
+
+def numeric_known_integral_check(expr, var, result, assumptions=None,
+                                 samples=4, seed=20260805, tol=1e-4):
+    """Quadrature leg for a claimed definite/improper integral VALUE:
+    the integral is evaluated at parameters sampled inside the recorded
+    constraints — one infinite bound via the doubly-improper value
+    (singular finite end tolerated, decade truncation tail), finite
+    bounds via graded quadrature with singular-end ladder fallbacks —
+    against the claimed closed form.  Used by the known-integral facts
+    and the definite by-parts assembly.  Shares only the structure
+    readers with the symbolic gates; a draw with no finite value in
+    evidence is skipped — a refusal is never evidence of
+    divergence."""
+    parts = definite_integral_parts(expr, var)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    _var, integrand, lower, upper = parts
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    lo_inf = _infinity_sign(ls, ln)
+    hi_inf = _infinity_sign(us, un)
+    if (lo_inf is not None and hi_inf is not None) \
+            or lo_inf == 1 or hi_inf == -1:
+        return {'status': 'skipped',
+                'reason': 'doubly-infinite or reversed bounds are '
+                          'outside this check'}
+    fin_s, fin_n = (ls, ln) if hi_inf == 1 else (
+        (us, un) if lo_inf == -1 else (None, None))
+    if fin_s is not None:
+        if free_symbols(fin_s, fin_n):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(fin_s, fin_n, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if isinstance(a, list) or not math.isfinite(a):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        b = None
+    else:
+        if free_symbols(ls, ln) | free_symbols(us, un):
+            return {'status': 'skipped',
+                    'reason': 'symbolic bounds are outside this check'}
+        try:
+            a = numeric_eval(ls, ln, {})
+            b = numeric_eval(us, un, {})
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+        if any(isinstance(v, list) or not math.isfinite(v)
+               for v in (a, b)):
+            return {'status': 'skipped',
+                    'reason': 'bounds are not evaluable'}
+    guards = _sample_guards(assumptions)
+    variables = ((free_symbols(fs, fn) | free_symbols(rs, rn)
+                  | _guard_variables(guards)) - {var})
+    rng = random.Random(seed)
+    rounds = samples if variables else 1
+    budget = _sample_budget(rounds, guards)
+    agreed = 0
+    tried = 0
+    last_reason = 'no evaluable sample points'
+    while agreed < rounds and tried < budget:
+        tried += 1
+        env = _sample_point(variables, rng) if variables else {}
+        if not _admissible_point(guards, env):
+            continue
+        try:
+            expected = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if isinstance(expected, list) or not math.isfinite(expected):
+            continue
+        try:
+            if fin_s is not None:
+                value = _improper_value(fs, fn, var, a,
+                                        1 if hi_inf == 1 else -1, env)
+            else:
+                try:
+                    value = _graded_quadrature(fs, fn, var, a, b, env)
+                except (EvalError, ValueError, ZeroDivisionError,
+                        OverflowError):
+                    try:
+                        value = _singular_ladder_value(
+                            fs, fn, var, a, b, 'lower', env)
+                    except (EvalError, ValueError, ZeroDivisionError,
+                            OverflowError):
+                        value = _singular_ladder_value(
+                            fs, fn, var, a, b, 'upper', env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            last_reason = ('the integral had no finite value in '
+                           'evidence at a sampled parameter (a refusal '
+                           'is never evidence of divergence)')
+            continue
+        scale = max(1.0, abs(value), abs(expected))
+        delta = abs(value - expected)
+        if delta / scale > tol:
+            if delta <= 3.2e-4 * scale:
+                last_reason = ('the quadrature could not resolve the '
+                               'gap within its own error bar')
+                continue
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': expected, 'numeric': value}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': last_reason}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'doubly-improper quadrature at sampled parameters'}
 
 
 def numeric_union_check(target, disjuncts, samples=12, seed=20260730,
@@ -2148,6 +3162,10 @@ def _strip_limit(sym, notation):
 
 def _infinity_sign(sym, notation):
     sym = _transparent_inner(sym, notation)
+    pos = notation.getf(sym, Notation.PLUS)
+    if pos is not None:
+        # the explicit-sign spelling \int_0^{+\infty} / x \to +\infty
+        sym = _transparent_inner(pos.args[0], notation)
     neg = notation.getf(sym, Notation.MINUS)
     if neg is not None:
         inner = _transparent_inner(neg.args[0], notation)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Limit tactics and independent approach checks."""
+import math
 import random
 from fractions import Fraction
 
@@ -11,7 +12,9 @@ from primitives import (
     FRAC_NAMES, PrimitiveError, EvalError, parse_latex, write_latex,
     same_expression,
     _transparent_inner, _plain_symbol_name, _contains_free_infinity,
-    free_symbols, numeric_eval,
+    _sample_guards, _admissible_point, _guard_variables,
+    free_symbols, numeric_eval, definite_integral_evaluator,
+    _overflow_saturation,
     _sample_point, _result, _error, _int_literal, _strip_limit,
     _infinity_sign, _limit_latex, _paren, _is_sum_str,
 )
@@ -36,15 +39,29 @@ def _limit_parts(expr):
     }
 
 
-def _limit_sample_envs(parsed, var, samples, seed=20260705):
+def _limit_sample_envs(parsed, var, samples, seed=20260705, guards=None):
     variables = set()
     for sym, notation in parsed:
         variables |= free_symbols(sym, notation)
     variables.discard(var)
+    if guards is not None:
+        variables |= _guard_variables(guards) - {var}
     if not variables:
         return [{}]
     rng = random.Random(seed)
-    return [_sample_point(variables, rng) for _ in range(samples)]
+    if guards is None or not (guards[0] or guards[1]):
+        return [_sample_point(variables, rng) for _ in range(samples)]
+    # rejection-sample inside the stated parameter region; a
+    # parameter-dependent limit certified on unconstrained draws would
+    # count only the draws that happened to converge
+    envs = []
+    tried = 0
+    while len(envs) < samples and tried < samples * 24:
+        tried += 1
+        env = _sample_point(variables, rng)
+        if _admissible_point(guards, env):
+            envs.append(env)
+    return envs
 
 
 def _aitken(a, b, c):
@@ -54,9 +71,38 @@ def _aitken(a, b, c):
     return c - (c - b) ** 2 / d
 
 
+def _body_fn(sym, notation):
+    """The approach oracle's evaluator for one body: plain numeric_eval,
+    or the quadrature-backed evaluator when the body carries a
+    variable-bound definite integral (a capability of the LIMITS oracle
+    leg only — the value of an integral itself still closes through the
+    integration tactics, never through sampling).
+
+    Runs under overflow saturation so genuinely-huge intermediates
+    cancel (`\\frac{1}{\\cosh^{n} x}` at a deep ladder rung is 0, not
+    an error), but keeps the public contract: a NON-FINITE body value
+    raises, exactly as an overflow did before, so Richardson/Aitken
+    arithmetic never sees an infinity — nan comparisons read as
+    agreement, the one shape this leg must never emit."""
+    special = definite_integral_evaluator(sym, notation)
+    if special is None:
+        def special(env):
+            return numeric_eval(sym, notation, env)
+
+    def guarded(env):
+        with _overflow_saturation():
+            v = special(env)
+        if not isinstance(v, list) and not math.isfinite(v):
+            raise EvalError('non-finite body value')
+        return v
+
+    return guarded
+
+
 def _approach_estimate(body, notation, var, point, point_notation,
                        direction, env):
     """Independent numeric limit estimate plus a convergence-error bound."""
+    body_eval = _body_fn(body, notation)
     inf = _infinity_sign(point, point_notation)
     if inf is not None:
         # fixed ladders: fall back to shorter/nearer ones only when a point
@@ -72,7 +118,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
                 for x in ladder:
                     e = dict(env)
                     e[var] = inf * x
-                    vals.append(numeric_eval(body, notation, e))
+                    vals.append(body_eval(e))
             except (OverflowError, ValueError, ZeroDivisionError,
                     EvalError):
                 continue
@@ -102,7 +148,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
     def at(offset):
         e = dict(env)
         e[var] = a + offset
-        v = numeric_eval(body, notation, e)
+        v = body_eval(e)
         if isinstance(v, list):
             raise EvalError('matrix-valued limit')
         return v
@@ -121,10 +167,16 @@ def _approach_estimate(body, notation, var, point, point_notation,
     # Geometric h-ladders with Aitken acceleration, mirroring the infinity
     # branch: the plain Richardson model assumes a smooth truncation term
     # and honestly skips |x|-kinked bodies whose approach values decay like
-    # c*h^alpha.  Longer ladders fall back when a point fails to evaluate
-    # (e.g. a root over an oscillating argument); the final fallback is the
-    # original two-point estimate.
-    for ladder in ((h, h / 2, h / 4, h / 8), (h, h / 2, h / 4)):
+    # c*h^alpha.  The primary ladder is decade-spaced like the infinity
+    # branch's: a binary ladder leaves root-type approaches (c*h^{1/2},
+    # the truncated-improper-integral shape) with a residual above the
+    # agreement tolerance, because Aitken removes only the leading power
+    # and the secondary term decays too slowly across octaves.  Binary
+    # ladders remain as fallbacks when a decade point fails to evaluate
+    # (e.g. a root over an oscillating argument); the final fallback is
+    # the original two-point estimate.
+    for ladder in ((h, h / 10, h / 100, h / 1000),
+                   (h, h / 2, h / 4, h / 8), (h, h / 2, h / 4)):
         try:
             vals = [value_at(s) for s in ladder]
         except (OverflowError, ValueError, ZeroDivisionError, EvalError):
@@ -141,7 +193,7 @@ def _approach_estimate(body, notation, var, point, point_notation,
 
 
 def _limit_check(body_latex, var, point_latex, direction, expected_latex,
-                 samples=6):
+                 samples=6, assumptions=None):
     """Check a claimed limit by approach sampling, independently of tactics."""
     try:
         body, bn = parse_latex(body_latex)
@@ -152,8 +204,10 @@ def _limit_check(body_latex, var, point_latex, direction, expected_latex,
     if var in free_symbols(expected, en):
         return {'status': 'skipped',
                 'reason': 'claimed limit still contains the bound variable'}
+    guards = _sample_guards(assumptions) if assumptions else None
     envs = _limit_sample_envs(
-        [(body, bn), (point, pn), (expected, en)], var, samples)
+        [(body, bn), (point, pn), (expected, en)], var, samples,
+        guards=guards)
     agreed = 0
     for env in envs:
         try:
@@ -171,6 +225,13 @@ def _limit_check(body_latex, var, point_latex, direction, expected_latex,
                 continue
             return {'status': 'disagree', 'point': env,
                     'expected': expected_value, 'numeric': estimate}
+        if error > 0.1 * scale:
+            # agreement needs evidence too: Aitken extrapolates a
+            # GROWING geometric ladder to its fixed point 0 exactly,
+            # with an astronomical self-error — an estimate whose own
+            # error bar dwarfs it is no evidence of agreement
+            # (measured: x^{1-n} -> 0 "confirmed" at n < 1)
+            continue
         agreed += 1
     if agreed == 0:
         return {'status': 'skipped',
@@ -206,6 +267,9 @@ def _limit_equivalence_check(parts, new_body, samples=6):
                 continue
             return {'status': 'disagree', 'point': env,
                     'original': a, 'transformed': b}
+        if ea + eb > 0.1 * scale:
+            # same evidence bar as _limit_check's agreement branch
+            continue
         agreed += 1
     if agreed == 0:
         return {'status': 'skipped',
@@ -237,6 +301,8 @@ def _limit_indeterminate_form(parts, numerator, denominator):
         point, pn = parse_latex(parts['point_latex'])
     except PrimitiveError:
         return None
+    num_eval = _body_fn(ns, nn)
+    den_eval = _body_fn(ds, dn)
     envs = _limit_sample_envs(
         [(ns, nn), (ds, dn), (point, pn)], parts['var'], 4)
     inf = _infinity_sign(point, pn)
@@ -246,7 +312,7 @@ def _limit_indeterminate_form(parts, numerator, denominator):
                 a = numeric_eval(point, pn, env)
                 at = dict(env)
                 at[parts['var']] = a
-                nv, dv = numeric_eval(ns, nn, at), numeric_eval(ds, dn, at)
+                nv, dv = num_eval(at), den_eval(at)
                 if (not isinstance(nv, list) and not isinstance(dv, list)
                         and abs(nv) < 1e-8 and abs(dv) < 1e-8):
                     return '0/0'
@@ -264,8 +330,8 @@ def _limit_indeterminate_form(parts, numerator, denominator):
             for x in xs:
                 e = dict(env)
                 e[parts['var']] = x
-                nm.append(abs(numeric_eval(ns, nn, e)))
-                dm.append(abs(numeric_eval(ds, dn, e)))
+                nm.append(abs(num_eval(e)))
+                dm.append(abs(den_eval(e)))
             if (nm[1] > 50 and dm[1] > 50
                     and nm[1] > 1.5 * nm[0]
                     and dm[1] > 1.5 * dm[0]):
@@ -344,7 +410,7 @@ def limit_substitute(expr):
                           'direction': parts['direction']})
 
 
-def limit_evaluate(expr, value):
+def limit_evaluate(expr, value, assuming=None):
     """Certify an agent-proposed VALUE for a limit by the independent
     approach oracle.
 
@@ -355,8 +421,15 @@ def limit_evaluate(expr, value):
     oracle verifies; a proposal the ladder cannot confirm is refused
     with the oracle's evidence, never recorded.  Sampled trust, named
     in the check — the `rewrite_as` bargain for limits: prefer the
-    named table/l'Hopital/substitution rules where they bind."""
+    named table/l'Hopital/substitution rules where they bind.
+
+    ``assuming`` states the parameter region the limit is claimed on
+    (``n > 1``): the oracle samples parameters only inside it, and the
+    stated region is recorded — a parameter-dependent limit certified
+    without it counts only whichever draws happened to converge."""
     args = {'expr': expr, 'value': value}
+    if assuming is not None:
+        args['assuming'] = assuming
     try:
         parts = _limit_parts(expr)
         vs, vn = parse_latex(value)
@@ -366,8 +439,14 @@ def limit_evaluate(expr, value):
         return _error('limit_evaluate', args,
                       'the proposed value still contains the bound '
                       'variable')
+    assumptions = []
+    if assuming is not None:
+        assumptions.append({'text': f'assuming {assuming}',
+                            'display': f'assuming ${assuming}$',
+                            'constraint': assuming})
     check = _limit_check(parts['body_latex'], parts['var'],
-                         parts['point_latex'], parts['direction'], value)
+                         parts['point_latex'], parts['direction'], value,
+                         assumptions=assumptions or None)
     if check.get('status') != 'agree':
         if check.get('status') == 'disagree':
             detail = (f'the approach oracle estimates '
@@ -381,6 +460,7 @@ def limit_evaluate(expr, value):
     check = dict(check)
     check['method'] = 'agent-proposed value; ' + check.get('method', '')
     return _result('limit_evaluate', args, expr, value, check=check,
+                   assumptions=assumptions,
                    extra={'body': parts['body_latex'],
                           'var': parts['var'],
                           'point': parts['point_latex'],

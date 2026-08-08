@@ -118,6 +118,18 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertIn('cases_assemble TARGET UNION STEP...', equations)
         self.assertNotIn('diff EXPR VAR', equations)
 
+    def test_boundary_term_reduction_steers_to_the_equations_route(self):
+        """A reduction formula with a boundary term is outside
+        integrate_reduction's structural fence; the skill must route it to
+        differentiation plus coefficient matching instead of letting the
+        one-tactic scope read as impossibility (live: the agent answered
+        `set_open` on a task the equations route had already closed)."""
+        integration = tactic_skills.render('integration')
+        self.assertIn('boundary term', integration)
+        self.assertIn('coefficient matching', integration)
+        self.assertIn('system_assemble', integration)
+        self.assertIn('never a reason to declare the task open', integration)
+
     def test_existing_cli_shapes_are_preserved(self):
         parser = toymath_cli.build_parser()
         apply = parser.parse_args(['apply', '2x+3=7', '-', '3'])
@@ -174,6 +186,128 @@ class TestTacticRegistry(unittest.TestCase):
                          {'roots': 's2', 'values': ['s3', 's4']})
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
+    def test_cli_integrate_improper_reads_recorded_steps(self):
+        from ledger import Ledger
+        from tactics import core, integration, limits
+
+        path = os.path.join(tempfile.mkdtemp(), 'improper.json')
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_substitute(
+            '\\int \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x', 'x',
+            '\\sqrt{1-x}', 'u', '-\\frac{2}{1+u^{2}}'))
+        ledger.record(integration.integrate_table(
+            ledger.last_result(), 'u'))
+        ledger.record(core.substitute(
+            ledger.last_result(), 'u', '\\sqrt{1-x}'))
+        truncated = integration.integrate_definite(
+            '\\int_0^t \\frac{1}{(2-x) \\sqrt{1-x}} \\, d x', 'x',
+            ledger.last_result())
+        truncated['sources'] = {'antiderivative': 's3'}
+        ledger.record(truncated)
+        ledger.record(limits.limit_evaluate(
+            primitives._limit_latex('t', '1', 'left',
+                                    ledger.last_result()),
+            '\\frac{\\pi}{2}'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_improper',
+                '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}', 'x',
+                's4', 's5', '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '\\frac{\\pi}{2}')
+        self.assertEqual(rec['sources'], {'truncated': 's4', 'limit': 's5'})
+        self.assertEqual(rec['check']['status'], 'agree')
+        saved = Ledger(path)
+        self.assertEqual(saved.replay()['status'], 'verified')
+        # a forged limit source must fail replay with the named reason
+        saved.steps[-1]['sources']['limit'] = 's3'
+        report = saved.replay()
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['reason'], 'limit provenance mismatch')
+
+    def test_cli_by_parts_definite_closes_the_reflection_family(self):
+        from ledger import Ledger
+        from tactics import core, integration, limits
+        import primitives as P
+
+        path = os.path.join(tempfile.mkdtemp(), 'byparts.json')
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_power_rule(
+            '\\int x^{-n} \\, d x', 'x'))
+        ledger.record(core.substitute(
+            ledger.last_result(),
+            ledger.steps[-1].get('constant') or 'C', '0'))
+        v = ledger.last_result()
+        uv = integration._uv_latex('\\ln(1+x)', v)
+        ledger.record(limits.limit_evaluate(
+            P._limit_latex('x', '\\infty', 'two-sided', uv), '0',
+            assuming='n > 1'))
+        ledger.record(limits.limit_evaluate(
+            P._limit_latex('x', '0', 'right', uv), '0',
+            assuming='n < 2'))
+        vdu = integration._uv_latex(v, '\\frac {1} {x+1}')
+        ledger.record(integration.integrate_known(
+            f'\\int_0^{{+\\infty}} {vdu} \\, d x', 'x'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_by_parts_definite',
+                '\\int_0^{+\\infty} \\frac{\\ln (1+x)}{x^n} d x', 'x',
+                '\\ln(1+x)', 'x^{-n}', 's2', 's3', 's4', 's5',
+                '--assuming', '1 \\lt n \\land n \\lt 2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['sources'],
+                         {'antiderivative': 's2', 'upper': 's3',
+                          'lower': 's4', 'remaining': 's5'})
+        saved = Ledger(path)
+        self.assertEqual(saved.replay()['status'], 'verified')
+        saved.steps[-1]['sources']['remaining'] = 's1'
+        report = saved.replay()
+        self.assertEqual(report['status'], 'failed')
+        self.assertIn('remaining', report['reason'])
+
+    def test_cli_integrate_reduction_certifies(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_reduction',
+                '\\int_0^{\\pi/2} \\cos^{n} x \\, d x = \\frac{n-1}{n} '
+                '\\int_0^{\\pi/2} \\cos^{n-2} x \\, d x',
+                'x', 'n', '2', '--assuming', 'n > 1'])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(rec['assumptions'][0]['constraint'], 'n > 1')
+
+    def test_cli_integrate_improper_requires_the_definite_evaluation(self):
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'improper-op.json')
+        ledger = Ledger(path)
+        ledger.record(core.expand('(x+1)^2'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'integrate_improper',
+                '\\int_0^1 \\frac{d x}{(2-x) \\sqrt{1-x}}', 'x',
+                's1', 's1', '--session', path])
+        self.assertEqual(code, 1)
+        rec = json.loads(output.getvalue())
+        self.assertFalse(rec['ok'])
+        self.assertIn('integrate_definite', rec['error'])
+
     def test_cli_system_assemble_reads_recorded_steps(self):
         from ledger import Ledger
         from tactics import core
@@ -182,6 +316,31 @@ class TestTacticRegistry(unittest.TestCase):
         ledger = Ledger(path)
         ledger.record(core.expand('x+2-2 = 6-2'))
         ledger.record(core.expand('y+1-1 = 3-1'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'system_assemble', 'x+y=6, x-y=2', 's1', 's2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], 'x=4,y=2')
+        self.assertEqual(rec['sources'], {'assignments': ['s1', 's2']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
+    def test_cli_system_assemble_reads_value_first_steps(self):
+        # the engine's own isolation chain routinely ends "value = unknown";
+        # the recorded step must assemble AND replay in that order
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'flipped.json')
+        ledger = Ledger(path)
+        self.assertEqual(ledger.record(core.expand('6-2 = x+2-2'))['result'],
+                         '4 = x')
+        ledger.record(core.expand('3-1 = y+1-1'))
         ledger.save()
         output = io.StringIO()
         with redirect_stdout(output):

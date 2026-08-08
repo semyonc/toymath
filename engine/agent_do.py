@@ -27,6 +27,7 @@ import threading
 import agent_config
 import observability
 import primitives
+import strategy_routes
 import tactic_registry
 import tactic_skills
 from agent_backends import base as agent_base
@@ -191,8 +192,17 @@ assumptions; results are
 
 
 def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
-                 proof_claim_id='c1', tikz=False):
-    """Build the small always-on core prompt and skill catalog."""
+                 proof_claim_id='c1', tikz=False, routes=()):
+    """Build the small always-on core prompt and skill catalog.
+
+    `routes` are the strategy-route records whose shape matcher fired on this
+    run's instruction. They are appended CONDITIONALLY, so they cost zero
+    always-on characters — but they are not free: a matching run spends the
+    rendered block's context. Delivery happens here, in the initial developer
+    instructions, rather than behind `load_skill`, because a route meant to
+    prevent a premature open outcome cannot depend on the agent already having
+    made the right discovery call.
+    """
     try:
         if os.path.abspath(skill_path) == os.path.abspath(_SKILL_PATH):
             text = tactic_skills.render('core')
@@ -220,6 +230,9 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
         text += _TIKZ_RULES
     if prove_mode:
         text += _PROVE_RULES.replace('ROOT_CLAIM', proof_claim_id)
+    route_block = strategy_routes.render(routes)
+    if route_block:
+        text += '\n' + route_block
     return text
 
 
@@ -649,6 +662,7 @@ def make_api(session):
             content = tactic_skills.render(subject)
         except ValueError as exc:
             return f'Cannot load skill: {exc}'
+
         if subject in session.loaded_skills:
             return f'Skill {subject!r} is already loaded.'
         session.loaded_skills.add(subject)
@@ -1063,6 +1077,22 @@ def resolve_backend(backend=None, model=None, model_name=None, providers=(),
                              providers=providers, max_turns=max_turns)
 
 
+def _stated_premises(premises, chain_goal):
+    """Premises worth naming beside the result.
+
+    A premise that merely restates the requested expression — or a piece
+    the goal itself wraps, like the integrand of the goal integral —
+    names nothing the reader must grant beyond the cell they typed: the
+    task is not a given (live: a one-step FTC cell reported "rests on 1
+    stated premise" naming its own d/dx input). Typed coefficients and
+    other genuine givens never cover the goal, so they always survive;
+    with no goal to compare (plain do!), every premise stands."""
+    if chain_goal is None:
+        return premises
+    return [p for p in premises
+            if not primitives.covers_goal(p['input'], chain_goal)]
+
+
 def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
                     plot_backend=None, proof_goal=None, tikz_backend=None,
@@ -1114,18 +1144,28 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     dispatcher = ToolDispatcher(
         make_tool_bindings(session), cancellation, budget=budget,
         serialize=getattr(backend, 'serialize_tools', False))
+    # Shape matching happens BEFORE the backend starts: a matching record
+    # rides the initial developer instructions. Never authority — steering
+    # only, and `match` swallows its own failures so a malformed route file
+    # can never take a derivation down.
+    matched = strategy_routes.match(instruction)
+    trace_metadata = {'mode': 'prove' if proof_goal is not None else 'do'}
+    if matched:
+        trace_metadata['strategy_routes'] = ','.join(
+            route['id'] for route in matched)
     request = AgentRequest(
         instruction=instruction,
         developer_instructions=build_prompt(
             plotting=session.plot_backend is not None,
             tikz=session.tikz_backend is not None,
             prove_mode=proof_goal is not None,
-            proof_claim_id=(session.proof_claim_id or 'c1')),
+            proof_claim_id=(session.proof_claim_id or 'c1'),
+            routes=matched),
         dispatcher=dispatcher,
         cancellation=cancellation,
         model=model_name,
         budget=budget,
-        trace_metadata={'mode': 'prove' if proof_goal is not None else 'do'})
+        trace_metadata=trace_metadata)
     handle = backend.start(request)
     # One place decides what cancellation means, whoever noticed first: the
     # kernel thread on Stop, or a tool worker that ran out of budget. The
@@ -1149,7 +1189,11 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     if outcome.cancelled:
         session.close(cancellation.reason or USER)
     observability.flush()
-    return finalize_session(session, outcome, max_turns=max_turns)
+    result = finalize_session(session, outcome, max_turns=max_turns)
+    # Non-ledger run metadata, always present: a later failure can then say
+    # whether guidance was absent, mismatched, or delivered and ignored.
+    result['strategy_routes'] = [route['id'] for route in matched]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1219,7 +1263,9 @@ def finalize_session(session, outcome, max_turns=None):
     # ledger does not re-attribute an earlier cell's givens to this one.
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
-    final_premises = session.ledger.premises(spine or run_ids or None)
+    final_premises = _stated_premises(
+        session.ledger.premises(spine or run_ids or None),
+        session.chain_goal)
     figure_events = session.figure_events()
     figures = [{'id': event['id'], 'caption': event['caption'],
                 'figures': event['figures']}

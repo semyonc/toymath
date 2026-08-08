@@ -330,6 +330,13 @@ class ExprResolver(Replicator):
         C across cells); otherwise ambiguity is refused, never guessed -
         `name! [x] <expr>` chooses explicitly."""
         import primitives
+        if cmd.direct == 'differentiate':
+            # a Leibniz-prefixed argument names its own variable; the
+            # same reader the tactic itself peels with, so the two
+            # readings cannot disagree
+            op = primitives.derivative_operator_parts(arg_latex)
+            if op is not None:
+                return op[0]
         try:
             sym, notation = primitives.parse_latex(arg_latex)
         except primitives.PrimitiveError as e:

@@ -1673,20 +1673,35 @@ def collect(expr, var):
     return _checked(_result('collect', args, expr, result))
 
 
+def atom_ratfuncs(sides, notation, var):
+    """`sides` as RatFuncs with `var` resolved to the variable it names.
+
+    Inside the rational fragment this is plain `to_ratfunc` and `var` is
+    unchanged. Outside it, the sides atomize over ONE shared `_AtomStore`
+    and an agent naming an opaque subexpression (`\\cos x`) rather than a
+    plain variable gets the atom the atomizer already minted — so grouping
+    or matching by powers of `\\cos x` works in either spelling.
+
+    Returns `(ratfuncs, var, store)`; `store` is None inside the fragment.
+    The store is shared across `sides` on purpose: a caller comparing two
+    sides against each other needs one atom name to mean one subexpression
+    on both. Per-side callers pass a one-element list and are unaffected.
+    """
+    store = None
+    try:
+        rfs = [to_ratfunc(s, notation) for s in sides]
+    except NotInFragment:
+        store = _AtomStore()
+        rfs = [_atomized_ratfunc(s, notation, store) for s in sides]
+    if store is not None and not any(var in rf.variables() for rf in rfs):
+        var = _atom_variable(var, store) or var
+    return rfs, var, store
+
+
 def _collect_side(side, notation, var, require_var):
     """Collected latex for one side; collects over opaque atoms when the
     side leaves the rational fragment."""
-    store = None
-    try:
-        rf = to_ratfunc(side, notation)
-    except NotInFragment:
-        store = _AtomStore()
-        rf = _atomized_ratfunc(side, notation, store)
-    if store is not None and var not in rf.variables():
-        # the agent may name an opaque atom (\cos x) rather than a plain
-        # variable; resolve it to the atom the atomizer already minted, so
-        # grouping by powers of \cos x works in either spelling
-        var = _atom_variable(var, store) or var
+    (rf,), var, store = atom_ratfuncs([side], notation, var)
     if require_var and var not in rf.variables():
         note = (' (no such variable or opaque subexpression)'
                 if store is not None else '')

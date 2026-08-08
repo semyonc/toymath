@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Differentiation tactic and its independent derivative checker."""
+import math
 import random
 
 from notation import Notation, Symbol
@@ -11,10 +12,17 @@ from polyrat import (RatFunc, NotInFragment, to_ratfunc,
 
 from primitives import (
     FRAC_NAMES, PrimitiveError, EvalError, parse_latex, write_latex,
-    canonical_or_same,
+    canonical_or_same, definite_integral_parts, derivative_operator_parts,
     free_symbols, numeric_eval, _func_power, _func_arg_span, _sample_point,
-    _result, _error, _paren, _is_sum_str,
+    _simpson_panels, _result, _error, _paren, _is_sum_str,
 )
+
+# integral heads the derivative rule walk must never treat as ordinary
+# product factors — and that the polyrat fast path must never atomize
+# (an opaque atom is a ring CONSTANT to polynomial differentiation, so a
+# spelling depending on the variable through its atom would silently
+# differentiate to zero; measured before the guard existed)
+_INT_HEADS = ('\\int', '\\iint', '\\iiint', '\\idotsint', '\\oint')
 
 # ---------------------------------------------------------------------------
 # primitive: differentiate
@@ -52,10 +60,16 @@ def _d_add(*terms):
 def _d_neg(a):
     if a == '0':
         return '0'
-    if a.startswith('-'):
-        return a[1:]
+    # Sum-ness must be decided BEFORE the double-negation collapse: a
+    # minus-led SUM string ('-A + B') starts with '-' but stripping that
+    # character negates only its first term. Live: the derivative of a
+    # partial-fraction antiderivative (an outer minus over exactly that
+    # shape) came back with every later term's sign intact, and the
+    # assembly's defense-in-depth check refused a correct 57-step run.
     if _is_sum_str(a):
         return '-' + _paren(a)
+    if a.startswith('-'):
+        return a[1:]
     return '-' + a
 
 
@@ -151,6 +165,27 @@ def _diff_product(args, notation, var):
     units = []
     args = [a for a in args if not (isinstance(a, Symbol)
                                     and a.name in Notation.styles)]
+    if args:
+        # an integral-shaped product is a binder, not a product: the
+        # rule walk must refuse it rather than product-rule across the
+        # integral sign (measured: d/dx \int x^2 dx once returned
+        # `\int 2x dx + \int x^2 d`)
+        base = args[0]
+        idx = notation.getf(base, Notation.INDEX)
+        if idx is not None:
+            base = idx.args[0]
+        if (isinstance(base, Symbol) and notation.get(base) is None
+                and base.name in _INT_HEADS):
+            if idx is not None:
+                raise PrimitiveError(
+                    'a definite integral inside a larger expression: '
+                    'differentiate the integral as its own step, then '
+                    'combine the pieces')
+            raise PrimitiveError(
+                'cannot differentiate an unevaluated indefinite '
+                'integral (the derivative rules do not reach across an '
+                'integral sign); integrate first, then differentiate '
+                'the result')
 
     def is_func_head(a):
         return _is_func_symbol(a, notation) or _diff_func_power(a, notation)
@@ -358,30 +393,141 @@ def _refactor_denominator(expr, result):
     return write_latex(csym, cnot)
 
 
-def differentiate(expr, var):
-    """d/d(var) with ~20 mechanical rules; canonicalizes rational results."""
-    args = {'expr': expr, 'var': var}
+def _diff_definite(args, expr, var, parts):
+    """The FTC bound rule as a differentiate branch: for a top-level
+    ``\\int_{a(x)}^{b(x)} f(t) dt`` build ``f(b) b' - f(a) a'``.
+
+    The integrand must not depend on ``var`` — differentiation under
+    the integral sign is a different, unbuilt move and is refused,
+    never approximated.  The check leg (`_ftc_derivative_check`)
+    evaluates the integral as a function of ``var`` by quadrature and
+    central-differences it, sharing only the structure READER with this
+    construction.  Continuity of the integrand between the bounds is
+    recorded, not proved."""
+    t, integrand, lower, upper = parts
+    if var == t:
+        return _error(
+            'differentiate', args,
+            f'{var!r} is the integration variable, bound inside the '
+            'integral; the definite integral does not depend on it')
     try:
-        sym, notation = parse_latex(expr)
+        fs_, fn_ = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+    except PrimitiveError as e:
+        return _error('differentiate', args, f'malformed integral: {e}')
+    if t in (free_symbols(ls, ln) | free_symbols(us, un)):
+        return _error(
+            'differentiate', args,
+            f'a bound of the integral contains the integration variable '
+            f'{t!r}')
+    integrand_free = free_symbols(fs_, fn_)
+    if var in (integrand_free - {t}):
+        return _error(
+            'differentiate', args,
+            f'the integrand depends on {var!r}; differentiation under '
+            'the integral sign is not in the rule set — only the bounds '
+            'may carry the variable')
+    from tactics import core as core_tactics
+    pieces = []
+    for bound_latex, bsym, bnot in ((upper, us, un), (lower, ls, ln)):
+        try:
+            _, bd = _diff(bsym, bnot, var)
+        except PrimitiveError as e:
+            return _error('differentiate', args,
+                          f'cannot differentiate the bound '
+                          f'{bound_latex!r}: {e}')
+        if t in integrand_free:
+            sub = core_tactics.substitute(integrand, t, bound_latex)
+            if not sub.get('ok'):
+                return _error('differentiate', args,
+                              f'cannot substitute the bound '
+                              f'{bound_latex!r}: '
+                              + sub.get('error', 'unknown error'))
+            f_at = sub['result']
+        else:
+            f_at = integrand
+        pieces.append((f_at, bd))
+    (f_up, up_d), (f_lo, lo_d) = pieces
+    deriv = _d_add(_d_mul(f_up, up_d), _d_neg(_d_mul(f_lo, lo_d)))
+    result = canonical_or_same(deriv)
+    assumptions = [{
+        'text': f'{integrand} is continuous between {lower} and {upper}',
+        'display': f'${integrand}$ is continuous between ${lower}$ and '
+                   f'${upper}$'}]
+    cleanup_check = None
+    cleanup = core_tactics.expand(result)
+    if cleanup.get('ok') and cleanup.get('check', {}).get('status') \
+            in ('agree', 'domain-differs'):
+        result = cleanup['result']
+        assumptions.extend(cleanup.get('assumptions', []))
+        cleanup_check = cleanup['check']
+    try:
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('differentiate', args,
+                      f'internal: unparseable derivative: {e}')
+    rec = _result('differentiate', args, args['expr'], result,
+                  assumptions=assumptions,
+                  extra={'method': 'ftc', 'integrand': integrand,
+                         'lower': lower, 'upper': upper})
+    ftc_check = _ftc_derivative_check(expr, result, var)
+    if ftc_check.get('status') == 'agree' and cleanup_check \
+            and cleanup_check.get('status') == 'domain-differs':
+        rec['check'] = dict(cleanup_check)
+        rec['check']['derivative_samples'] = ftc_check.get('samples')
+    else:
+        rec['check'] = ftc_check
+    return rec
+
+
+def differentiate(expr, var):
+    """d/d(var) with ~20 mechanical rules; canonicalizes rational results.
+
+    Accepts the Leibniz operator spelling (``\\frac{d}{d x} <expr>`` or
+    ``\\frac{d <expr>}{d x}``), read at this boundary only and never
+    stored as a node, and closes a variable-bound definite integral
+    through the bound rule of the Fundamental Theorem of Calculus."""
+    args = {'expr': expr, 'var': var}
+    work = expr
+    op_parts = derivative_operator_parts(expr)
+    if op_parts is not None:
+        op_var, operand = op_parts
+        if var and var != op_var:
+            return _error(
+                'differentiate', args,
+                f'the expression carries its own operator d/d{op_var}; '
+                f'asked to differentiate with respect to {var!r}')
+        var = op_var
+        args = {'expr': expr, 'var': var}
+        work = operand
+    try:
+        sym, notation = parse_latex(work)
     except PrimitiveError as e:
         return _error('differentiate', args, str(e))
-    # fast exact path for the rational fragment
-    try:
-        rf = to_ratfunc(sym, notation)
-        dnum = rf.num.derivative(var) * rf.den - rf.num * rf.den.derivative(var)
-        drf = RatFunc(dnum, rf.den * rf.den)
-        out_n = Notation()
-        result = write_latex(ratfunc_to_notation(drf, out_n), out_n)
-        extra = {'method': 'polyrat'}
-        refactored = _refactor_denominator(expr, result)
-        if refactored != result:
-            result = refactored
-            extra['denominator'] = 'as written'
-        rec = _result('differentiate', args, expr, result, extra=extra)
-        rec['check'] = _derivative_check(expr, result, var)
-        return rec
-    except (NotInFragment, ZeroDivisionError):
-        pass
+    parts = definite_integral_parts(work)
+    if parts is not None:
+        return _diff_definite(args, work, var, parts)
+    # fast exact path for the rational fragment — guarded away from any
+    # integral-bearing spelling (see _INT_HEADS)
+    if not any(h in work for h in _INT_HEADS):
+        try:
+            rf = to_ratfunc(sym, notation)
+            dnum = (rf.num.derivative(var) * rf.den
+                    - rf.num * rf.den.derivative(var))
+            drf = RatFunc(dnum, rf.den * rf.den)
+            out_n = Notation()
+            result = write_latex(ratfunc_to_notation(drf, out_n), out_n)
+            extra = {'method': 'polyrat'}
+            refactored = _refactor_denominator(work, result)
+            if refactored != result:
+                result = refactored
+                extra['denominator'] = 'as written'
+            rec = _result('differentiate', args, expr, result, extra=extra)
+            rec['check'] = _derivative_check(work, result, var)
+            return rec
+        except (NotInFragment, ZeroDivisionError):
+            pass
     try:
         _, deriv = _diff(sym, notation, var)
     except PrimitiveError as e:
@@ -409,13 +555,13 @@ def differentiate(expr, var):
     extra = {'method': 'rules'}
     if cleanup_check is not None:
         extra['cleanup'] = 'expand'
-    refactored = _refactor_denominator(expr, result)
+    refactored = _refactor_denominator(work, result)
     if refactored != result:
         result = refactored
         extra['denominator'] = 'as written'
     rec = _result('differentiate', args, expr, result,
                   assumptions=assumptions, extra=extra)
-    derivative_check = _derivative_check(expr, result, var)
+    derivative_check = _derivative_check(work, result, var)
     if derivative_check.get('status') == 'agree' and cleanup_check \
             and cleanup_check.get('status') == 'domain-differs':
         # Canonical cleanup may expose a wider written domain after dropping
@@ -476,3 +622,105 @@ def _derivative_check(expr, deriv, var, samples=8, seed=20260705):
         return {'status': 'skipped', 'reason': 'no evaluable sample points'}
     return {'status': 'agree', 'samples': agreed,
             'method': 'central-difference'}
+
+
+class _DomainBreak(Exception):
+    def __init__(self, node):
+        super().__init__(f'domain break at {node!r}')
+        self.node = node
+
+
+def _ftc_derivative_check(expr, result, var, samples=6, seed=20260803,
+                          panels=64, tol=1e-4):
+    """Independent leg for d/d{var} of a definite integral: quadrature
+    (composite Simpson, Richardson-extrapolated) evaluates the integral
+    as a FUNCTION of {var}; a central difference differentiates that
+    function; the proposed symbolic derivative must match.
+
+    Shares only the structure READER (`definite_integral_parts`) with
+    the symbolic leg: that leg substitutes bounds and composes Leibniz
+    terms, this leg never sees them — it only integrates and
+    differences.  Per the evidence rule for accusations, a gap must
+    clear this leg's own error estimate (finite-difference truncation
+    plus quadrature convergence) before it may say `disagree`; anything
+    closer is an undecided point, never a counterexample.  An
+    x-dependent domain break inside the swept bounds is the FTC's own
+    hypothesis failing and is reported with its witness point."""
+    parts = definite_integral_parts(expr)
+    if parts is None:
+        return {'status': 'skipped', 'reason': 'not a definite integral'}
+    t, integrand, lower, upper = parts
+    try:
+        fs, fn = parse_latex(integrand)
+        ls, ln = parse_latex(lower)
+        us, un = parse_latex(upper)
+        rs, rn = parse_latex(result)
+    except PrimitiveError as e:
+        return {'status': 'skipped', 'reason': str(e)}
+    params = (free_symbols(ls, ln) | free_symbols(us, un)
+              | free_symbols(rs, rn) | {var}) - {t}
+
+    def integral_at(env, xv):
+        e = dict(env)
+        e[var] = xv
+        a = numeric_eval(ls, ln, e)
+        b = numeric_eval(us, un, e)
+        if isinstance(a, list) or isinstance(b, list) \
+                or not (math.isfinite(a) and math.isfinite(b)):
+            raise EvalError('bounds are not finite')
+        coarse, bad = _simpson_panels(fs, fn, t, a, b, e, panels)
+        if bad is not None:
+            raise _DomainBreak(bad)
+        fine, bad = _simpson_panels(fs, fn, t, a, b, e, panels * 2)
+        if bad is not None:
+            raise _DomainBreak(bad)
+        if coarse is None or fine is None:
+            raise EvalError('quadrature holds no evidence')
+        # Simpson is O(h^4); Richardson leaves O(h^6) and the residual
+        # difference estimates the coarse error
+        return (16 * fine - coarse) / 15.0, abs(fine - coarse) / 15.0
+
+    rng = random.Random(seed)
+    h = 1e-2
+    agreed = 0
+    tried = 0
+    while agreed < samples and tried < samples * 8:
+        tried += 1
+        env = _sample_point(params, rng)
+        # quadrature interval length grows with the bound spelling
+        # (x^2 at |x|=12 already sweeps [0,144]); keep sample points
+        # modest so Simpson converges and undecided points stay rare
+        env = {k: v / 4 for k, v in env.items()}
+        try:
+            d_sym = numeric_eval(rs, rn, env)
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        if isinstance(d_sym, list) or not math.isfinite(d_sym):
+            continue
+        try:
+            gp, e1 = integral_at(env, env[var] + h)
+            gm, e2 = integral_at(env, env[var] - h)
+            gp2, e3 = integral_at(env, env[var] + h / 2)
+            gm2, e4 = integral_at(env, env[var] - h / 2)
+        except _DomainBreak as brk:
+            return {'status': 'disagree', 'point': {t: brk.node},
+                    'reason': f'integrand is not evaluable at '
+                              f'{t} = {brk.node:.6g} inside the swept '
+                              'bounds; the integral is improper there'}
+        except (EvalError, ValueError, ZeroDivisionError, OverflowError):
+            continue
+        d_h = (gp - gm) / (2 * h)
+        d_h2 = (gp2 - gm2) / h
+        d_num = (4 * d_h2 - d_h) / 3
+        err_est = abs(d_h - d_h2) / 3 + (e1 + e2 + e3 + e4) / h
+        scale = max(1.0, abs(d_sym), abs(d_num))
+        if abs(d_sym - d_num) / scale > tol:
+            if abs(d_sym - d_num) <= 16 * err_est:
+                continue   # estimate has not converged: undecided point
+            return {'status': 'disagree', 'point': env,
+                    'symbolic': d_sym, 'numeric': d_num}
+        agreed += 1
+    if agreed == 0:
+        return {'status': 'skipped', 'reason': 'no evaluable sample points'}
+    return {'status': 'agree', 'samples': agreed,
+            'method': 'quadrature central-difference'}

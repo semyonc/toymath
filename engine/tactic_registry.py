@@ -180,6 +180,168 @@ def _integrate_definite_from_steps(context, args):
     return result
 
 
+def _integrate_improper_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_improper',
+                      'integrate_improper requires a session')
+    by_id = {step['id']: step for step in steps}
+    truncated_id = args['truncated_step']
+    truncated = by_id.get(truncated_id)
+    if truncated is None or truncated.get('result') is None:
+        return _error('integrate_improper',
+                      f'unknown transforming step {truncated_id!r}')
+    if truncated.get('op') != 'integrate_definite':
+        return _error(
+            'integrate_improper',
+            f'{truncated_id!r} is {truncated.get("op")!r}, not the '
+            'integrate_definite evaluation of the truncated integral')
+    info = integration._improper_parts(args['expr'], args['var'],
+                                       truncated.get('input') or '')
+    if isinstance(info, str):
+        return _error('integrate_improper', info)
+    limit_id = args['limit_step']
+    limit_step = by_id.get(limit_id)
+    if limit_step is None or limit_step.get('result') is None:
+        return _error('integrate_improper',
+                      f'unknown transforming step {limit_id!r}')
+    expected = primitives._limit_latex(info['bound_var'], info['bound'],
+                                       info['direction'],
+                                       truncated['result'])
+    if not _same_spelling(limit_step.get('input') or '', expected):
+        return _error(
+            'integrate_improper',
+            f'{limit_id!r} does not record the one-sided limit '
+            f'{expected!r} of the cited truncated evaluation')
+    result = integration.integrate_improper(
+        args['expr'], args['var'], truncated.get('input') or '',
+        truncated['result'], limit_step['result'])
+    if result.get('ok'):
+        result['sources'] = {'truncated': truncated_id, 'limit': limit_id}
+    return result
+
+
+def _integrate_by_parts_definite_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_by_parts_definite',
+                      'integrate_by_parts_definite requires a session')
+    by_id = {step['id']: step for step in steps}
+    v_step = by_id.get(args['antiderivative_step'])
+    if v_step is None or v_step.get('result') is None:
+        return _error(
+            'integrate_by_parts_definite',
+            f'unknown transforming step {args["antiderivative_step"]!r}')
+    v = v_step['result']
+    info = integration._definite_bounds_info(args['expr'], args['var'])
+    if isinstance(info, str):
+        return _error('integrate_by_parts_definite', info)
+    _integrand, lower, upper, lo_inf, hi_inf = info
+    uv = integration._uv_latex(args['u'], v)
+    boundary_values = {}
+    sources = {'antiderivative': args['antiderivative_step']}
+    for tag, bound, inf in (('upper', upper, hi_inf),
+                            ('lower', lower, lo_inf)):
+        step_id = args[f'{tag}_step']
+        step = by_id.get(step_id)
+        if step is None or step.get('result') is None:
+            return _error('integrate_by_parts_definite',
+                          f'unknown transforming step {step_id!r}')
+        point, direction = integration._by_parts_boundary(bound, inf, tag)
+        expected = primitives._limit_latex(args['var'], point, direction,
+                                           uv)
+        if not _same_spelling(step.get('input') or '', expected):
+            return _error(
+                'integrate_by_parts_definite',
+                f'{step_id!r} does not record the boundary limit '
+                f'{expected!r} of u times the cited antiderivative')
+        boundary_values[tag] = step['result']
+        sources[tag] = step_id
+    rem_step = by_id.get(args['remaining_step'])
+    if rem_step is None or rem_step.get('result') is None:
+        return _error('integrate_by_parts_definite',
+                      f'unknown transforming step '
+                      f'{args["remaining_step"]!r}')
+    rem_parts = primitives.definite_integral_parts(
+        rem_step.get('input') or '', args['var'])
+    if rem_parts is None:
+        return _error('integrate_by_parts_definite',
+                      'the remaining step must evaluate a definite '
+                      'integral over the same bounds')
+    _rv, rem_integrand, rem_lower, rem_upper = rem_parts
+    if not (primitives.same_expression(rem_lower, lower)
+            and primitives.same_expression(rem_upper, upper)):
+        return _error('integrate_by_parts_definite',
+                      'the remaining integral has different bounds')
+    du_rec = differentiation.differentiate(args['u'], args['var'])
+    if not du_rec.get('ok'):
+        return _error('integrate_by_parts_definite',
+                      'cannot differentiate u: '
+                      + du_rec.get('error', 'unknown error'))
+    vdu = integration._uv_latex(v, du_rec['result'])
+    req = core.equal_exprs(rem_integrand, vdu)
+    if not (req.get('ok') and req.get('verdict') == 'yes'):
+        return _error(
+            'integrate_by_parts_definite',
+            f'the remaining integrand is not v * du (verdict: '
+            f'{req.get("verdict", "error")})')
+    sources['remaining'] = args['remaining_step']
+    result = integration.integrate_by_parts_definite(
+        args['expr'], args['var'], args['u'], args['dv'], v,
+        boundary_values['upper'], boundary_values['lower'],
+        rem_step['result'], assuming=args.get('assuming'))
+    if result.get('ok'):
+        result['sources'] = sources
+    return result
+
+
+def _validate_integrate_by_parts_definite(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    v_step = seen.get(sources.get('antiderivative'))
+    if v_step is None or v_step.get('result') != args.get('antiderivative'):
+        return 'antiderivative provenance mismatch'
+    info = integration._definite_bounds_info(args.get('expr', ''),
+                                             args.get('var', ''))
+    if isinstance(info, str):
+        return info
+    _integrand, lower, upper, lo_inf, hi_inf = info
+    uv = integration._uv_latex(args.get('u', ''),
+                               args.get('antiderivative', ''))
+    for tag, bound, inf in (('upper', upper, hi_inf),
+                            ('lower', lower, lo_inf)):
+        b_step = seen.get(sources.get(tag))
+        if (b_step is None
+                or b_step.get('result') != args.get(f'{tag}_boundary')):
+            return f'{tag} boundary provenance mismatch'
+        point, direction = integration._by_parts_boundary(bound, inf, tag)
+        expected = primitives._limit_latex(args.get('var', ''), point,
+                                           direction, uv)
+        if not _same_spelling(b_step.get('input') or '', expected):
+            return f'{tag} boundary input mismatch'
+    rem_step = seen.get(sources.get('remaining'))
+    if rem_step is None or rem_step.get('result') != args.get('remaining'):
+        return 'remaining provenance mismatch'
+    rem_parts = primitives.definite_integral_parts(
+        rem_step.get('input') or '', args.get('var', ''))
+    if rem_parts is None:
+        return 'remaining input is not a definite integral'
+    _rv, rem_integrand, rem_lower, rem_upper = rem_parts
+    if not (primitives.same_expression(rem_lower, lower)
+            and primitives.same_expression(rem_upper, upper)):
+        return 'remaining integral bounds mismatch'
+    du_rec = differentiation.differentiate(args.get('u', ''),
+                                           args.get('var', ''))
+    if not du_rec.get('ok'):
+        return 'cannot re-differentiate u'
+    vdu = integration._uv_latex(args.get('antiderivative', ''),
+                                du_rec['result'])
+    req = core.equal_exprs(rem_integrand, vdu)
+    if not (req.get('ok') and req.get('verdict') == 'yes'):
+        return 'remaining integrand is not v * du'
+    return None
+
+
 def _limit_assemble_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -565,6 +727,32 @@ def _validate_integrate_definite(step, seen):
     return None
 
 
+def _validate_integrate_improper(step, seen):
+    sources = step.get('sources') or {}
+    truncated = seen.get(sources.get('truncated'))
+    if truncated is None or truncated.get('op') != 'integrate_definite':
+        return 'missing truncated-evaluation provenance'
+    args = step.get('args', {})
+    if (truncated.get('input') != args.get('truncated')
+            or truncated.get('result') != args.get('truncated_value')):
+        return 'truncated-evaluation provenance mismatch'
+    limit_step = seen.get(sources.get('limit'))
+    if (limit_step is None
+            or limit_step.get('result') != args.get('limit_value')):
+        return 'limit provenance mismatch'
+    info = integration._improper_parts(
+        args.get('expr', ''), args.get('var', ''),
+        args.get('truncated', ''))
+    if isinstance(info, str):
+        return info
+    expected = primitives._limit_latex(info['bound_var'], info['bound'],
+                                       info['direction'],
+                                       args.get('truncated_value', ''))
+    if not _same_spelling(limit_step.get('input') or '', expected):
+        return 'limit input mismatch'
+    return None
+
+
 def _validate_limit_assemble(step, seen):
     sources = step.get('sources') or {}
     linearity = seen.get(sources.get('linearity'))
@@ -668,7 +856,9 @@ TACTICS = (
                transforming=False),
 
     TacticSpec('diff', 'differentiate', 'differentiation',
-               'differentiate with respect to a variable',
+               'differentiate with respect to a variable (a '
+               'variable-bound definite integral closes via the FTC '
+               'bound rule)',
                differentiation.differentiate, (E, V)),
 
     TacticSpec('quadratic_roots', 'quadratic_roots', 'equations',
@@ -848,6 +1038,105 @@ TACTICS = (
                  default=None, option='--lower-limit-step')),
         cli_handler=_integrate_definite_from_steps,
         provenance_validator=_validate_integrate_definite),
+    TacticSpec(
+        'integrate_improper', 'integrate_improper', 'integration',
+        'close an improper endpoint integral from a recorded truncated '
+        'evaluation and its recorded one-sided limit (definitional '
+        'door)',
+        integration.integrate_improper,
+        (E, V,
+         _arg('truncated', 'TRUNCATED',
+              'the truncated integral (singular bound replaced by a '
+              'fresh variable)'),
+         _arg('truncated_value', 'TRUNCATED_VALUE',
+              'recorded evaluation of the truncated integral'),
+         _arg('limit_value', 'LIMIT_VALUE',
+              'recorded one-sided limit of that evaluation')),
+        agent_arguments=(
+            E, V,
+            _arg('truncated_step', 'STEP',
+                 'integrate_definite step id evaluating the truncated '
+                 'integral'),
+            _arg('limit_step', 'STEP',
+                 'limit step id at the singular bound')),
+        agent_handler=_integrate_improper_from_steps,
+        cli_arguments=(
+            E, V,
+            _arg('truncated_step', 'STEP',
+                 'integrate_definite step id evaluating the truncated '
+                 'integral'),
+            _arg('limit_step', 'STEP',
+                 'limit step id at the singular bound')),
+        cli_handler=_integrate_improper_from_steps,
+        provenance_validator=_validate_integrate_improper),
+    TacticSpec('integrate_known', 'integrate_known', 'integration',
+               'close an improper integral by a named known-integral '
+               'fact (catalog: the Euler reflection integral)',
+               integration.integrate_known, (E, V)),
+    TacticSpec(
+        'integrate_by_parts_definite', 'integrate_by_parts_definite',
+        'integration',
+        'integration by parts over a definite or improper interval, '
+        'from a recorded antiderivative, two recorded boundary limits, '
+        'and the recorded remaining integral',
+        integration.integrate_by_parts_definite,
+        (E, V, _arg('u', 'U', 'chosen u'),
+         _arg('dv', 'DV', 'chosen dv'),
+         _arg('antiderivative', 'V', 'recorded antiderivative of dv'),
+         _arg('upper_boundary', 'UPPER',
+              'recorded limit of u*v at the upper bound'),
+         _arg('lower_boundary', 'LOWER',
+              'recorded limit of u*v at the lower bound'),
+         _arg('remaining', 'REMAINING',
+              'recorded value of the remaining integral'),
+         _arg('assuming', 'ASSUMING',
+              'parameter-domain relation the check samples inside',
+              default=None, option='--assuming')),
+        agent_arguments=(
+            E, V, _arg('u', 'U', 'chosen u'),
+            _arg('dv', 'DV', 'chosen dv'),
+            _arg('antiderivative_step', 'STEP',
+                 'step id recording the antiderivative of dv'),
+            _arg('upper_step', 'STEP',
+                 'limit step id for u*v at the upper bound'),
+            _arg('lower_step', 'STEP',
+                 'limit step id for u*v at the lower bound'),
+            _arg('remaining_step', 'STEP',
+                 'step id recording the remaining integral value'),
+            _arg('assuming', 'ASSUMING',
+                 'parameter-domain relation the check samples inside',
+                 default=None, option='--assuming')),
+        agent_handler=_integrate_by_parts_definite_from_steps,
+        cli_arguments=(
+            E, V, _arg('u', 'U', 'chosen u'),
+            _arg('dv', 'DV', 'chosen dv'),
+            _arg('antiderivative_step', 'STEP',
+                 'step id recording the antiderivative of dv'),
+            _arg('upper_step', 'STEP',
+                 'limit step id for u*v at the upper bound'),
+            _arg('lower_step', 'STEP',
+                 'limit step id for u*v at the lower bound'),
+            _arg('remaining_step', 'STEP',
+                 'step id recording the remaining integral value'),
+            _arg('assuming', 'ASSUMING',
+                 'parameter-domain relation the check samples inside',
+                 default=None, option='--assuming')),
+        cli_handler=_integrate_by_parts_definite_from_steps,
+        provenance_validator=_validate_integrate_by_parts_definite),
+    TacticSpec(
+        'integrate_reduction', 'integrate_reduction', 'integration',
+        'certify a proposed reduction formula: an integral family '
+        'related to itself at a shifted parameter, both sides '
+        'quadrature-checked at sampled parameters',
+        integration.integrate_reduction,
+        (_arg('relation', 'RELATION',
+              'the proposed reduction equality'),
+         V,
+         _arg('param', 'PARAM', 'the reduction parameter'),
+         _arg('shift', 'SHIFT', 'nonzero integer parameter shift'),
+         _arg('assuming', 'ASSUMING',
+              'parameter-domain relation the check samples inside, '
+              'e.g. "n > 1"', default=None, option='--assuming'))),
 
     TacticSpec('limit_rewrite', 'limit_rewrite', 'limits',
                'replace a limit body by a mechanically equal proposal',
@@ -866,7 +1155,11 @@ TACTICS = (
                'certify an agent-proposed limit value by the approach '
                'oracle',
                limits.limit_evaluate,
-               (E, _arg('value', 'VALUE', 'proposed limit value'))),
+               (E, _arg('value', 'VALUE', 'proposed limit value'),
+                _arg('assuming', 'ASSUMING',
+                     'parameter-domain relation the oracle samples '
+                     'inside, e.g. "n > 1"',
+                     default=None, option='--assuming'))),
     TacticSpec('limit_lhopital', 'limit_lhopital', 'limits',
                "apply one checked l'Hopital step",
                limits.limit_lhopital, (E,)),
