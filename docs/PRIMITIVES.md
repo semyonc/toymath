@@ -114,6 +114,31 @@ independent numeric sampling for probabilistic evidence. Canonical inequality
 between opaque atoms is never conclusive: distinct forms may still be related
 by an identity the canonicalizer does not know.
 
+### What independence does not cover
+
+The two legs check **transformations**. Two failure modes therefore lie outside
+their reach by construction, and no amount of strengthening the oracle reduces
+either — independence governs how consequences are *computed*, never what is
+*assumed* or what the notation *means*.
+
+1. **An input no step derived.** A chain can be perfect and still rest on an
+   asserted starting point. There is no transformation at a premise, so there
+   is nothing for a second leg to disagree with; a mis-stated premise yields a
+   ledger that is honestly green and materially wrong. `Ledger.premises`
+   derives these inputs and every view displays them. That is visibility, not
+   prevention: a reader who skips the premise list cannot distinguish a
+   derivation from a restatement.
+2. **A reading both legs share.** Function application is a reading convention
+   over a flat product, unknown macro names bind as variables, and
+   `\frac{d}{dx}` is an operator only at the differentiation boundary. Where
+   the symbolic path and the oracle read an input the same wrong way, they
+   agree — correctly, under a meaning the author did not intend. The defence is
+   refusing or flagging ambiguous notation at the parse boundary, not more
+   independence downstream.
+
+Both are boundaries of the method rather than defects awaiting a patch, and
+both are listed under **Known boundaries** below.
+
 Domain changes are surfaced. A value agreement on a common domain does not
 erase the fact that one expression is defined where the other is not.
 
@@ -327,6 +352,20 @@ writer, comparer, and replicator landmines.
 
 ## Known boundaries
 
+- **The premise boundary.** A derivation is checked relative to its inputs, so
+  an input no step produced is unverified by construction. A run that asserts
+  an identity and then transforms it correctly records every step as agreeing:
+  the checks are sound, the assumptions are honest, and the conclusion can
+  still be false because its starting point was. This is observed behaviour,
+  not a hypothetical — a proposal that types a coefficient identity instead of
+  deriving it, with a sign wrong in the typing, produces a fully checked chain
+  ending at a wrong answer, and the recorded assembly agrees because it
+  verifies values against the *stated* target. `Ledger.premises` lists such
+  inputs in every view; a claim closed from one carries the
+  `derived-from-premise` shape and stays conditional on it. A designated
+  result that records no claim currently gets no equivalent marking, and a
+  premise containing free variables cannot be refuted by evaluation. Prefer a
+  derivation whose premises are the problem statement alone.
 - Partial multivariate common factors may remain uncancelled, although exact
   cross-multiplication keeps equality checking sound.
 - Moving an inequality by a symbolic factor requires the agent to state the

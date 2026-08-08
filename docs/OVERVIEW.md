@@ -48,6 +48,13 @@ The responsibilities are separated:
 Only successful transforming tactic calls enter the artifact. Model prose,
 skill text, comments, and plots cannot establish a mathematical result.
 
+The verification is **per step and relative to the derivation's inputs**. An
+input that no step produced is a *premise*: legitimate, since a derivation has
+to start somewhere, but unchecked by construction — there is no transformation
+there for a second leg to disagree with. Every view lists the premises beside
+the result, and reading them is how you tell a derivation from a restatement.
+`docs/PRIMITIVES.md` states the guarantee and its three failure modes in full.
+
 ## `do!` and progressive skills
 
 A notebook cell beginning with `do!` sends the rest of the cell to an agent
