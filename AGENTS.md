@@ -30,6 +30,7 @@ Two layers coexist:
 | `engine/tactics/*.py` | Static tactic implementations grouped by owning skill (`core`, differentiation, equations, integration, limits, finite operators) |
 | `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
 | `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
+| `engine/strategy_routes.py`, `engine/strategy_routes.yaml` | Strategy route records: one schema-validated record per known problem shape, a hybrid shape matcher, and the conditional renderer that appends a matching route to a run's initial developer instructions |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
@@ -87,6 +88,27 @@ Two layers coexist:
 - Say "mechanically checked", never "proved".
 - Skill Markdown guides tactic choice; it never grants execution authority.
   Only the allowlisted registry can invoke code or admit replayable steps.
+  A **strategy route record** has exactly the same status — steering, never
+  authority. It touches no ledger, no oracle and no replay; a heuristic shape
+  match may steer, but must never by itself gate `set_result` or any other
+  control. Records live in `engine/strategy_routes.yaml`, one per known
+  problem shape, and are delivered CONDITIONALLY into a matching run's
+  initial developer instructions (never behind `load_skill` — a route meant
+  to prevent a premature open outcome cannot depend on the agent already
+  having made the right discovery call). Zero always-on characters; a
+  matching run does spend the rendered block's context. Its unit is a STAGE
+  WITH A REASON plus explicit `produces`/`consumes` labels, because a
+  deduplicated tactic-NAME sequence was measured to be enumeration rather
+  than strategy: it drops which sub-object to act on and which stage is the
+  provenance-bearing endpoint. `target` and `why` stay prose on purpose —
+  the format makes the schema, references, matching, delivery and recorded
+  effect testable, not the strategy itself. Matching runs on a HYBRID
+  extractor (brace-balanced structure over raw command text, plus the parser
+  for what the parser can see): the motivating instruction is an `aligned`
+  environment `parse_latex` rejects outright, so predicates over the notation
+  DAG alone would have nothing to look at. LANDMINE: the stage field naming
+  the sub-object is `target`, not `on` — YAML 1.1 resolves a bare `on:` key
+  to the boolean `True`; the schema rejects it by name.
 - Core code is fair game: when a fix belongs in the parser grammar, lexer,
   writer, comparer, or replicator, make it there rather than layering
   workarounds. After grammar changes: regenerate the tables, check
@@ -171,6 +193,7 @@ pytest engine/unittests_frac.py                     # fractions
 pytest engine/unittests_primitives.py               # verified-derivation primitives
 pytest engine/unittests_do.py                       # do! endpoint (offline scripted agent)
 pytest engine/unittests_tactics.py                  # registry/CLI/skill-gating surface
+pytest engine/unittests_routes.py                   # strategy route records
 pytest engine/unittests_cell_input.py               # cell readings and rendered input
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```

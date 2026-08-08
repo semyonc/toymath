@@ -27,6 +27,7 @@ import threading
 import agent_config
 import observability
 import primitives
+import strategy_routes
 import tactic_registry
 import tactic_skills
 from agent_backends import base as agent_base
@@ -191,8 +192,17 @@ assumptions; results are
 
 
 def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
-                 proof_claim_id='c1', tikz=False):
-    """Build the small always-on core prompt and skill catalog."""
+                 proof_claim_id='c1', tikz=False, routes=()):
+    """Build the small always-on core prompt and skill catalog.
+
+    `routes` are the strategy-route records whose shape matcher fired on this
+    run's instruction. They are appended CONDITIONALLY, so they cost zero
+    always-on characters — but they are not free: a matching run spends the
+    rendered block's context. Delivery happens here, in the initial developer
+    instructions, rather than behind `load_skill`, because a route meant to
+    prevent a premature open outcome cannot depend on the agent already having
+    made the right discovery call.
+    """
     try:
         if os.path.abspath(skill_path) == os.path.abspath(_SKILL_PATH):
             text = tactic_skills.render('core')
@@ -220,6 +230,9 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
         text += _TIKZ_RULES
     if prove_mode:
         text += _PROVE_RULES.replace('ROOT_CLAIM', proof_claim_id)
+    route_block = strategy_routes.render(routes)
+    if route_block:
+        text += '\n' + route_block
     return text
 
 
@@ -1138,18 +1151,28 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     dispatcher = ToolDispatcher(
         make_tool_bindings(session), cancellation, budget=budget,
         serialize=getattr(backend, 'serialize_tools', False))
+    # Shape matching happens BEFORE the backend starts: a matching record
+    # rides the initial developer instructions. Never authority — steering
+    # only, and `match` swallows its own failures so a malformed route file
+    # can never take a derivation down.
+    matched = strategy_routes.match(instruction)
+    trace_metadata = {'mode': 'prove' if proof_goal is not None else 'do'}
+    if matched:
+        trace_metadata['strategy_routes'] = ','.join(
+            route['id'] for route in matched)
     request = AgentRequest(
         instruction=instruction,
         developer_instructions=build_prompt(
             plotting=session.plot_backend is not None,
             tikz=session.tikz_backend is not None,
             prove_mode=proof_goal is not None,
-            proof_claim_id=(session.proof_claim_id or 'c1')),
+            proof_claim_id=(session.proof_claim_id or 'c1'),
+            routes=matched),
         dispatcher=dispatcher,
         cancellation=cancellation,
         model=model_name,
         budget=budget,
-        trace_metadata={'mode': 'prove' if proof_goal is not None else 'do'})
+        trace_metadata=trace_metadata)
     handle = backend.start(request)
     # One place decides what cancellation means, whoever noticed first: the
     # kernel thread on Stop, or a tool worker that ran out of budget. The
@@ -1173,7 +1196,11 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     if outcome.cancelled:
         session.close(cancellation.reason or USER)
     observability.flush()
-    return finalize_session(session, outcome, max_turns=max_turns)
+    result = finalize_session(session, outcome, max_turns=max_turns)
+    # Non-ledger run metadata, always present: a later failure can then say
+    # whether guidance was absent, mismatched, or delivered and ignored.
+    result['strategy_routes'] = [route['id'] for route in matched]
+    return result
 
 
 # ---------------------------------------------------------------------------
