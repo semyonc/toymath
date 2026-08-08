@@ -1318,6 +1318,20 @@ class TestPointsAssemble(unittest.TestCase):
                                        {'root': '1', 'value': '-2'}])
         self.assertEqual(r['check']['status'], 'agree')
 
+    def test_a_root_may_be_written_either_way_round(self):
+        # same side-order tolerance as an assembled assignment, and
+        # unambiguous here because the variable is named
+        flipped = Equations.points_assemble('x^3-3x', 'x',
+                                            r'-1 = x \lor x=1', ['2', '-2'])
+        self.assertTrue(flipped['ok'], flipped.get('error'))
+        self.assertEqual(flipped['points'], [{'root': '-1', 'value': '2'},
+                                             {'root': '1', 'value': '-2'}])
+        self.assertEqual(flipped['check']['status'], 'agree')
+        naming_neither = Equations.points_assemble(
+            'x^3-3x', 'x', r'y=-1 \lor x=1', ['2', '-2'])
+        self.assertFalse(naming_neither['ok'])
+        self.assertIn("must name 'x' on one side", naming_neither['error'])
+
     def test_result_is_a_typed_collection_of_pairs(self):
         r = Equations.points_assemble('x^3-3x', 'x', r'x=-1 \lor x=1',
                                       ['2', '-2'])
@@ -1414,6 +1428,42 @@ class TestSystemAssemble(unittest.TestCase):
         self.assertTrue(P.same_expression(
             r['result'], r'A=\frac{1}{2},B=-\frac{1}{2}'))
 
+    def test_an_assignment_may_be_written_either_way_round(self):
+        # LIVE: a 26-step reduction-formula derivation ended with every
+        # coefficient isolated as "value = A", because the engine's OWN
+        # isolation chain produces that order, and the assembly refused it.
+        flipped = Equations.system_assemble(
+            ANSATZ, [r'\frac{1}{2} = A', r'-\frac{1}{2} = B'])
+        self.assertTrue(flipped['ok'], flipped.get('error'))
+        self.assertEqual(flipped['check']['status'], 'agree')
+        # read identically to the canonical order, and STATED canonically
+        canonical = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertEqual(flipped['unknowns'], canonical['unknowns'])
+        self.assertEqual(flipped['result'], canonical['result'])
+        mixed = Equations.system_assemble(
+            ANSATZ, [r'\frac{1}{2} = A', r'B = -\frac{1}{2}'])
+        self.assertTrue(mixed['ok'], mixed.get('error'))
+
+    def test_the_producer_of_assignments_feeds_the_consumer(self):
+        # match_coefficients was built for system_assemble to consume, and
+        # emits value-first ("0 = A"); the two must agree on orientation.
+        target = '1=A t^2+B t+C'
+        produced = Equations.match_coefficients(target, 't')
+        self.assertTrue(produced['ok'], produced.get('error'))
+        pieces = [p.strip() for p in produced['result'].split(',')]
+        self.assertTrue(any(p.startswith('0 =') or p.startswith('1 =')
+                            for p in pieces), pieces)
+        r = Equations.system_assemble(target, pieces)
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_an_ambiguous_assignment_keeps_the_left_reading(self):
+        # both sides are plain symbols and no target is in scope in the
+        # shared reader, so the historical left-hand reading must win
+        pairs = Equations.assignment_pairs(['A = B'])
+        self.assertEqual(pairs, [{'unknown': 'A', 'value': 'B'}])
+
     def test_result_is_a_system_of_equalities(self):
         r = Equations.system_assemble('x+y=3, x-y=1', ['x=2', 'y=1'])
         self.assertTrue(r['ok'], r.get('error'))
@@ -1456,7 +1506,7 @@ class TestSystemAssemble(unittest.TestCase):
         compound = Equations.system_assemble(
             ANSATZ, [r'2A = 1', r'B = -\frac{1}{2}'])
         self.assertFalse(compound['ok'])
-        self.assertIn('plain unknown on the left', compound['error'])
+        self.assertIn('plain unknown on one side', compound['error'])
         twice = Equations.system_assemble(
             ANSATZ, [r'A = \frac{1}{2}', r'A = \frac{1}{2}'])
         self.assertFalse(twice['ok'])
@@ -3032,6 +3082,80 @@ class TestDisagreementNeedsEvidence(unittest.TestCase):
         v2 = P.numeric_eval(s2, n2, env)
         self.assertTrue(
             P._disagreement_resolves(s1, n1, s2, n2, env, v1, v2))
+
+
+class TestAssembledAnswerNeedsEvidenceToo(unittest.TestCase):
+    # The same discipline on the leg that checks an ASSEMBLED answer, where
+    # the two values come from a pipeline (sample point -> each unknown's
+    # recorded value -> the relation) rather than one expression apiece.
+    # LIVE: the reduction-formula ansatz below is the coefficient identity a
+    # 26-step derivation produced; its own correct A, B and C were accused
+    # of not satisfying it. The sampler draws from ~150 small rationals
+    # jittered by <1e-3, so two variables landing on the same rational -
+    # 1.6% of pairs, and draw #2 of this tactic's fixed seed - differ only
+    # by that jitter, and the assembled values' expanded (a^2-b^2)^2(n-1)^2
+    # denominator loses 1e-7 of relative precision there.
+
+    TARGET = '1=A t(a+b t)+A(n-1)b(1-t^2)+B(a+b t)+C(a+b t)^2'
+    DEN = ('a^{4}n^{2}-2a^{2}b^{2}n^{2}+b^{4}n^{2}-2a^{4}n+4a^{2}b^{2}n'
+           '-2b^{4}n+a^{4}-2a^{2}b^{2}+b^{4}')
+    A = r'\frac {-b} {a^{2}n-b^{2}n-a^{2}+b^{2}}'
+    B = (r'\frac {2a^{3}n^{2}-2ab^{2}n^{2}-5a^{3}n+5ab^{2}n+3a^{3}-3ab^{2}} '
+         '{%s}' % DEN)
+    C = (r'\frac {-a^{2}n^{2}+b^{2}n^{2}+3a^{2}n-3b^{2}n-2a^{2}+2b^{2}} '
+         '{%s}' % DEN)
+
+    def assemble(self, a=None, b=None, c=None):
+        return Equations.system_assemble(
+            self.TARGET,
+            [f'{a or self.A} = A', f'{b or self.B} = B',
+             f'{c or self.C} = C'])
+
+    def test_the_derivations_own_coefficients_are_not_accused(self):
+        r = self.assemble()
+        self.assertTrue(r['ok'], r.get('error'))
+        self.assertEqual(r['check']['status'], 'agree')
+
+    def test_the_guard_is_not_a_hiding_place(self):
+        # every one of these is WRONG and sits in the same cancelling shape
+        for tag, a, b, c in [
+                ('A sign', self.A.replace('{-b}', '{b}'), self.B, self.C),
+                ('A denom', self.A.replace('a^{2}n', 'a^{2}(n+1)'),
+                 self.B, self.C),
+                ('B coeff', self.A, self.B.replace('+3a^{3}', '+4a^{3}'),
+                 self.C),
+                ('B scale', self.A, self.B.replace('-5a^{3}n', '-6a^{3}n'),
+                 self.C),
+                ('B/C swapped', self.A, self.C, self.B),
+                ('C nudged', self.A, self.B, '1.0001' + self.C)]:
+            pairs = Equations.assignment_pairs(
+                [f'{a} = A', f'{b} = B', f'{c} = C'])
+            self.assertEqual(
+                Equations._system_check([self.TARGET], pairs)['status'],
+                'disagree', tag)
+
+    def test_closed_data_still_refuses_without_anything_to_nudge(self):
+        # nothing is sampled, so there is no noise to measure and a wrong
+        # value must still be caught
+        wrong = Equations.system_assemble('x+2y=7', ['x = 4', 'y = 2'])
+        self.assertFalse(wrong['ok'])
+        right = Equations.system_assemble('x+2y=7', ['3 = x', 'y = 2'])
+        self.assertTrue(right['ok'], right.get('error'))
+        self.assertEqual(right['check']['status'], 'agree')
+
+    def test_a_gap_the_pipeline_cannot_resolve_is_undecided(self):
+        # a quiet pipeline: a one-ULP nudge barely moves it, so a gap of 4
+        # is real evidence
+        def quiet(point):
+            return 1.0, 5.0 + (point['x'] - 2.0)
+        self.assertTrue(P._composite_disagreement_resolves(
+            quiet, {'x': 2.0}, 1.0, 5.0))
+        # the same gap inside a pipeline that swings by 0.44 per ULP is
+        # not evidence of anything
+        def noisy(point):
+            return 1.0, 1.05 + (point['x'] - 2.0) * 1e15
+        self.assertFalse(P._composite_disagreement_resolves(
+            noisy, {'x': 2.0}, 1.0, 1.05))
 
 
 class TestAbsoluteValue(unittest.TestCase):

@@ -15,7 +15,7 @@ from polyrat import NotInFragment, Poly, to_ratfunc, poly_to_notation
 from primitives import (
     PrimitiveError, EvalError, parse_latex, write_latex, numeric_eval,
     free_symbols, same_expression, numeric_union_check, _num_agree,
-    _sample_point, _result, _error,
+    _sample_point, _result, _error, _composite_disagreement_resolves,
 )
 from tactics.core import equal_exprs, substitute, _comp_split
 
@@ -213,18 +213,34 @@ def assignment_pairs(assignments):
                 f'assignment {index} ({assignment!r}) is not an equality; '
                 'each unknown needs a recorded step ending at '
                 '"unknown = value"')
-        left = comp.args[0]
-        if not isinstance(left, Symbol) or notation.get(left) is not None:
+        # An equality states its association in EITHER order, and the engine's
+        # own isolation chains routinely end value-first: `match_coefficients`
+        # — the producer this tactic was built to consume — emits `0 = A`, and
+        # `expand` of a divided relation gives `\frac{b}{c} = A`.  Reading only
+        # the left made the engine refuse the association it had just written,
+        # with no move available to turn it round (`equal?` compares relations
+        # per-side, so `rewrite_as` cannot flip one).  The `handed` guard below
+        # and `_same_relation` already read both orders; this reader is the
+        # odd one out.  Left is tried FIRST so an ambiguous `A = B` — where
+        # either side could be the unknown and no target is in scope here —
+        # keeps its historical reading.
+        unknown = value = None
+        for side, other in ((comp.args[0], comp.args[1]),
+                            (comp.args[1], comp.args[0])):
+            if isinstance(side, Symbol) and notation.get(side) is None:
+                unknown, value = side, other
+                break
+        if unknown is None:
             raise PrimitiveError(
                 f'assignment {index} ({assignment!r}) must name a plain '
-                'unknown on the left')
+                'unknown on one side')
         for seen in out:
-            if seen['unknown'] == left.name:
+            if seen['unknown'] == unknown.name:
                 raise PrimitiveError(
-                    f'{left.name!r} is assigned twice; give one recorded '
+                    f'{unknown.name!r} is assigned twice; give one recorded '
                     'step per unknown')
-        out.append({'unknown': left.name,
-                    'value': write_latex(comp.args[1], notation)})
+        out.append({'unknown': unknown.name,
+                    'value': write_latex(value, notation)})
     # An answer names each unknown once, on the left. A value that still
     # mentions one of them is a half-solved system, not an answer, and the
     # order the values were substituted in would silently decide it.
@@ -303,9 +319,18 @@ def _system_check(relations, pairs, samples=8, seed=20260728, tol=1e-6):
     rng = random.Random(seed)
     agreed = 0
     tried = 0
+
+    def _bind(point):
+        """A sample point with every unknown bound to its recorded value."""
+        local = dict(point)
+        for name, vsym, vnotation in values:
+            local[name] = numeric_eval(vsym, vnotation, point)
+        return local
+
     while agreed < wanted and tried < wanted * 8:
         tried += 1
-        env = _sample_point(variables, rng)
+        base_env = _sample_point(variables, rng)
+        env = dict(base_env)
         usable = True
         try:
             for name, vsym, vnotation in values:
@@ -339,6 +364,23 @@ def _system_check(relations, pairs, samples=8, seed=20260728, tol=1e-6):
                 usable = False
                 break
             if not agree:
+                # A `disagree` bars the assembled answer from the ledger for
+                # good, so the gap has to outrun the oracle's own arithmetic
+                # first. The sampler draws from ~150 small rationals jittered
+                # by <1e-3, so two variables landing on the SAME rational —
+                # 1.6% of pairs, and draw #2 of this tactic's fixed seed —
+                # differ only by that jitter; an `a^2-b^2` denominator there
+                # loses most of its significant digits. Measured live: the
+                # reduction-formula ansatz's own correct A, B, C were
+                # accused at exactly such a point.
+                def _sides(point, _lhs=lhs, _rhs=rhs, _n=rnotation):
+                    local = _bind(point)
+                    return (numeric_eval(_lhs, _n, local),
+                            numeric_eval(_rhs, _n, local))
+                if not _composite_disagreement_resolves(
+                        _sides, base_env, left, right):
+                    usable = False
+                    break
                 return {'status': 'disagree', 'relation': relation,
                         'left': left, 'right': right, 'point': env}
         if usable:
@@ -700,11 +742,19 @@ def _root_values(roots, var_name):
         if comp is None or comp.sym.props.get('op') != '=':
             raise PrimitiveError(
                 f'every solution must be an equality {var_name}=value')
-        left = comp.args[0]
-        if not isinstance(left, Symbol) or left.name != var_name:
+        # Same side-order tolerance as `assignment_pairs`, and unambiguous
+        # here because the variable is named: whichever side IS `var_name`
+        # names the root, so a hand-isolated `1 = x` states the same solution
+        # as `x = 1`.
+        left, right = comp.args[0], comp.args[1]
+        if isinstance(left, Symbol) and left.name == var_name:
+            value_sym = right
+        elif isinstance(right, Symbol) and right.name == var_name:
+            value_sym = left
+        else:
             raise PrimitiveError(
-                f'every solution must name {var_name!r} on the left')
-        solution = write_latex(comp.args[1], notation)
+                f'every solution must name {var_name!r} on one side')
+        solution = write_latex(value_sym, notation)
         # a complete answer lists each solution once; a repeat (in any
         # spelling) would print the same point twice and there is no
         # collection algebra to fold it back together

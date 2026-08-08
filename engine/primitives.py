@@ -1591,6 +1591,51 @@ def _disagreement_resolves(s1, n1, s2, n2, env, v1, v2):
     return gap > _RESOLUTION_MARGIN * max(noise1, noise2)
 
 
+def _composite_disagreement_resolves(evaluate, base_env, v1, v2):
+    """The same question as ``_disagreement_resolves`` for a check whose two
+    values come from a PIPELINE rather than one expression apiece.
+
+    ``evaluate(point) -> (left, right)`` may derive intermediates of its own
+    — an assembled answer evaluates each unknown's recorded value before
+    binding it into the relation — and that is exactly where the significant
+    digits go: measured on the live ansatz, the denominator's expanded
+    spelling cancels 2.3e8 to 1, costing 1e-7 of relative precision, and the
+    relation's own terms then cancel a further 5.9e5 to 1.  Nudging only the
+    relation's inputs would report the pipeline as quiet, so the whole
+    pipeline is re-run at the nudged point.
+
+    ``base_env`` holds the SAMPLED coordinates only; the derived values must
+    not be nudged directly, or their own noise would be measured twice and
+    the check would never accuse anything.  An empty ``base_env`` means
+    nothing was sampled, so noise stays 0.0 and closed data still refuses —
+    honest ignorance is for evidence the oracle cannot get, not for evidence
+    it never needed."""
+    gap = _num_gap(v1, v2)
+    if gap is None:
+        return True
+    worst = 0.0
+    probed = False
+    for key, coord in base_env.items():
+        if not isinstance(coord, float):
+            continue
+        for toward in (math.inf, -math.inf):
+            nudged = dict(base_env)
+            nudged[key] = math.nextafter(coord, toward)
+            try:
+                moved1, moved2 = evaluate(nudged)
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                continue
+            for base, moved in ((v1, moved1), (v2, moved2)):
+                shift = _num_gap(base, moved)
+                if shift is None:
+                    continue
+                probed = True
+                worst = max(worst, shift)
+    if base_env and not probed:
+        return False
+    return gap > _RESOLUTION_MARGIN * worst
+
+
 def _num_agree(v1, v2, tol):
     """True/False when the values are comparable; None when a scalar meets
     a non-vanishing matrix (nothing to conclude)."""

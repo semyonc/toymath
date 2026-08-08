@@ -375,6 +375,31 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(rec['check']['status'], 'agree')
         self.assertEqual(Ledger(path).replay()['status'], 'verified')
 
+    def test_cli_system_assemble_reads_value_first_steps(self):
+        # the engine's own isolation chain routinely ends "value = unknown";
+        # the recorded step must assemble AND replay in that order
+        from ledger import Ledger
+        from tactics import core
+
+        path = os.path.join(tempfile.mkdtemp(), 'flipped.json')
+        ledger = Ledger(path)
+        self.assertEqual(ledger.record(core.expand('6-2 = x+2-2'))['result'],
+                         '4 = x')
+        ledger.record(core.expand('3-1 = y+1-1'))
+        ledger.save()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main([
+                'system_assemble', 'x+y=6, x-y=2', 's1', 's2',
+                '--session', path])
+        self.assertEqual(code, 0)
+        rec = json.loads(output.getvalue())
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], 'x=4,y=2')
+        self.assertEqual(rec['sources'], {'assignments': ['s1', 's2']})
+        self.assertEqual(rec['check']['status'], 'agree')
+        self.assertEqual(Ledger(path).replay()['status'], 'verified')
+
     def test_cli_cases_assemble_reads_recorded_steps(self):
         from ledger import Ledger
         from tactics import core
