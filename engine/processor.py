@@ -145,11 +145,10 @@ class Calculator(Replacer):
     abbreviated_minus = comparer.pattern("(+x)", ["x"])
     abbreviated_plus = comparer.pattern("(-x)", ["x"])
 
-    def __init__(self, notation, output_notation, actions=None, model=None,
+    def __init__(self, notation, output_notation, actions=None,
                  max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS):
         super(Calculator, self).__init__(notation, output_notation)
         self.actions = actions
-        self.prologModel = model
         self.max_expansion_terms = max_expansion_terms
 
     def enter_command(self, sym, f):
@@ -658,7 +657,7 @@ class Calculator(Replacer):
 class MathProcessor(object):
     """MathProcessor"""
 
-    def __init__(self, model=None,
+    def __init__(self,
                  max_iterations=DEFAULT_MAX_FIXED_POINT_ITERATIONS,
                  max_expansion_terms=DEFAULT_CLASSIC_MAX_TERMS,
                  **kwargs):
@@ -668,7 +667,6 @@ class MathProcessor(object):
             raise ValueError('classic expansion term budget must be positive')
         self.trace = None
         self.actions = register_actions()
-        self.prologModel = model
         self.max_iterations = max_iterations
         self.max_expansion_terms = max_expansion_terms
 
@@ -687,15 +685,11 @@ class MathProcessor(object):
         sym = preprocessor(sym)
         notation = output_notation
         output_notation = Notation()
-        if self.prologModel is not None:
-            parse_res = self.prologModel.parse_and_add_rule(sym, notation)
-            if parse_res is not None:
-                return parse_res, notation
         index = 1
         seen_states = [(sym, notation)]
         while True:
             calculator = Calculator(
-                notation, output_notation, self.actions, self.prologModel,
+                notation, output_notation, self.actions,
                 max_expansion_terms=self.max_expansion_terms,
             )
             #trace_notation(notation, sym, tag="before")

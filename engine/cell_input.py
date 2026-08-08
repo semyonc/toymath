@@ -417,8 +417,8 @@ def _math_segment(text):
         latex = primitives.write_latex(sym, notation)
     except Exception:
         return None
-    # The writer can drop what it has no spelling for — a nested `{goal! ...}`
-    # command comes back without it. Show the rendered form only when it
+    # The writer can drop what it has no spelling for — the outer command of
+    # `track! {mul! ...}` comes back missing. Show the rendered form only when it
     # parses back to the same expression as the source, so the view can never
     # quietly say something else than the cell runs.
     if not latex.strip() or not primitives.same_expression(text, latex):

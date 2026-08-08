@@ -483,7 +483,7 @@ The notation graph and walking pattern are central to how ToyMath processes expr
    - `Replacer` applies variable substitutions
    - `Calculator` applies canonicalization and light simplification
 3. **Commands** (`cmd_*.py`) → Perform explicit heavy computation when requested
-4. **Unification** (`prolog.py`, `comparer.py`) → Walks graphs to match patterns
+4. **Unification** (`comparer.py`) → Walks graphs to match patterns
 5. **Writer** (`LatexWriter.py`) → Walks notation graph to produce LaTeX output
 
 Every operation follows the same pattern: **walk the source graph, transform as you go, build the result in a new notation**.

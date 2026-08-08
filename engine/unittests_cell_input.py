@@ -15,12 +15,11 @@ import cell_input
 import primitives
 import prompt_commands
 from processor import MathProcessor
-from prolog import PrologModel
 
 
 def command_names():
     """The bang words a live shell knows: actions, commands, built-ins."""
-    return (set(MathProcessor(model=PrologModel()).actions)
+    return (set(MathProcessor().actions)
             | set(prompt_commands.load_commands())
             | set(prompt_commands.RESERVED))
 
@@ -117,13 +116,13 @@ class TestPreview(unittest.TestCase):
 
     def test_empty_cell_renders_nothing(self):
         self.assertIsNone(self.preview('   \n  '))
-        self.assertIsNone(self.preview('rules!'))
+        self.assertIsNone(self.preview('debug!'))
 
     def test_a_line_the_writer_cannot_spell_back_keeps_its_source(self):
-        # the writer drops the outer command of `track! {goal! ...}`; the
+        # the writer drops the outer command of `track! {mul! ...}`; the
         # round-trip guard catches the loss instead of rendering a formula
         # that says something else than the cell runs
-        cell = r'track! {goal! \operatorname{child}(#Q)}'
+        cell = r'track! {mul! (x+1)(x-1)}'
         sym, notation = primitives.parse_latex(cell, command_names=self.names)
         self.assertNotIn('track', primitives.write_latex(sym, notation))
         self.assertIsNone(self.preview(cell))

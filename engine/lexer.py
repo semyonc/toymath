@@ -15,8 +15,8 @@ class MathLexer(object):
      # ordinary LaTeX letters followed by the postfix FACTORIAL token.
      KNOWN_COMMANDS = frozenset({
         # legacy cmd_* actions
-        'add', 'addex', 'clear', 'closure', 'debug', 'dump', 'echo-off',
-        'echo-on', 'goal', 'mul', 'mulex', 'rules', 'track',
+        'add', 'addex', 'closure', 'debug', 'dump', 'echo-off',
+        'echo-on', 'mul', 'mulex', 'track',
         # committed notebook commands + dispatcher built-ins
         'backend', 'commands', 'conv', 'diff', 'do', 'expand', 'factor',
         'help', 'int', 'lim', 'login', 'model', 'prove', 'simplify',

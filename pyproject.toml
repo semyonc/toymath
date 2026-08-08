@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "toymath"
 version = "0.1.0"
-description = "A symbolic mathematics system implemented as a Jupyter kernel with LaTeX I/O and Prolog-style logic"
+description = "A symbolic mathematics system implemented as a Jupyter kernel with LaTeX I/O and verified-derivation primitives"
 readme = "CLAUDE.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Semyon C", email = "semyonc@example.com"}
 ]
-keywords = ["symbolic-math", "jupyter-kernel", "latex", "prolog", "computer-algebra"]
+keywords = ["symbolic-math", "jupyter-kernel", "latex", "computer-algebra"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

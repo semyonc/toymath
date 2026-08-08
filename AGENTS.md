@@ -51,7 +51,6 @@ Two layers coexist:
 | `engine/cmd_mul.py`, `engine/cmd_add.py` | Legacy rewrite commands: fraction/power rules |
 | `engine/classic_canonical.py` | Bounded adapter letting `mul!`/`add!` share `polyrat`'s canonical forms on their commutative rational fragment; unsupported notation falls back to the procedural path |
 | `engine/frac_utils.py`, `engine/value.py` | Fraction utilities; IntegerValue/FracValue/FloatValue |
-| `engine/prolog.py` | Legacy logic layer — do not build new features on it |
 | `engine/mathShell.py` | Kernel shell: cell dispatch (`do!`, notebook commands, math cells) |
 
 ## Architectural Guardrails
@@ -360,7 +359,7 @@ if isinstance(n, IntegerValue): ...
   *lexical* — the parser accepts `the derivative` as a product of one-letter
   symbols, so it can reject but never classify. And a rendered fragment must
   pass `primitives.same_expression` against its source: the writer silently
-  drops what it cannot spell (`track! {goal! …}` comes back without the
+  drops what it cannot spell (`track! {mul! …}` comes back without the
   `track!`), and a view that says something other than what the cell runs is
   worse than no view. Anything unproven renders as its own source; keep it
   that way. Rendering swaps the editor through the public

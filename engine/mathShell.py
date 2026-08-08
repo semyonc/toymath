@@ -10,7 +10,6 @@ from LatexParser import MathParser
 from processor import MathProcessor
 from LatexWriter import LaTexWriter
 from replicator import Replicator
-from prolog import PrologModel
 from ledger import Ledger
 import agent_config
 import cell_input
@@ -199,7 +198,7 @@ class MathShell(object):
         self.history = {}
         self._live_log = _LiveLog(self)
         self.parsedNotation = Notation()
-        self.processor = MathProcessor(model=PrologModel())
+        self.processor = MathProcessor()
         # Discover both command systems before constructing the lexer. Bang
         # words become COMMAND tokens only when this registry admits them;
         # every other bang is mathematical factorial syntax.
@@ -1363,6 +1362,3 @@ class MathShell(object):
         # accumulating one transparent brace layer per hop.
         import primitives
         return primitives.write_latex(outsym, notation)
-
-    def clear(self):
-        self.processor.prologModel.clear()
