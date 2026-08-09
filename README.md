@@ -93,23 +93,6 @@ Agreement over sampled points is *quantified evidence*, not a proof.
 records `a + b ≠ 0`; it does not prove it. The derivation is honestly
 conditional, and the conditions travel with it.
 
-### Where a wrong answer can still survive
-
-A guarantee is only worth what its failure modes are. There are three, and
-the second and third are **immune to oracle independence by construction** —
-independence governs how consequences are *computed*, never what is *assumed*
-or what the notation *means*:
-
-| | failure | defended by |
-|---|---|---|
-| 1 | a step's transformation is wrong and both legs miss it | the two independent legs; the oracle shares no algebra with the symbolic path |
-| 2 | every step is valid but rests on an asserted premise | premises are derived and displayed — visibility, not prevention |
-| 3 | both legs read the input the same wrong way | nothing; unambiguous notation is the only defence |
-
-The design target is (1), and that is where the two-leg structure earns its
-cost. (2) and (3) are boundaries of the method, not defects to be patched
-away, and they are documented in [docs/PRIMITIVES.md](docs/PRIMITIVES.md).
-
 The honest summary: **ToyMath removes hallucinated algebra from the chain. It
 does not certify the chain's starting point, and it does not know what you
 meant.**
@@ -189,29 +172,9 @@ ever diverge. The trust boundary does not move either; the tactic registry,
 the independent oracle, and the ledger remain the only authority for a checked
 result.
 
-What differs is **which models you will realistically run**, and that matters
-more here than in most agent tools.
-
-- **A weak model does not merely fail more often — it fails worse.** The
-  characteristic failure is not giving up; it is asserting a starting point and
-  then computing confidently past it. Every recorded step checks out, and the
-  conclusion is wrong because its premise was. That is the second failure mode
-  in the table above, and it is the expensive one: a refusal costs a retry,
-  while a green ledger over a mis-stated premise costs your trust in the
-  artifact. Read the premise line, whatever backend you use.
-- **A strong model on OpenRouter is not cheap.** Billing is per token on top of
-  whatever you already subscribe to, and a derivation is many turns — the
-  reduction-formula example below runs to roughly thirty checked steps.
-
-The Codex backend removes that second bill: it runs `do!` through the Codex
-app-server against your personal ChatGPT account, so the work draws on the
-Plus/Pro subscription you already have, under that plan's own quota and rate
-limits, with access to that account's strong models. There is no ToyMath-side
-key, no shared credential, and no per-token charge.
-
-**Reach for OpenRouter when** you have no ChatGPT subscription, when you need a
-specific model that account does not offer, or when you are running headless or
-in CI where an interactive sign-in is impractical.
+Reach for OpenRouter when you have no ChatGPT subscription, 
+when you need a specific model that account does not offer, 
+or when you are running headless or in CI where an interactive sign-in is impractical.
 
 A run **never fails over**. A Codex rate limit will not silently create
 OpenRouter charges, and an OpenRouter outage will not silently consume a
@@ -381,5 +344,3 @@ sandboxes off. `OPENROUTER_MODEL`, `TOYMATH_CODEX_MODEL`,
 `TOYMATH_AGENT_BACKEND`, `TOYMATH_OBSERVABILITY`, and `TOYMATH_SANDBOX` in
 your `.env` change what `do!` does, never what a live test measures — only
 the credential is taken from the environment.
-
-MIT License · Semyon C
