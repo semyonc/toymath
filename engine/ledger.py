@@ -323,15 +323,26 @@ class Ledger(object):
         return self.data['selections']
 
     @staticmethod
-    def _pending_branches_in(steps, goal):
+    def _pending_branches_in(steps, goal, run=None):
         """Return unresolved markers for ``goal`` in ledger order.
 
         This is derived solely from ledger order: the first later
         transforming step in the same goal resolves a marker.  No hidden
         mutable branch cursor participates in recording or replay.
+
+        A marker constrains only the run that recorded it. Runs are
+        contiguous slices of the step list tagged by ``run``, so the scan
+        stops at the first step outside the current run: a new run must
+        never be forced to resume — or blocked by — a branch some earlier
+        cell abandoned (live: one open cell's pending marker deadlocked
+        every later cell in the notebook, each refused for not resuming a
+        step it could not even see). Untagged legacy steps all share
+        ``run None`` and keep their original whole-ledger behaviour.
         """
         pending = []
         for step in reversed(steps):
+            if step.get('run') != run:
+                break
             if step.get('goal') != goal:
                 continue
             if (step.get('op') in TRANSFORMING_OPS
@@ -342,12 +353,23 @@ class Ledger(object):
         return list(reversed(pending))
 
     @classmethod
-    def _pending_branch_in(cls, steps, goal):
-        pending = cls._pending_branches_in(steps, goal)
+    def _pending_branch_in(cls, steps, goal, run=None):
+        pending = cls._pending_branches_in(steps, goal, run)
         return pending[-1] if pending else None
 
-    def _pending_branch(self, goal):
-        return self._pending_branch_in(self.steps, goal)
+    def _pending_branch(self, goal, run=None):
+        return self._pending_branch_in(self.steps, goal, run)
+
+    def next_run(self):
+        """The run tag for a session opening on this ledger now.
+
+        Derived from the recorded steps, not from a mutable counter, so a
+        reloaded session file allocates correctly. Two consecutive sessions
+        may share a tag only if the earlier one recorded nothing — in which
+        case the boundary is vacuous.
+        """
+        return max((step.get('run') or 0 for step in self.steps),
+                   default=0) + 1
 
     def _branch_edge(self, marker, target):
         args = marker.get('args') or {}
@@ -422,14 +444,19 @@ class Ledger(object):
         self.claims.append(claim)
         return claim
 
-    def record(self, result, goal=None):
-        """Append a successful primitive result; returns the step record."""
+    def record(self, result, goal=None, run=None):
+        """Append a successful primitive result; returns the step record.
+
+        ``run`` tags the step with the recording session's run so branch
+        markers stay run-scoped; ``None`` (direct-tier and CLI callers)
+        keeps the caller's steps in the untagged legacy run.
+        """
         if not result.get('ok'):
             raise ValueError('only successful results are recorded')
         if goal is not None and self.get_claim(goal) is None:
             raise ValueError(f'unknown goal {goal!r}')
         n = len(self.steps) + 1
-        pending_branch = self._pending_branch(goal)
+        pending_branch = self._pending_branch(goal, run)
         if pending_branch is not None:
             source_id = pending_branch['args']['from']
             source = next((s for s in self.steps
@@ -485,6 +512,8 @@ class Ledger(object):
             step['unknowns'] = result['unknowns']
         if goal is not None:
             step['goal'] = goal
+        if run is not None:
+            step['run'] = run
         if pending_branch is not None:
             # Presentation metadata only.  Mathematical authority still
             # comes exclusively from this step's registered tactic/check.
@@ -511,7 +540,7 @@ class Ledger(object):
                 self.assumptions.append(a)
         return step
 
-    def record_comment(self, text, goal=None):
+    def record_comment(self, text, goal=None, run=None):
         """Append a narrative note. Notes are unverified prose: they carry
         no input/result, are skipped by replay, and never count as
         provenance for a final result."""
@@ -534,10 +563,12 @@ class Ledger(object):
         }
         if goal is not None:
             step['goal'] = goal
+        if run is not None:
+            step['run'] = run
         self.steps.append(step)
         return step
 
-    def record_branch(self, from_step, reason, goal=None):
+    def record_branch(self, from_step, reason, goal=None, run=None):
         """Record an exploration-only resume marker.
 
         The marker names an earlier transforming step but carries no result,
@@ -552,7 +583,7 @@ class Ledger(object):
             raise ValueError('branch marker needs a reason')
         if goal is not None and self.get_claim(goal) is None:
             raise ValueError(f'unknown goal {goal!r}')
-        pending = self._pending_branch(goal)
+        pending = self._pending_branch(goal, run)
         if pending is not None:
             raise ValueError(
                 f'branch marker {pending["id"]} still needs its continuing '
@@ -585,6 +616,8 @@ class Ledger(object):
         }
         if goal is not None:
             step['goal'] = goal
+        if run is not None:
+            step['run'] = run
         self.steps.append(step)
         return step
 
@@ -862,7 +895,7 @@ class Ledger(object):
                              f'{step.get("goal")!r}')
                 else:
                     pending = self._pending_branches_in(
-                        replayed_steps, step.get('goal'))
+                        replayed_steps, step.get('goal'), step.get('run'))
                     current_is_legacy = (step.get('hash')
                                          == _legacy_branch_hash(
                                              from_step, reason))
@@ -895,7 +928,7 @@ class Ledger(object):
                 replayed_steps.append(step)
                 continue
             pending_branches = self._pending_branches_in(
-                replayed_steps, step.get('goal'))
+                replayed_steps, step.get('goal'), step.get('run'))
             if pending_branches:
                 for pending_branch in pending_branches:
                     source_id = pending_branch['args']['from']
@@ -1020,8 +1053,13 @@ class Ledger(object):
             if marker.get('op') != 'branch':
                 continue
             goal = marker.get('goal')
+            # Only the marker's own run can resolve it: a later cell's
+            # first step is unrelated work, not the continuation this
+            # marker asked for, and pairing them would present an
+            # abandoned line as resumed.
             target = next((step for step in self.steps[index + 1:]
-                           if (step.get('goal') == goal
+                           if (step.get('run') == marker.get('run')
+                               and step.get('goal') == goal
                                and step.get('op') in TRANSFORMING_OPS
                                and step.get('result') is not None)), None)
             args = marker.get('args') or {}

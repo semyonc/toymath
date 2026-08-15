@@ -1316,6 +1316,69 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertNotIn('awaiting a continuing step', md)
         self.assertEqual(ledger.replay()['status'], 'verified')
 
+    def test_an_abandoned_marker_does_not_leak_into_later_runs(self):
+        # live: one cell ended open with its branch marker still pending,
+        # and every later cell in the notebook was refused for not
+        # resuming a step it never saw. Markers are run-scoped: a new run
+        # starts unconstrained, may branch on its own steps, and the stale
+        # marker stays honestly unresolved instead of being presented as
+        # resumed by unrelated work.
+        ledger = Ledger()
+        first = run_instruction('explore', ledger=ledger,
+                                model=ScriptedModel([
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [tool_call('comment', {'text': 'wrong route',
+                                   'from_step': 's1'}, 'c2')],
+            [tool_call('set_open', {
+                'reason': 'the resume needs a tactic this run lacks'},
+                'c3')],
+            [message('open')],
+        ]))
+        self.assertEqual(first['branch_topology']['unresolved_markers'],
+                         ['s2'])
+        second = run_instruction('factor another', ledger=ledger,
+                                 model=ScriptedModel([
+            [tool_call('expand', {'expr': '(y+1)^2'}, 'c4')],
+            [tool_call('comment', {'text': 'factor instead',
+                                   'from_step': 's3'}, 'c5')],
+            [tool_call('factor_quadratic', {'expr': 'y^{2}+2y+1',
+                                            'var': 'y'}, 'c6')],
+            [tool_call('set_result', {'expr': '(y+1)^{2}'}, 'c7')],
+            [message('done')],
+        ]))
+        self.assertTrue(second['ok'], second.get('error'))
+        self.assertEqual(second['final_result'], '(y+1)^{2}')
+        # the new run recorded its steps and its own (resumed) marker
+        self.assertEqual([(s['id'], s['op']) for s in second['steps']],
+                         [('s3', 'expand'), ('s4', 'branch'),
+                          ('s5', 'factor_quadratic')])
+        # the earlier run's marker is not presented as resumed by this run
+        stale = next(e for e in ledger.branch_edges()
+                     if e['marker'] == 's2')
+        self.assertIsNone(stale['to'])
+        resumed = next(e for e in ledger.branch_edges()
+                       if e['marker'] == 's4')
+        self.assertEqual(resumed['to'], 's5')
+        # admission still mirrors replay across the run boundary
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_run_with_no_recorded_result_states_no_premises(self):
+        # live: a run whose every tactic call was refused — and the
+        # committed figure-only cell — reported earlier cells' givens as
+        # its own stated premises. A run that recorded no result-bearing
+        # step stated nothing.
+        ledger = Ledger()
+        run_instruction('expand it', ledger=ledger, model=ScriptedModel([
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [message('done')],
+        ]))
+        empty = run_instruction('just narrate', ledger=ledger,
+                                model=ScriptedModel([
+            [tool_call('comment', {'text': 'nothing to record'}, 'c2')],
+            [message('no derivation')],
+        ]))
+        self.assertEqual(empty['premises'], [])
+
     def test_branch_run_returns_spine_and_abandoned_path_summary(self):
         script = [
             [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],

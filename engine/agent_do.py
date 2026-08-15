@@ -260,6 +260,10 @@ class DoSession(object):
         self.plot_backend = plot_backend
         self.tikz_backend = tikz_backend
         self.start = len(self.ledger.steps)
+        # This run's ledger tag: branch markers are run-scoped, so an
+        # earlier cell's abandoned marker can never block or re-route the
+        # steps this session records.
+        self.run = self.ledger.next_run()
         self.selection_start = len(self.ledger.selections)
         self.result_override = None
         self.result_provenance = None
@@ -411,7 +415,7 @@ class DoSession(object):
                     return refused
                 try:
                     step = self.ledger.record(
-                        result, goal=self.current_goal)
+                        result, goal=self.current_goal, run=self.run)
                 except ValueError as exc:
                     refused = dict(result)
                     refused['ok'] = False
@@ -455,19 +459,21 @@ class DoSession(object):
         """Append a narrative note or structured branch marker and stream it."""
         with self._mutate():
             if from_step:
-                pending = self.ledger._pending_branch(self.current_goal)
+                pending = self.ledger._pending_branch(self.current_goal,
+                                                      self.run)
                 if pending is not None and from_step == pending['id']:
                     # the note annotates the pending marker itself — the
                     # agent meant a plain comment, not a second marker
                     # (markers do not stack); live agents hit this shape
                     step = self.ledger.record_comment(
-                        text, goal=self.current_goal)
+                        text, goal=self.current_goal, run=self.run)
                 else:
                     step = self.ledger.record_branch(
-                        from_step, text, goal=self.current_goal)
+                        from_step, text, goal=self.current_goal,
+                        run=self.run)
             else:
                 step = self.ledger.record_comment(
-                    text, goal=self.current_goal)
+                    text, goal=self.current_goal, run=self.run)
             if self.on_step is not None:
                 self.on_step(step)
         return step
@@ -1292,8 +1298,13 @@ def finalize_session(session, outcome, max_turns=None):
     # ledger does not re-attribute an earlier cell's givens to this one.
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]
+    # A run that recorded no result-bearing step stated NOTHING: pass the
+    # empty id list through rather than falling back to the whole-ledger
+    # scan (live: a run whose every tactic call was refused reported an
+    # earlier cell's integrand as its own stated premise, and a
+    # figure-only cell claimed to rest on every prior cell's givens).
     final_premises = _stated_premises(
-        session.ledger.premises(spine or run_ids or None),
+        session.ledger.premises(spine or run_ids),
         session.chain_goal)
     figure_events = session.figure_events()
     figures = [{'id': event['id'], 'caption': event['caption'],

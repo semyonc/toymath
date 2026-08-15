@@ -206,9 +206,16 @@ classifies the source step with its own dead route. Either way the step
 persists a hash-checked marker/source edge, derived from ledger order rather
 than a hidden mutable cursor. Step-to-step chain continuity uses the same
 structural convention, so a linear substitution workflow presents as one
-spine. A marker at the end of a partial session remains
-valid but visibly awaits its continuation. Legacy marker files without the
-target half derive the same edge deterministically during replay.
+spine. A marker constrains only the run that recorded it: notebook steps
+carry their session's run tag, so a run that ends with its marker still
+pending leaves later cells on the shared ledger unconstrained — recording,
+replay, and edge presentation all stop at the run boundary, and the
+abandoned marker is shown unresolved rather than resumed by unrelated work.
+Untagged steps (the CLI's session files, older ledgers) share one run and
+keep the original whole-file behaviour. A marker at the end of a partial
+session remains valid but visibly awaits its continuation. Legacy marker
+files without the target half derive the same edge deterministically during
+replay.
 
 `set_result` appends a separate selection record containing the chosen value
 and its already-validated step or claim provenance. The selection is
@@ -370,7 +377,10 @@ writer, comparer, and replicator landmines.
   ending at a wrong answer, and the recorded assembly agrees because it
   verifies values against the *stated* target. `Ledger.premises` lists such
   inputs in every view; a claim closed from one carries the
-  `derived-from-premise` shape and stays conditional on it. A designated
+  `derived-from-premise` shape and stays conditional on it. A run's own
+  premise report covers only the steps that run recorded — a run that
+  recorded no result-bearing step stated nothing, rather than inheriting
+  every earlier cell's givens from the shared ledger. A designated
   result that records no claim currently gets no equivalent marking, and a
   premise containing free variables cannot be refuted by evaluation. Prefer a
   derivation whose premises are the problem statement alone.

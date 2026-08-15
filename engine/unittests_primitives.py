@@ -4322,6 +4322,45 @@ class TestLedgerBranchMarker(unittest.TestCase):
             source['result'], 'x'))
         self.assertEqual(resumed['exploration']['marker'], marker['id'])
 
+    def test_pending_markers_are_scoped_to_their_run(self):
+        # A marker constrains only the run that recorded it: a later run on
+        # the same (notebook) ledger records freely, places its own markers,
+        # and still gets within-run enforcement; the abandoned marker stays
+        # unresolved in presentation, and replay accepts the whole file.
+        ledger = Ledger()
+        source = ledger.record(Core.expand('(x+1)^2'), run=1)
+        ledger.record_branch(source['id'], 'abandoned at run end', run=1)
+        # a new run neither resumes nor is refused by the stale marker
+        other = ledger.record(Core.expand('(y+1)^2'), run=2)
+        self.assertNotIn('exploration', other)
+        # the new run's own marker enforcement is intact
+        marker = ledger.record_branch(other['id'], 'try factoring', run=2)
+        with self.assertRaisesRegex(ValueError, 'input does not resume'):
+            ledger.record(Core.expand('(z+1)^2'), run=2)
+        with self.assertRaisesRegex(ValueError, 'still needs'):
+            ledger.record_branch(other['id'], 'stack another', run=2)
+        resumed = ledger.record(Core.factor_quadratic(
+            other['result'], 'y'), run=2)
+        self.assertEqual(resumed['exploration']['marker'], marker['id'])
+        # presentation: the stale marker is unresolved, not paired cross-run
+        edges = {e['marker']: e['to'] for e in ledger.branch_edges()}
+        self.assertIsNone(edges['s2'])
+        self.assertEqual(edges[marker['id']], resumed['id'])
+        # admission mirrors replay across the run boundary
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_run_tags_persist_and_scope_survives_reload(self):
+        path = os.path.join(tempfile.mkdtemp(), 'runs.json')
+        ledger = Ledger(path)
+        source = ledger.record(Core.expand('(x+1)^2'), run=1)
+        ledger.record_branch(source['id'], 'abandoned at run end', run=1)
+        ledger.record(Core.expand('(y+1)^2'), run=2)
+        ledger.save()
+        loaded = Ledger(path)
+        self.assertEqual([s.get('run') for s in loaded.steps], [1, 1, 2])
+        self.assertEqual(loaded.next_run(), 3)
+        self.assertEqual(loaded.replay()['status'], 'verified')
+
     def test_replay_rejects_tampered_edge_and_selection(self):
         ledger = Ledger()
         source = ledger.record(Core.expand('(x+1)^2'))
