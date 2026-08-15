@@ -136,15 +136,37 @@ def _proposal_limit_error(proposal_limit, expr_limit, op, label):
 
 
 def _finite_sum_check(sum_latex, closed_latex, upper_var, lower_int,
-                      samples=6, seed=20260705, word='sum'):
+                      samples=6, seed=20260705, word='sum',
+                      body_latex=None, bound=None, upper_int=None):
     """Evaluate the literal finite sum/product against a closed form at
     several integer upper bounds — the independent numeric leg for the
-    finite-operator tactics."""
+    finite-operator tactics.
+
+    The EMPTY range is not evidence.  Its value is 0 (1 for a product) for
+    every summand there is, so an agreement there says nothing about the
+    body being checked; the leg drops draws it cannot evaluate, so a body
+    that is undefined at the lower index leaves the empty range as the sole
+    survivor and any closed form vanishing at that bound would certify.
+    An `agree` therefore needs at least one agreement over a NON-EMPTY
+    range, or the verdict is `skipped` naming the evidence it lacks.
+
+    Ahead of that, the operator has to HAVE a value: given the body and its
+    bound variable, an index inside the written range where the body is
+    undefined means the sum itself has no value there, and the dropped
+    draws would otherwise leave whatever ranges sit below that index
+    certifying a closed form claimed for all of them."""
     try:
         ss, sn = parse_latex(sum_latex)
         cs, cn = parse_latex(closed_latex)
     except PrimitiveError as e:
         return {'status': 'skipped', 'reason': str(e)}
+    if body_latex is not None and bound is not None:
+        gap = _undefined_index(body_latex, bound, lower_int, upper_int)
+        if gap is not None:
+            return {'status': 'skipped',
+                    'reason': (f'the {word} has no value at {bound} = {gap}, '
+                               f'an index inside its own range, so there is '
+                               f'nothing for a closed form to equal there')}
     variables = free_symbols(ss, sn) | free_symbols(cs, cn)
     if upper_var is not None:
         variables.discard(upper_var)
@@ -152,6 +174,9 @@ def _finite_sum_check(sum_latex, closed_latex, upper_var, lower_int,
         else tuple(range(samples))
     rng = random.Random(seed)
     agreed = 0
+    # agreements over a range that actually has terms in it; with literal
+    # bounds every draw is that range, so the two counts coincide
+    informative = 0
     for delta in deltas:
         env = _sample_point(variables, rng)
         if upper_var is not None:
@@ -168,11 +193,76 @@ def _finite_sum_check(sum_latex, closed_latex, upper_var, lower_int,
             return {'status': 'disagree', 'point': env,
                     'sum': v1, 'closed': v2}
         agreed += 1
+        if upper_var is None or delta >= 0:
+            informative += 1
     if agreed == 0:
         return {'status': 'skipped',
                 'reason': 'no evaluable integer sample points'}
+    if informative == 0:
+        return {'status': 'skipped',
+                'reason': (f'the only evaluable sample was the empty '
+                           f'{word} (upper bound below {lower_int}), whose '
+                           f'value is the same for every body: the body '
+                           f'could not be evaluated at any index inside '
+                           f'the range')}
     return {'status': 'agree', 'samples': agreed,
+            'informative_samples': informative,
             'method': f'literal finite-{word} evaluation vs closed form'}
+
+
+def _undefined_index(body, k, lower_int, upper_int, reference=None,
+                     span=10, draws=3, seed=20260815):
+    """The first integer index inside the written range at which ``body``
+    has no value — the discrete binder's definedness witness.
+
+    A removable singularity inside a plain expression is a measure-zero
+    exclusion: that is why ``expand``/``rewrite_as`` record the cancelled
+    factor as an assumption and carry on, and why the numeric legs cannot
+    see it at all.  A discrete binder is different in kind — it evaluates
+    its body AT each index — so the same cancellation does not narrow a
+    domain by a null set, it removes a TERM.  A sum missing one of its own
+    terms has no value, and nothing can be checked against it.
+
+    Refusing is a positive claim, so it needs evidence: the index must fail
+    on independent draws of the other free variables, never on one unlucky
+    sample point.  With ``reference``, only an index where THAT body does
+    have a value counts — the shape that says a rewrite would ADD a term,
+    as against both operators being equally undefined.  Returns the index,
+    or None when nothing is established.
+    """
+    try:
+        bs, bn = parse_latex(body)
+        rs, rn = (parse_latex(reference) if reference is not None
+                  else (None, None))
+    except PrimitiveError:
+        return None
+    variables = free_symbols(bs, bn) - {k}
+    if rs is not None:
+        variables |= free_symbols(rs, rn) - {k}
+    rng = random.Random(seed)
+    for i in range(span):
+        index = lower_int + i
+        if upper_int is not None and index > upper_int:
+            return None
+        witnessed = 0
+        for _ in range(draws):
+            env = _sample_point(variables, rng)
+            env[k] = float(index)
+            if rs is not None:
+                try:
+                    numeric_eval(rs, rn, env)
+                except (EvalError, ZeroDivisionError, ValueError,
+                        OverflowError):
+                    break        # reference undefined too: nothing to claim
+            try:
+                numeric_eval(bs, bn, env)
+            except (EvalError, ZeroDivisionError, ValueError, OverflowError):
+                witnessed += 1
+                continue
+            break                # defined here; not this index
+        if witnessed == draws:
+            return index
+    return None
 
 
 def sum_from_ellipsis(expr, sum_form):
@@ -411,6 +501,24 @@ def sum_rewrite(expr, new_summand):
         return _error('sum_rewrite', args,
                       'new summand is not mechanically equal to the current '
                       f'one (verdict: {eq.get("verdict", "error")})')
+    # equal? decides the two summands as functions, where a removable
+    # singularity is a measure-zero exclusion it cannot see.  Under a
+    # discrete binder that exclusion is a TERM, so the swap would silently
+    # give the sum a term the written one does not have.
+    lo = _int_literal(parts['lower'], parts['notation'])
+    if lo is not None:
+        index = _undefined_index(
+            parts['summand_latex'], parts['bound'], lo,
+            _int_literal(parts['upper'], parts['notation']),
+            reference=new_summand)
+        if index is not None:
+            return _error(
+                'sum_rewrite', args,
+                f'the proposed summand is defined at {parts["bound"]} = '
+                f'{index} and the current one is not, so the rewrite would '
+                f'add a term the written sum does not have; the sum as '
+                f'written has no value at that index — restrict the lower '
+                f'bound past it, or state the intended sum directly')
     result = _rewrap_limit(
         parts['limit'], _sum_latex(parts['bound'], parts['lower_latex'],
                                    parts['upper_latex'], new_summand))
@@ -479,7 +587,9 @@ def sum_telescope(expr, term):
     check = _finite_sum_check(
         _sum_latex(k, parts['lower_latex'], parts['upper_latex'],
                    parts['summand_latex']),
-        closed, upper_var, lo)
+        closed, upper_var, lo,
+        body_latex=parts['summand_latex'], bound=k,
+        upper_int=_int_literal(parts['upper'], parts['notation']))
     if check.get('status') != 'agree':
         return _error('sum_telescope', args,
                       'telescoped form was not confirmed by the finite-sum '
@@ -653,7 +763,10 @@ def _bigop_closed_form(name, op, expr, closed_form):
                       f'closed_form is the {word} itself; propose the '
                       f'closed value the {word} equals')
     check = _finite_sum_check(bigop, closed_latex,
-                              upper_var, lo, word=word)
+                              upper_var, lo, word=word,
+                              body_latex=parts['summand_latex'], bound=k,
+                              upper_int=_int_literal(parts['upper'],
+                                                     parts['notation']))
     if check.get('status') != 'agree':
         detail = check.get('reason', check.get('status', 'unknown'))
         if check.get('status') == 'disagree':

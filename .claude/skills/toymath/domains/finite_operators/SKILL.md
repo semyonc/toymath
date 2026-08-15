@@ -89,3 +89,12 @@ never enters the ledger, and only the named tactic records `n \in \mathbb{Z}`
 as an assumption on a step. A proposal with no factorial or binomial in it
 — a plain `\sum` closed form, say — still gets `unknown` from `equal`, and
 the named tactic remains the only route.
+
+A finite operator whose body has no value at an index inside its own range
+has no value either, and the tactics refuse it by name rather than checking
+something else. `\sum_{k=1}^{n} \frac{k^2-1}{k-1}` is the shape: the `k = 1`
+term is `0/0`, so the sum as written does not exist. Cancelling the factor
+first does not rescue it — `sum_rewrite` refuses that too, because under a
+binder the cancelled point is a TERM, not the measure-zero exclusion
+`expand` records as an assumption on a plain expression. Move the lower
+bound past the index, or state the sum you actually mean.

@@ -1670,7 +1670,12 @@ def collect(expr, var):
         return _error('collect', args, 'expression contains division by zero')
     except NotInFragment as e:
         return _error('collect', args, f'outside the rational fragment: {e}')
-    return _checked(_result('collect', args, expr, result))
+    # a rational collect goes through the same cancelling canonical core as
+    # expand, so it drops the same points, and the numeric legs are equally
+    # blind to a measure-zero exclusion
+    return _checked(_result('collect', args, expr, result,
+                            assumptions=_with_domain_assumption(
+                                None, expr, result)))
 
 
 def atom_ratfuncs(sides, notation, var):
@@ -2148,9 +2153,26 @@ def _domain_narrowing(expr, new_expr):
 
 
 def _with_domain_assumption(assumptions, expr, result):
-    """`assumptions` plus the `factor \\ne 0` a cancellation dropped, if
-    any. Shared by every tactic whose result can be defined where its input
-    was not."""
+    """`assumptions` plus the `factor \\ne 0` a cancellation dropped, if any.
+
+    For tactics that re-spell one expression as the SAME function — expand,
+    collect, rewrite_as — where a dropped factor is a measure-zero exclusion
+    no numeric leg can see.  It is deliberately not universal, and both
+    directions were measured:
+
+    * a DIFFERENTIATING tactic must not use it.  `_domain_narrowing` is
+      symmetric, so it reads the denominator a derivative naturally has
+      (`d/dx \\ln(1+x) = 1/(x+1)`) as a dropped factor; the result is a
+      different function and its own domain is not an assumption about the
+      input.
+    * a LIMIT binder must not use it either — a removable singularity is
+      exactly what a limit discharges, so recording it would contradict the
+      move being made.
+    * a DISCRETE binder needs something stronger, not this: it evaluates its
+      body AT each index, so a dropped factor removes a TERM rather than a
+      null set, and `finite_operators._undefined_index` refuses instead of
+      recording.
+    """
     lost = _domain_narrowing(expr, result)
     if not lost:
         return assumptions

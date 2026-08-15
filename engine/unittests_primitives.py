@@ -7472,5 +7472,128 @@ class TestBinomialConvention(unittest.TestCase):
                 self.assertEqual(Core.equal_exprs(a, b)['verdict'], 'no')
 
 
+class TestDiscreteBinderDefinedness(unittest.TestCase):
+    """A finite operator whose body has no value at an index inside its own
+    range has no value either, so nothing may be checked against it.
+
+    Both routes were live false greens: the closed-form leg silently dropped
+    the draws it could not evaluate and certified on whatever survived —
+    down to the EMPTY range alone, whose value is the same for every body —
+    and `sum_rewrite` cancelled the singularity away first, handing the
+    closed-form leg a different, perfectly checkable object.
+    """
+
+    UNDEFINED = '\\sum_{k=1}^{n} \\frac{k^2-1}{k-1}'
+
+    def test_the_empty_range_alone_certifies_nothing(self):
+        # every non-empty range contains the k = 1 term, which is 0/0, so
+        # the only evaluable draw was the empty sum -- and every closed form
+        # vanishing at that bound used to certify against it.
+        for form in ('\\frac{n(n+3)}{2}', 'n^2', '\\frac{n(n+7)}{2}',
+                     '\\frac{n(n+3)}{2}+n'):
+            with self.subTest(closed_form=form):
+                rec = FiniteOperators.sum_closed_form(self.UNDEFINED, form)
+                self.assertFalse(rec.get('ok'))
+        # the product side shares the leg: an empty product is 1, so any
+        # form equal to 1 at the bound below the range would certify
+        rec = FiniteOperators.prod_closed_form(
+            '\\prod_{k=1}^{n} \\frac{k^2-1}{k-1}', 'n^0')
+        self.assertFalse(rec.get('ok'))
+
+    def test_an_interior_undefined_index_refuses_too(self):
+        # the pole sits at k = 3, so the n = 1 and n = 2 ranges evaluate and
+        # agree; certifying from them would claim a closed form for every
+        # n >= 0, including the ones where the sum does not exist.
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} \\frac{(k-3)(k+1)}{k-3}', '\\frac{n(n+3)}{2}')
+        self.assertFalse(rec.get('ok'))
+        self.assertIn('k = 3', rec['error'])
+
+    def test_a_rewrite_may_not_add_a_term_the_sum_does_not_have(self):
+        # equal? decides the two summands as functions, where the removable
+        # singularity is measure zero.  Under the binder it is a TERM.
+        rec = FiniteOperators.sum_rewrite(self.UNDEFINED, 'k+1')
+        self.assertFalse(rec.get('ok'))
+        self.assertIn('k = 1', rec['error'])
+        # and it may not be laundered by moving the pole off the lower bound
+        rec = FiniteOperators.sum_rewrite(
+            '\\sum_{k=1}^{n} \\frac{(k-3)(k+1)}{k-3}', 'k+1')
+        self.assertFalse(rec.get('ok'))
+
+    def test_legitimate_finite_operator_work_is_untouched(self):
+        # the guard must cost nothing where the body is defined throughout
+        for rec in (
+            FiniteOperators.sum_rewrite(
+                '\\sum_{k=2}^{n} \\frac{k^2-1}{k-1}', 'k+1'),
+            FiniteOperators.sum_rewrite(
+                '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}',
+                '\\frac{1}{k}-\\frac{1}{k+1}'),
+            FiniteOperators.sum_closed_form(
+                '\\sum_{k=1}^{n} \\frac{1}{k(k+1)}', '\\frac{n}{n+1}'),
+            FiniteOperators.sum_closed_form(
+                '\\sum_{k=1}^{n} k', '\\frac{n(n+1)}{2}'),
+            FiniteOperators.prod_closed_form('\\prod_{k=1}^{n} k', 'n!'),
+        ):
+            with self.subTest(op=rec.get('op'), input=rec.get('input')):
+                self.assertTrue(rec.get('ok'), rec.get('error'))
+                self.assertEqual(rec['check']['status'], 'agree')
+
+    def test_both_bodies_undefined_is_not_an_added_term(self):
+        # refusing is a positive claim: when the proposal is undefined at
+        # the same index there is nothing to claim, so the swap goes through
+        rec = FiniteOperators.sum_rewrite(
+            self.UNDEFINED, '\\frac{(k+1)(k-1)}{k-1}')
+        self.assertTrue(rec.get('ok'), rec.get('error'))
+
+    def test_an_agreement_names_how_much_of_it_was_informative(self):
+        rec = FiniteOperators.sum_closed_form(
+            '\\sum_{k=1}^{n} k', '\\frac{n(n+1)}{2}')
+        check = rec['check']
+        # the empty range agrees as well, and is counted apart from the
+        # draws that actually say something about the body
+        self.assertEqual(check['samples'], 7)
+        self.assertEqual(check['informative_samples'], 6)
+
+
+class TestCancellationAssumptionCoverage(unittest.TestCase):
+    """The cancelled factor is recorded by the tactics that re-spell the
+    same function, and deliberately by no others."""
+
+    CANCELS = '\\frac{x^2-1}{x-1}'
+
+    def test_collect_records_what_expand_records(self):
+        # collect reaches the same cancelling canonical core as expand and
+        # dropped the factor silently for as long as expand did before
+        # gen 60 -- same class, same helper.
+        for rec in (Core.expand(self.CANCELS),
+                    Core.collect(self.CANCELS, 'x'),
+                    Core.rewrite_as(self.CANCELS, 'x+1')):
+            with self.subTest(op=rec['op']):
+                self.assertEqual(rec['result'], 'x+1')
+                self.assertEqual([a.get('nonzero') for a in rec['assumptions']],
+                                 ['x-1'])
+
+    def test_a_derivative_does_not_record_its_own_domain(self):
+        # NEGATIVE PIN.  `_domain_narrowing` is symmetric, so it reads the
+        # denominator a derivative naturally has as a dropped factor; 61
+        # results in this suite would gain a spurious assumption.  The
+        # result is a different function and its domain is not an
+        # assumption about the input.
+        rec = Differentiation.differentiate('\\ln(1+x)', 'x')
+        self.assertTrue(rec.get('ok'), rec.get('error'))
+        self.assertFalse(rec.get('assumptions'))
+
+    def test_a_limit_discharges_the_singularity_instead(self):
+        # NEGATIVE PIN.  A limit is about a punctured neighbourhood, so a
+        # removable singularity is exactly what the binder discharges --
+        # recording it would contradict the move being made.
+        rec = Limits.limit_rewrite(
+            '\\lim_{x \\to 1} \\frac{x^2-1}{x-1}', 'x+1')
+        self.assertTrue(rec.get('ok'), rec.get('error'))
+        self.assertFalse(rec.get('assumptions'))
+        self.assertEqual(
+            Limits.limit_substitute(rec['result'])['result'], '2')
+
+
 if __name__ == '__main__':
     unittest.main()
