@@ -2670,13 +2670,32 @@ class TestCombinatorialNotation(unittest.TestCase):
             Core.equal_exprs('\\binom{6}{2}', '15')['verdict'], 'yes')
 
     def test_oracle_keeps_discrete_domain(self):
-        for latex in ('(-1)!', '(\\frac{1}{2})!', '\\binom{2}{3}'):
+        for latex in ('(-1)!', '(\\frac{1}{2})!', '\\binom{-1}{2}',
+                      '\\binom{\\frac{1}{2}}{2}', '\\binom{2}{\\frac{1}{2}}'):
             with self.subTest(latex=latex):
                 sym, notation = self.parse(latex)
                 with self.assertRaises(ValueError):
                     P.numeric_eval(sym, notation, {})
         sym, notation = self.parse('171!')
         with self.assertRaises(OverflowError):
+            P.numeric_eval(sym, notation, {})
+
+    def test_an_out_of_range_lower_index_counts_zero(self):
+        # The standard convention, and `math.comb`'s.  Refusing it made a
+        # `domain-differs` verdict — which reads to the agent as `no` — out
+        # of the engine's own deviation from the mathematics it checks.
+        for latex in ('\\binom{2}{3}', '\\binom{2}{-1}', '\\binom{0}{1}'):
+            with self.subTest(latex=latex):
+                sym, notation = self.parse(latex)
+                self.assertEqual(P.numeric_eval(sym, notation, {}), 0.0)
+
+    def test_a_negative_upper_index_is_a_notation_decision_not_a_value(self):
+        # `\binom{-1}{2}` is 1 under the generalized falling-factorial
+        # convention and undefined under the combinatorial one.  Where the
+        # two standard readings disagree the oracle refuses rather than
+        # picking one — the line is drawn at what is unambiguous.
+        sym, notation = self.parse('\\binom{-1}{2}')
+        with self.assertRaises(ValueError):
             P.numeric_eval(sym, notation, {})
 
 
@@ -7363,11 +7382,15 @@ class TestElectedIntegerDomain(unittest.TestCase):
         self.assertIn('never compared', check['reason'])
 
     def test_a_definedness_witness_with_evidence_still_reports(self):
-        # 12 common samples agree and n = 0, 1 leave the binomial
-        # undefined: a real domain difference, kept.
-        check = P.numeric_spot_check('\\binom{n}{2}', '\\frac{n(n-1)}{2}')
+        # A REAL domain difference, not one the engine invented: the
+        # factorial formula is undefined once k exceeds n, while the
+        # binomial there is 0.  Common samples agree and the witness is
+        # kept, which is the mechanism gen 72's rule preserves.
+        check = P.numeric_spot_check('\\binom{n}{k}',
+                                     '\\frac{n!}{k!(n-k)!}')
         self.assertEqual(check['status'], 'domain-differs')
         self.assertTrue(check['common_samples'])
+        self.assertEqual(check['defined'], 'lhs')
 
     def test_the_integer_domain_is_never_a_silent_claim(self):
         answer = Core.equal_exprs('\\binom{n}{1}', 'n')
@@ -7395,6 +7418,58 @@ class TestElectedIntegerDomain(unittest.TestCase):
             check = P.numeric_spot_check(a, b)
             self.assertEqual(check['status'], status, f'{a} vs {b}')
             self.assertNotIn('sampled_domain', check)
+
+
+class TestBinomialConvention(unittest.TestCase):
+    """`\\binom{n}{k}` counts 0 ways to choose more than everything, so the
+    identities built on that convention answer instead of accusing."""
+
+    def test_the_named_identities_are_certified(self):
+        # Every one of these answered `no` while the engine refused the
+        # k > n region, under a note saying the two sides agree wherever
+        # both are defined.  Pascal's rule is the headline: the single
+        # most basic binomial identity there is.
+        for a, b in (('\\binom{n}{k}+\\binom{n}{k+1}', '\\binom{n+1}{k+1}'),
+                     ('\\binom{n}{2}', '\\frac{n(n-1)}{2}'),
+                     ('\\binom{n}{3}', '\\frac{n(n-1)(n-2)}{6}'),
+                     ('\\binom{n+1}{2}', '\\binom{n}{2}+n')):
+            with self.subTest(identity=f'{a} = {b}'):
+                answer = Core.equal_exprs(a, b)
+                self.assertEqual(answer['verdict'], 'yes')
+                self.assertIn('integer domain only', answer['method'])
+
+    def test_a_step_over_the_new_region_is_admissible(self):
+        step = Core.rewrite_as('\\binom{n}{k}+\\binom{n}{k+1}',
+                               '\\binom{n+1}{k+1}')
+        self.assertTrue(step['ok'])
+        self.assertEqual(step['check']['status'], 'agree')
+
+    def test_the_negative_upper_index_boundary_still_steers(self):
+        # Absorption reaches n - 1, so n = 0 lands on the refused half and
+        # the honest verdict stays `no` with the assuming escape open.
+        a, b = 'k\\binom{n}{k}', 'n\\binom{n-1}{k-1}'
+        self.assertEqual(Core.equal_exprs(a, b)['verdict'], 'no')
+        self.assertEqual(
+            Core.equal_exprs(a, b, assuming='n > 0')['verdict'], 'yes')
+
+    def test_planted_discrete_errors_are_never_laundered(self):
+        # Half the sample budget is now the trivial 0 = 0 (measured: 114
+        # of 200 draws for a two-symbol binomial), so the dilution has to
+        # be shown not to buy greenness.  The last pair is built for that
+        # exact trap: it is true ONLY where both sides are out of range.
+        for a, b in (('\\binom{n}{k}+\\binom{n}{k+1}', '\\binom{n+1}{k+2}'),
+                     ('\\binom{n}{k}+\\binom{n}{k+1}', '\\binom{n+1}{k}'),
+                     ('\\binom{n}{k}+\\binom{n}{k+1}', '2\\binom{n+1}{k+1}'),
+                     ('\\binom{n}{2}', '\\frac{n(n-1)}{2}+1'),
+                     ('\\binom{n}{2}', '\\frac{n(n+1)}{2}'),
+                     ('\\binom{n}{3}', '\\frac{n(n-1)(n-2)}{2}'),
+                     ('\\binom{n}{k}', '\\binom{n+1}{n-k}'),
+                     ('\\binom{n}{0}', '0'),
+                     ('\\binom{n}{n}', 'n'),
+                     ('k\\binom{n}{k}', 'n\\binom{n-1}{k}'),
+                     ('\\binom{n}{k}', '\\binom{n}{k+n+1}')):
+            with self.subTest(planted=f'{a} = {b}'):
+                self.assertEqual(Core.equal_exprs(a, b)['verdict'], 'no')
 
 
 if __name__ == '__main__':

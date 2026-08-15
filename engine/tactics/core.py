@@ -2676,7 +2676,7 @@ def equal_exprs(expr1, expr2, assuming=None):
         if check.get('common_samples'):
             rec['note'] = (f"values agree at all {check['common_samples']} "
                            'sampled points where both sides are defined; '
-                           'equality may hold on a restricted domain')
+                           'equality may hold on a restricted domain.')
         if not assumed:
             rec['note'] = (rec.get('note', '') + ' Restrict the question '
                            'with `assuming` to ask again on that domain.'

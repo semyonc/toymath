@@ -125,6 +125,17 @@ little only costs reach — the check falls back to sampling a superset of the
 domain — while electing too much would test less than the common domain, so
 the rule is chosen to make that direction unreachable rather than unlikely.
 
+Inside that domain the oracle follows the standard conventions, because a
+deviation on the *domain* is not a quiet loss of reach: it turns into a
+`domain-differs` verdict, which reads as `no`. `\binom{n}{k}` is `0` when `k`
+is out of range — there are no ways to choose more than everything — so
+Pascal's rule and the polynomial forms of `\binom{n}{2}`, `\binom{n}{3}`
+certify instead of being refused at `n = 0`. Where two standard readings
+genuinely disagree the oracle refuses rather than choosing: a negative upper
+index is `1` under the generalized falling-factorial convention and undefined
+under the combinatorial one, so `\binom{-1}{2}` is a domain error and stays a
+notation decision.
+
 Canonical rational comparison is exact. Outside the rational fragment,
 `equal_exprs` may use shared opaque atoms for conclusive canonical equality and
 independent numeric sampling for probabilistic evidence. Canonical inequality

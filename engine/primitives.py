@@ -1783,13 +1783,29 @@ def numeric_eval(sym, notation, env):
         if isinstance(n, list) or isinstance(k, list):
             raise EvalError('binomial coefficient of a matrix')
         if (not math.isfinite(n) or not math.isfinite(k)
-                or n < 0 or k < 0
+                or n < 0
                 or abs(n - round(n)) > 1e-9
-                or abs(k - round(k)) > 1e-9
-                or round(k) > round(n)):
+                or abs(k - round(k)) > 1e-9):
             raise ValueError(
-                'binomial coefficient requires integers 0 <= k <= n')
+                'binomial coefficient requires a nonnegative integer upper '
+                'index and an integer lower index')
         n, k = int(round(n)), int(round(k))
+        if k < 0 or k > n:
+            # The standard convention, and `math.comb`'s: there are no ways
+            # to choose more than everything, so the count is 0 — not
+            # undefined.  Refusing here made the oracle deviate from the
+            # mathematics it is checking, and a deviation on the DOMAIN is
+            # not a quiet loss of reach: `domain-differs` reads to the agent
+            # as `no`.  Pascal's rule and the absorption identity were both
+            # answered `no` under a note saying the two sides agree wherever
+            # both are defined.
+            #
+            # Deliberately only the unambiguous half.  A NEGATIVE upper index
+            # still refuses: `\binom{-1}{2}` is 1 under the generalized
+            # falling-factorial convention and undefined under the
+            # combinatorial one, and picking between those is a notation
+            # decision, not a bug fix.
+            return 0.0
         if n > _BINOM_EVAL_CAP:
             raise OverflowError(
                 'binomial coefficient is too large for the oracle')
