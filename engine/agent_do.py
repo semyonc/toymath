@@ -609,6 +609,28 @@ def _closed_reply(op, session):
     }, ensure_ascii=False)
 
 
+_DISCONNECTED_RESULT = (
+    'the last checked step is not connected to the requested expression; '
+    'feed recorded results forward verbatim and designate a step that '
+    'continues the derivation')
+
+
+def _reaches_chain_goal(session, provenance, steps=None):
+    """Whether result provenance closes the run's requested expression.
+
+    A plain ``do!`` run has no requested mathematical expression, while a
+    concluded claim supplies its own closure evidence.  Every other
+    value-producing command must carry an unbroken checked chain from the
+    expression the user supplied.
+    """
+    if session.chain_goal is None or provenance.get('source') == 'claim':
+        return True
+    from expr_commands import _chains_to_goal
+    return _chains_to_goal(
+        session.new_steps() if steps is None else steps,
+        provenance.get('step'), session.chain_goal)
+
+
 def _with_figure_id(reply, delivery, replaces):
     """Tell the model which figure it just drew, and what it superseded.
 
@@ -753,25 +775,21 @@ def make_api(session):
         if mapped is not None:
             expr = mapped
         provenance = session.designate_result(expr)
-        if (provenance is not None and session.chain_goal is not None
-                and provenance.get('source') != 'claim'):
-            # admission mirrors the composite closure gate: an inline
-            # command (int!, diff!, ...) will refuse a final value whose
+        if provenance is not None and not _reaches_chain_goal(
+                session, provenance):
+            # Admission mirrors the command closure gate: any saved command
+            # will refuse a final value whose
             # step is not connected to the requested expression by a
             # checked chain — refuse it HERE, while the agent can still
             # repair (live: a retyped final spelling severed the chain
             # and the run only learned after it had ended)
-            from expr_commands import _chains_to_goal
-            if not _chains_to_goal(session.new_steps(),
-                                   provenance.get('step'),
-                                   session.chain_goal):
-                return json.dumps({'ok': False, 'op': 'set_result',
-                                   'error': (
-                    'value is established but its step is not connected '
-                    'to the requested expression by a checked chain; '
-                    'select the result of a step that continues the '
-                    'derivation (feed recorded results forward verbatim '
-                    'instead of retyping them)')}, ensure_ascii=False)
+            return json.dumps({'ok': False, 'op': 'set_result',
+                               'error': (
+                'value is established but its step is not connected to '
+                'the requested expression by a checked chain; select the '
+                'result of a step that continues the derivation (feed '
+                'recorded results forward verbatim instead of retyping '
+                'them)')}, ensure_ascii=False)
         if provenance is None:
             if session.proof_claim_id is not None:
                 root = session.ledger.get_claim(session.proof_claim_id)
@@ -1228,13 +1246,24 @@ def _designated_result(session, steps):
     last_transform = next((s for s in reversed(steps)
                            if s.get('result') is not None), None)
     if last_transform is not None:
-        # fallback, not a designation: the step is verified, but nothing
-        # says its result answers the instruction — consumers that need a
-        # goal-covering value (inline expr commands) must check the chain
-        return last_transform['result'], {
+        # Fallback, not a designation: the step is verified, but nothing
+        # says its result answers the instruction.  When a saved command
+        # supplied a mathematical goal, the fallback must close it too.
+        provenance = {
             'status': 'verified', 'source': 'ledger',
             'step': last_transform['id'], 'method': 'last-step',
         }
+        if not _reaches_chain_goal(session, provenance, steps=steps):
+            # The admission check already lets the agent repair a detached
+            # set_result call.  If it stops instead, the same detached step
+            # must not re-enter through the undesignated fallback.
+            return None, {
+                'status': 'unverified', 'source': 'ledger',
+                'step': last_transform['id'],
+                'method': 'last-step-disconnected',
+                'reason': _DISCONNECTED_RESULT,
+            }
+        return last_transform['result'], provenance
     return None, None
 
 

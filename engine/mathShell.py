@@ -331,7 +331,7 @@ class MathShell(object):
         instruction = prompt_commands.render(cmd, resolved)
         proof_goal = resolved if cmd.mode == 'prove' else None
         self.exec_do(instruction, execution_count, add_to_history,
-                     proof_goal=proof_goal)
+                     proof_goal=proof_goal, chain_goal=resolved)
         return True
 
     def has_expr_command(self, text):
@@ -1044,7 +1044,7 @@ class MathShell(object):
             f'answer:</div><div>${_display_latex(partial)}$</div>'))
 
     def exec_do(self, instruction, execution_count, add_to_history,
-                proof_goal=None):
+                proof_goal=None, chain_goal=None):
         import agent_do
         if not instruction:
             self._do_error('empty instruction')
@@ -1063,6 +1063,7 @@ class MathShell(object):
             res = agent_do.run_instruction(instruction, ledger=self.ledger,
                                            on_step=on_step,
                                            proof_goal=proof_goal,
+                                           chain_goal=chain_goal,
                                            route=self.route)
         except agent_do.DoAgentError as e:
             self._do_error(str(e))
@@ -1113,6 +1114,13 @@ class MathShell(object):
                 'certified result in this session.</strong> '
                 + _html.escape(open_prov.get('reason', ''))
                 + ' <em>(unverified reason)</em></div>'))
+        elif (not res.get('final_result')
+              and open_prov.get('method') == 'last-step-disconnected'):
+            display(HTML(
+                '<div style="color:#b00020"><strong>outcome: no '
+                'goal-connected result.</strong> '
+                + _html.escape(open_prov.get('reason', ''))
+                + '</div>'))
         if res['final_result']:
             provenance = res.get('final_provenance') or {}
             if provenance.get('status') == 'unverified':

@@ -228,6 +228,14 @@ remains comment-grade annotation and is deliberately distinct from future
 assumption-bearing mathematical case splits. The ledger stays append-only:
 checked work on an abandoned path is never deleted.
 
+A saved notebook command also carries the mathematical expression the user
+supplied as its run goal. A designated value, or an undesignated last-step
+fallback, is exposed as the command's result only when an unbroken checked
+chain reaches back to that expression. A disconnected designation is refused
+while the agent can repair it; stopping after that refusal does not let the
+same value re-enter through the fallback. Bare free-form `do!` has no inferred
+mathematical goal and remains deliberately permissive at this boundary.
+
 Rich ledger views derive one additional presentation spelling without changing
 the replayable record: an agent's explicit keyboard multiplication `*` renders
 as `\cdot`. The candidate is accepted only when both strings parse to the same

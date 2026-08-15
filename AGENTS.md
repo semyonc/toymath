@@ -140,6 +140,12 @@ resolver checks the assembled glue before the outer agent runs. `derivation`
 is output-only and never spliceable; command types do not create new
 mathematical judgment semantics.
 
+Every committed agent-run notebook command also passes its resolved typed
+input as `chain_goal`; bare free-form `do!` does not. Both a designated result
+and the last-step fallback must trace through an unbroken checked chain to that
+goal. Keep this enforcement in `run_instruction`/its finalizer so the
+`exec_do` and `exec_composite` paths cannot drift apart.
+
 ## Extending the Verified Tactic Layer
 
 Do not add another function tool to `engine/agent_do.py`, another handwritten

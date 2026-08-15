@@ -1245,9 +1245,11 @@ class TestScriptedAgent(unittest.TestCase):
         ]
         res = run_instruction('expand it', model=ScriptedModel(list(script)),
                               chain_goal='(x+1)^2')
-        # the designation was refused: the run falls back to the honest
-        # last-transform record instead of a selection
-        self.assertEqual(res['final_provenance']['method'], 'last-step')
+        # The designation was refused, and the same disconnected value may
+        # not re-enter as the undesignated last-step fallback.
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['method'],
+                         'last-step-disconnected')
         # control 1: the same selection with a matching goal is admitted
         res = run_instruction('expand it', model=ScriptedModel(list(script)),
                               chain_goal='(y+1)^2')
@@ -1256,6 +1258,17 @@ class TestScriptedAgent(unittest.TestCase):
         # control 2: plain do! runs carry no chain goal and stay permissive
         res = run_instruction('expand it', model=ScriptedModel(list(script)))
         self.assertNotEqual(res['final_provenance']['method'], 'last-step')
+
+    def test_connected_last_step_fallback_still_closes_a_command_goal(self):
+        res = run_instruction(
+            'expand it',
+            model=ScriptedModel([
+                [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+                [message('done')],
+            ]),
+            chain_goal='(x+1)^2')
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['method'], 'last-step')
 
     def test_set_open_suppresses_last_step_fallback(self):
         # the conv! pseudo-answer: a run that certified nothing used to
@@ -5589,6 +5602,31 @@ class TestPromptCommandDispatch(unittest.TestCase):
             self.shell.exec('solve! 2x = 4', 1, add_to_history=True)
         self.assertIn('Solve', box['instruction'])
         self.assertIn('2x = 4', box['instruction'])
+        self.assertEqual(box['kwargs']['chain_goal'], '2x = 4')
+
+    def test_simplify_command_passes_requested_expression_as_chain_goal(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('simplify! (x+1)^2', 1, add_to_history=True)
+        self.assertEqual(box['kwargs']['chain_goal'], '(x+1)^2')
+
+    def test_disconnected_simplify_result_never_enters_cell_history(self):
+        # The committed-notebook failure shape: a saved command's agent
+        # checks a different expression, its designation is refused, then it
+        # stops.  The disconnected last step must not become the cell value.
+        script = [
+            [tool_call('expand', {'expr': '(y+1)^2'}, 'c1')],
+            [tool_call('set_result', {'expr': 'y^{2}+2y+1'}, 'c2')],
+            [message('done')],
+        ]
+        with mock.patch.object(openrouter_backend, 'build_model',
+                               lambda model_name=None: ScriptedModel(script)):
+            self.shell.exec('simplify! (x+1)^2', 17,
+                            add_to_history=True)
+        with self.assertRaisesRegex(ValueError, 'does not reference'):
+            self.shell.resolve_backrefs('[[17]]')
+        self.assertEqual(self.shell.ledger.selections, [])
+        self.assertIn('no goal-connected result', self._html())
 
     def test_prove_command_passes_raw_claim_to_harness(self):
         box, fake = self._capture_instruction()
@@ -5596,7 +5634,14 @@ class TestPromptCommandDispatch(unittest.TestCase):
         with mock.patch.object(agent_do, 'run_instruction', fake):
             self.shell.exec('prove! ' + claim, 1, add_to_history=True)
         self.assertEqual(box['kwargs']['proof_goal'], claim)
+        self.assertEqual(box['kwargs']['chain_goal'], claim)
         self.assertIn('Prove ' + claim, box['instruction'])
+
+    def test_plain_do_has_no_chain_goal(self):
+        box, fake = self._capture_instruction()
+        with mock.patch.object(agent_do, 'run_instruction', fake):
+            self.shell.exec('do! explore anything', 1, add_to_history=True)
+        self.assertIsNone(box['kwargs']['chain_goal'])
 
     def test_prove_command_resolves_backref_in_harness_claim(self):
         self.shell.exec('2 = 2', 1, add_to_history=True)
@@ -5613,6 +5658,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
             self.shell.exec('solve! [[1]]', 2, add_to_history=True)
         self.assertIn('5', box['instruction'])
         self.assertNotIn('[[1]]', box['instruction'])
+        self.assertEqual(box['kwargs']['chain_goal'], '5')
 
     def test_plain_command_resolves_typed_inline_input_before_agent(self):
         box, fake = self._capture_instruction()
@@ -5734,7 +5780,7 @@ class TestPromptCommandDispatch(unittest.TestCase):
         with mock.patch.object(openrouter_backend, 'build_model',
                                lambda model_name=None: ScriptedModel(
                                    SOLVE_SCRIPT)):
-            self.shell.exec('solve! 2x + 3 = 7 for x', 2, add_to_history=True)
+            self.shell.exec('solve! 2x + 3 = 7', 2, add_to_history=True)
         self.assertEqual(len(self.shell.ledger.steps), 2)
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
 
