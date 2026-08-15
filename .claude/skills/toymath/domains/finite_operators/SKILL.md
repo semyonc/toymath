@@ -79,6 +79,13 @@ converge absolutely needs the value route or stays honestly open.
 Goal: express `\prod_{k=1}^{n} \frac{2k-1}{2k}` in factorials. Propose the
 ratio directly: `prod_closed_form` with `\frac{(2n)!}{2^{2n}(n!)^2}`. The
 check compares literal products against the proposal at integer `n` and
-records `n \in \mathbb{Z}, n \ge 0`. Do not argue the identity in prose and
-do not expect `equal` to certify it — the bound is integer-valued, which is
-exactly what this named tactic records.
+records `n \in \mathbb{Z}, n \ge 0`. Do not argue the identity in prose.
+
+`equal` can now CONFIRM a form like this one, because the `n!` in it is
+undefined off the integers and the oracle samples where the expression
+lives; the answer says "integer domain only" when it does. Read that as a
+second opinion, not as a substitute: `equal` is a query, so its verdict
+never enters the ledger, and only the named tactic records `n \in \mathbb{Z}`
+as an assumption on a step. A proposal with no factorial or binomial in it
+— a plain `\sum` closed form, say — still gets `unknown` from `equal`, and
+the named tactic remains the only route.

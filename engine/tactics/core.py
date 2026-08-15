@@ -2625,7 +2625,18 @@ def equal_exprs(expr1, expr2, assuming=None):
     def conditional(rec, method):
         """Every verdict the restricted sampling produced carries the
         restriction with it: a conditional yes must never be readable as
-        an unconditional one."""
+        an unconditional one.
+
+        An elected integer domain is such a restriction.  The oracle
+        sampled where `\\binom{n}{k}` and `n!` are defined at all, so the
+        answer is about the integers and must say so — the same rule
+        `sum_closed_form` follows when a binder makes its bound variable
+        integral."""
+        if check.get('sampled_domain') == 'integer':
+            names = ', '.join(f'${n}$' for n in check['integral_symbols'])
+            method = (f'{method}, integer domain only '
+                      f'({names} integer-valued where the expression is '
+                      f'defined)')
         if assumed:
             rec['method'] = f'{method} under the stated assumptions'
             rec['assumptions'] = list(assumed)

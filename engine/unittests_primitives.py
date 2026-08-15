@@ -7306,5 +7306,96 @@ class TestDelimiterRedundantBracketsAreDropped(unittest.TestCase):
                                    places=12, msg=latex)
 
 
+class TestElectedIntegerDomain(unittest.TestCase):
+    """The oracle samples the domain the graph's own nodes prove, and a
+    definedness verdict needs evidence like any other."""
+
+    def elected(self, latex):
+        sym, notation = P.parse_latex(latex)
+        return P.integral_symbols(sym, notation)
+
+    def test_a_bare_slot_elects_its_symbol(self):
+        self.assertEqual(self.elected('\\binom{n}{k}'), {'n', 'k'})
+        self.assertEqual(self.elected('n!'), {'n'})
+        self.assertEqual(self.elected('\\binom{n}{2}+x'), {'n'})
+
+    def test_a_compound_slot_elects_nothing(self):
+        # 2n integral does NOT make n integral, and electing it would
+        # sample LESS than the common domain — the one direction that
+        # could certify an identity that does not hold on all of it.
+        self.assertEqual(self.elected('\\binom{2n}{2}'), set())
+        self.assertEqual(self.elected('(2n)!'), set())
+
+    def test_a_bound_name_is_never_elected(self):
+        # a free occurrence must not inherit a binder's integrality
+        self.assertEqual(self.elected('\\sum_{k=1}^{3}\\binom{3}{k}'), set())
+
+    def test_true_discrete_identities_are_certified(self):
+        for a, b in (('\\binom{n}{1}', 'n'),
+                     ('\\binom{n}{0}', '1'),
+                     ('(n+1)!', '(n+1)n!'),
+                     ('\\frac{n!}{(n-1)!}', 'n'),
+                     ('\\binom{n}{k}', '\\binom{n}{n-k}')):
+            check = P.numeric_spot_check(a, b)
+            self.assertEqual(check['status'], 'agree', f'{a} = {b}')
+            self.assertEqual(check['sampled_domain'], 'integer')
+
+    def test_false_discrete_identities_are_refuted_at_a_real_point(self):
+        for a, b in (('\\binom{n}{1}', 'n+1'),
+                     ('(n+1)!', 'n!'),
+                     ('\\frac{n!}{(n-1)!}', 'n-1')):
+            check = P.numeric_spot_check(a, b)
+            self.assertEqual(check['status'], 'disagree', f'{a} = {b}')
+            # the counterexample must be a point where BOTH sides are
+            # defined, which is exactly what the old verdict was not
+            s1, n1 = P.parse_latex(a)
+            s2, n2 = P.parse_latex(b)
+            point = check['point']
+            self.assertNotAlmostEqual(P.numeric_eval(s1, n1, point),
+                                      P.numeric_eval(s2, n2, point))
+
+    def test_a_definedness_witness_with_no_common_sample_is_not_a_verdict(self):
+        # `\binom{2n}{2}` elects nothing, so nothing is comparable —
+        # honest ignorance, not a claim that the two sides differ.
+        check = P.numeric_spot_check('\\binom{2n}{2}', 'n(2n-1)')
+        self.assertEqual(check['status'], 'skipped')
+        self.assertEqual(check['common_samples'], 0)
+        self.assertIn('never compared', check['reason'])
+
+    def test_a_definedness_witness_with_evidence_still_reports(self):
+        # 12 common samples agree and n = 0, 1 leave the binomial
+        # undefined: a real domain difference, kept.
+        check = P.numeric_spot_check('\\binom{n}{2}', '\\frac{n(n-1)}{2}')
+        self.assertEqual(check['status'], 'domain-differs')
+        self.assertTrue(check['common_samples'])
+
+    def test_the_integer_domain_is_never_a_silent_claim(self):
+        answer = Core.equal_exprs('\\binom{n}{1}', 'n')
+        self.assertEqual(answer['verdict'], 'yes')
+        self.assertIn('integer domain only', answer['method'])
+        step = Core.rewrite_as('\\binom{n}{1}+3', 'n+3')
+        self.assertEqual(step['check']['status'], 'agree')
+        self.assertIn('integer domain only', step['check']['method'])
+
+    def test_the_advised_assuming_escape_now_answers(self):
+        # the note tells the agent to restrict the question; before the
+        # election no admissible assumption could reach the integers, so
+        # following the advice returned the same refusal.
+        answer = Core.equal_exprs('\\binom{n}{2}', '\\frac{n(n-1)}{2}',
+                            assuming='n > 1')
+        self.assertEqual(answer['verdict'], 'yes')
+
+    def test_continuous_verdicts_are_untouched(self):
+        # the sampler changed, so every non-discrete verdict is a
+        # regression surface: these are the shapes the guard legs rest on
+        for a, b, status in (('x+1', '1+x', 'agree'),
+                             ('(x+y)^{16}', 'x^{16}+y^{16}', 'disagree'),
+                             ('\\frac{x^2-1}{x-1}', 'x+1', 'agree'),
+                             ('\\sqrt{x}', 'x', 'disagree')):
+            check = P.numeric_spot_check(a, b)
+            self.assertEqual(check['status'], status, f'{a} vs {b}')
+            self.assertNotIn('sampled_domain', check)
+
+
 if __name__ == '__main__':
     unittest.main()

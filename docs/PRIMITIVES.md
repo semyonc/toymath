@@ -108,6 +108,23 @@ round-off — and a gap that does not clear that noise leaves the point undecide
 rather than accusing. Undecided points are counted (`unresolved_points`), and a
 comparison where no point could resolve is `skipped`, never `disagree`.
 
+A `domain-differs` verdict answers to the same rule. A point where exactly one
+side is defined is a definedness witness, but a run that never once evaluated
+both sides has not compared them, so with no common sample behind it the
+comparison is `skipped` — naming the missing evidence — rather than a verdict.
+
+Which points exist to be compared is decided before sampling, not draw by
+draw. `\binom{n}{k}` and `n!` are undefined off the integers, so a variable
+standing bare in such a slot is elected integer-valued and sampled there; the
+check then reports `sampled_domain: integer`, and every verdict built on it
+says so, because equality on the integers is a narrower claim than equality on
+the reals. The election is deliberately conservative: only a bare symbol counts
+as proof (`\binom{2n}{2}` elects nothing, since an integral `2n` does not make
+`n` one) and a name bound by a big operator is never elected. Electing too
+little only costs reach — the check falls back to sampling a superset of the
+domain — while electing too much would test less than the common domain, so
+the rule is chosen to make that direction unreachable rather than unlikely.
+
 Canonical rational comparison is exact. Outside the rational fragment,
 `equal_exprs` may use shared opaque atoms for conclusive canonical equality and
 independent numeric sampling for probabilistic evidence. Canonical inequality

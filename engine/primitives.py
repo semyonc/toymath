@@ -1219,6 +1219,59 @@ def _binder_info(head, notation, tail=()):
     return info
 
 
+def integral_symbols(sym, notation):
+    """The variables this graph's OWN nodes prove must be integers.
+
+    ``\\binom{n}{k}`` and ``m!`` are undefined off the integers, so every
+    point where such an expression is defined already has those slots
+    integral.  Electing them lets the oracle sample the only region the
+    expression inhabits.  Without the election it sampled the reals: for
+    ``\\binom{n}{1}`` against ``n`` that was 96 draws, not one of them in
+    the left side's domain, and a ``domain-differs`` verdict reached
+    without ever comparing the two sides — the same verdict, to the byte,
+    that the FALSE ``\\binom{n}{1} = n+1`` received.
+
+    CONSERVATIVE BY CONSTRUCTION, and the direction is what matters.
+    Electing a symbol NARROWS where the check looks, so a wrong election
+    is the one way this could certify an identity on less than the common
+    domain.  Two rules keep that unreachable rather than merely unlikely:
+    only a BARE symbol standing in a discrete slot is proof (``2n``
+    integral does not make ``n`` integral, and ``\\binom{2n}{2}`` elects
+    nothing), and a name any big operator binds anywhere in the graph is
+    never elected, so a free occurrence cannot inherit a bound one's
+    integrality.  Electing too little only costs reach: the check falls
+    back to sampling a superset of the domain, which is what it did for
+    every generation before this one."""
+    result = set()
+    seen = set()
+
+    def visit(s):
+        if isinstance(s, (list, tuple)):
+            for t in s:
+                visit(t)
+            return
+        if not isinstance(s, Symbol) or s in seen:
+            return
+        seen.add(s)
+        f = notation.get(s)
+        if f is None:
+            return
+        if f.sym == Notation.FACTORIAL:
+            slots = f.args[:1]
+        elif f.sym == Notation.BINOM:
+            slots = f.args[:2]
+        else:
+            slots = ()
+        for slot in slots:
+            name = _plain_symbol_name(slot, notation)
+            if name is not None:
+                result.add(name)
+        visit(f.args)
+
+    visit(sym)
+    return result - _bound_symbols(sym, notation)
+
+
 def _bound_symbols(sym, notation):
     """All variables bound by a big operator anywhere below ``sym``."""
     result = set()
@@ -1921,10 +1974,16 @@ def _eval_plist(args, notation, env):
     return result
 
 
-def _sample_point(variables, rng):
+def _sample_point(variables, rng, integral=()):
     # rationals with small denominators, avoiding 0 (poles cluster there)
     env = {}
     for v in sorted(variables):
+        if v in integral:
+            # elected by `integral_symbols`: the graph itself proves this
+            # variable is an integer, so the jitter below — which is what
+            # makes every other draw miss the integers — must not apply.
+            env[v] = float(rng.randint(0, 12))
+            continue
         num = rng.randint(-12, 12)
         if num == 0:
             num = 7
@@ -2168,6 +2227,12 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     guards = _sample_guards(assumptions)
     variables = (free_symbols(s1, n1) | free_symbols(s2, n2)
                  | _guard_variables(guards))
+    # Elect the domain BEFORE sampling: which points exist to be compared
+    # is a property of the two graphs, not something to discover draw by
+    # draw.  A slot on EITHER side restricts the common domain, so the
+    # election is the union.
+    integral = ((integral_symbols(s1, n1) | integral_symbols(s2, n2))
+                & variables)
     rng = random.Random(seed)
     agreed = 0
     tried = 0
@@ -2178,7 +2243,7 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
     budget = _sample_budget(samples, guards)
     while agreed < samples and tried < budget:
         tried += 1
-        env = _sample_point(variables, rng)
+        env = _sample_point(variables, rng, integral)
         if not _admissible_point(guards, env):
             continue
         k1, v1 = _eval_kind(s1, n1, env)
@@ -2204,10 +2269,26 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
             return {'status': 'disagree', 'point': env,
                     'lhs': v1, 'rhs': v2}
         agreed += 1
-    if mismatch is not None:
+    if mismatch is not None and agreed:
         return {'status': 'domain-differs', 'mismatches': mismatches,
                 'common_samples': agreed, **mismatch}
     if agreed == 0:
+        if mismatch is not None:
+            # A definedness witness needs evidence too.  `domain-differs`
+            # bars a step and reads to the agent as `no` with a
+            # counterexample, but with no common sample behind it the two
+            # sides were never once compared — so it cannot tell a true
+            # identity from a false one, and measurably did not: before
+            # this branch existed `\binom{n}{1}` returned the same verdict
+            # and the same "counterexample" against `n` and against `n+1`.
+            # Gen 72 made a numeric disagreement carry evidence; this is
+            # the same rule for the branch beside it.
+            return {'status': 'skipped', 'mismatches': mismatches,
+                    'common_samples': 0, **mismatch,
+                    'reason': 'the two sides were never both defined at a '
+                              'sampled point, so they were never compared; '
+                              'the missing evidence is a point inside both '
+                              'domains, which `assuming` can steer toward'}
         if unresolved:
             return {'status': 'skipped', 'unresolved_points': unresolved,
                     'reason': 'every sample point lost its significant '
@@ -2216,6 +2297,11 @@ def numeric_spot_check(latex1, latex2, assumptions=None, samples=12,
         return {'status': 'skipped',
                 'reason': 'no evaluable sample points'}
     result = {'status': 'agree', 'samples': agreed}
+    if integral:
+        # Never a silent general claim: `sum_closed_form` states its
+        # integer domain in the record and so does this.
+        result['sampled_domain'] = 'integer'
+        result['integral_symbols'] = sorted(integral)
     if undefined_both:
         result['undefined_points'] = undefined_both
     if unresolved:
