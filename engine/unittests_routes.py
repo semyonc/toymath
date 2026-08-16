@@ -14,6 +14,7 @@ from unittest import mock
 
 import agent_do
 import cell_input
+import ledger as ledger_module
 import primitives
 import strategy_routes
 import tactic_registry
@@ -26,9 +27,16 @@ def _corpus(name=FIXTURE):
     return strategy_routes.fixtures()[name]
 
 
-def _run(instruction):
-    """One `run_instruction` against a backend that only records what it was
-    handed, so the delivery seam is exercised end to end offline."""
+def _matches(text, route=None):
+    route = route or next(r for r in strategy_routes.load()
+                          if r['id'] == ROUTE)
+    return strategy_routes.matches(route, strategy_routes.features(text))
+
+
+def _run(instruction, calls=(), **kwargs):
+    """One `run_instruction` against a backend that records what it was
+    handed and then makes the given tool calls, so both the delivery seam and
+    a real ledger are exercised end to end offline."""
     seen = {}
 
     class _Handle:
@@ -44,13 +52,15 @@ def _run(instruction):
         def start(self, request):
             seen['instructions'] = request.developer_instructions
             seen['trace'] = dict(request.trace_metadata or {})
+            seen['replies'] = [request.dispatcher.dispatch(name, arguments)
+                               for name, arguments in calls]
             return _Handle()
 
     with mock.patch.object(agent_do, 'resolve_backend',
-                           lambda **kwargs: _Backend()), \
+                           lambda **kwargs_: _Backend()), \
             mock.patch.object(agent_do, 'wait_interruptibly',
                               lambda handle, *a, **k: _Handle()):
-        return agent_do.run_instruction(instruction), seen
+        return agent_do.run_instruction(instruction, **kwargs), seen
 
 
 class TestRouteSchema(unittest.TestCase):
@@ -187,6 +197,60 @@ routes:
         tool: prove_it
 """, 'tool must be one of')
 
+    def test_a_record_may_not_hardcode_the_symbols_it_matches(self):
+        """The prohibition is refused BY NAME, like the bare `on:` key above.
+
+        Measured, and the reason the rule exists: the shipped record named
+        `symbols: [A, B, C]`, so the same reduction problem posed in
+        `\\alpha,\\beta,\\gamma` extracted its unknowns correctly and still
+        did not match — and a route that silently stops matching turns a
+        measurement arm into an unrouted control.
+        """
+        self._reject("""
+version: 1
+routes:
+  - id: r
+    summary: s
+    match:
+      all:
+        - feature: asked_symbol_count
+          symbols: [A, B, C]
+    stages:
+      - id: only
+        action: control
+        tool: set_result
+""", 'may NOT name the symbols')
+
+    def test_the_retired_symbol_feature_names_its_replacement(self):
+        self._reject("""
+version: 1
+routes:
+  - id: r
+    summary: s
+    match:
+      all:
+        - feature: asks_for_symbols
+          min: 3
+    stages:
+      - id: only
+        action: control
+        tool: set_result
+""", 'was retired')
+
+    def test_a_deliberate_non_match_must_carry_its_reason(self):
+        """`unmatched` records a known limit. Without a `why` it would be
+        indistinguishable from a tolerated recall miss."""
+        self._reject("""
+version: 1
+routes: []
+fixtures:
+  f:
+    positive: ['a']
+    negative: ['b']
+    unmatched:
+      - instruction: 'c'
+""", 'needs an instruction and a why')
+
 
 class TestFeatureExtractor(unittest.TestCase):
     """The hybrid extractor's own golden corpus.
@@ -229,13 +293,65 @@ class TestFeatureExtractor(unittest.TestCase):
             r'\int f dx = \int g dx + something worth checking later')
         self.assertFalse(features['relation_has_explicit_nonintegral_term'])
 
-    def test_the_symbol_ask_stops_at_the_first_non_identifier(self):
-        self.assertEqual(strategy_routes.features('Find A,B and C')
-                         ['asks_for_symbols'], frozenset('ABC'))
-        self.assertEqual(strategy_routes.features('find A, B and C')
-                         ['asks_for_symbols'], frozenset('ABC'))
-        self.assertEqual(strategy_routes.features(
-            'Find the antiderivative of A')['asks_for_symbols'], frozenset())
+    def _asked(self, text):
+        return sorted(strategy_routes._asked_symbols(text))
+
+    def test_the_symbol_ask_reads_a_plain_imperative_list(self):
+        self.assertEqual(self._asked('Find A,B and C'), ['A', 'B', 'C'])
+        self.assertEqual(self._asked('find A, B and C'), ['A', 'B', 'C'])
+        self.assertEqual(strategy_routes.features('Find A, B and C')
+                         ['asked_symbol_count'], 3)
+
+    def test_a_noun_phrase_between_the_verb_and_the_letters(self):
+        """MEASURED miss, and the widest of the three: collection used to
+        break at the first non-identifier token, so ANY noun phrase after
+        the ask verb emptied the feature outright."""
+        for text in ('Find the constants A, B, C',
+                     'Find the values of A,B,C',
+                     'Calculate the coefficients A, B and C',
+                     'Identify the three constants A, B and C',
+                     'determine all unknowns A, B, C'):
+            self.assertEqual(self._asked(text), ['A', 'B', 'C'], text)
+
+    def test_the_lead_in_vocabulary_is_closed_not_a_prose_strip(self):
+        """The tolerance is a CLOSED list of words that introduce unknowns.
+        "the area A of the triangle" is prose around a symbol, not an ask
+        for a constant, and a general prose strip would read it as one."""
+        self.assertEqual(self._asked('Find the area A of the triangle'), [])
+        self.assertEqual(self._asked('What are the roots A and B of x^2-1'),
+                         [])
+        self.assertEqual(self._asked('Find the antiderivative of A'), [])
+        self.assertEqual(self._asked('compute \\int f dx'), [])
+
+    def test_a_non_imperative_ask_is_read(self):
+        """MEASURED miss: the first vocabulary was imperative-only."""
+        self.assertEqual(self._asked('What are A, B and C?'),
+                         ['A', 'B', 'C'])
+        self.assertEqual(self._asked('Solve for A, B and C'),
+                         ['A', 'B', 'C'])
+        self.assertEqual(self._asked('What is A?'), ['A'])
+
+    def test_a_trailing_clause_no_longer_swallows_the_last_symbol(self):
+        """MEASURED miss, found after the first four: a constraint stated in
+        the SAME sentence rode along on the final token, which then failed
+        the identifier test and broke collection one symbol short."""
+        self.assertEqual(self._asked('determine A, B, C for n > 2'),
+                         ['A', 'B', 'C'])
+        self.assertEqual(self._asked('Find A, B and C such that the '
+                                     'identity holds'), ['A', 'B', 'C'])
+        self.assertEqual(self._asked('Find A and B with n > 2'), ['A', 'B'])
+
+    def test_an_identifier_may_be_greek_or_subscripted_but_never_a_macro(self):
+        """Symbol-generic extraction, and the reason it is an ALLOWLIST:
+        `\\[A-Za-z]+` would read `\\int`, `\\sin` and `\\frac` as unknowns.
+        `\\pi` is deliberately absent — a named constant is never what an
+        instruction asks the agent to find."""
+        self.assertEqual(self._asked('Find \\alpha, \\beta and \\gamma'),
+                         ['\\alpha', '\\beta', '\\gamma'])
+        self.assertEqual(self._asked('Find the constants C_1, C_2 and C_3'),
+                         ['C_1', 'C_2', 'C_3'])
+        self.assertEqual(self._asked('Find \\pi'), [])
+        self.assertEqual(self._asked('Find \\frac{1}{2}'), [])
 
     def test_the_parsed_leg_reads_the_stated_parameter_domain(self):
         self.assertEqual(strategy_routes.features('holds if n > 1.')
@@ -261,20 +377,75 @@ class TestMatcher(unittest.TestCase):
                          [ROUTE])
 
     def test_every_committed_positive_matches_its_record(self):
+        """RECALL. The number this corpus exists to hold: 2/11 before the
+        recall round, 11/11 after, measured on these exact instructions.
+
+        It is a detector metric in its own right, and it was never measured
+        while precision was. Reach can only be measured on runs that MATCH,
+        so a paraphrased instruction silently turns a routed arm into an
+        unrouted control and reports the difference as noise.
+        """
         route = next(r for r in strategy_routes.load() if r['id'] == ROUTE)
         for text in _corpus()['positive']:
             self.assertTrue(
                 strategy_routes.matches(route,
                                         strategy_routes.features(text)),
                 f'positive fixture did not match: {text[:60]!r}')
+        self.assertGreaterEqual(len(_corpus()['positive']), 11)
 
     def test_every_committed_hard_negative_is_refused(self):
+        """PRECISION, the other half, and the design priority: a wrongly
+        matched route spends a run's context steering a problem it does not
+        fit. 10/10 both before and after the recall round — the corpus grew
+        by five negatives at the same time the widenings landed."""
         route = next(r for r in strategy_routes.load() if r['id'] == ROUTE)
         for text in _corpus()['negative']:
             self.assertFalse(
                 strategy_routes.matches(route,
                                         strategy_routes.features(text)),
                 f'hard negative matched: {text[:60]!r}')
+        self.assertGreaterEqual(len(_corpus()['negative']), 10)
+
+    def test_each_widening_is_attacked_by_a_negative_that_fires_it(self):
+        """Recall bought with an unmeasured precision loss would be a bad
+        trade, so every widening carries its own hard negative — an
+        instruction whose ASK fires (2+ symbols extracted, through the very
+        tolerance that was added) and whose SHAPE must still refuse it."""
+        firing = [text for text in _corpus()['negative']
+                  if strategy_routes.features(text)['asked_symbol_count'] >= 2]
+        self.assertGreaterEqual(len(firing), 4)
+        for text in firing:
+            self.assertFalse(_matches(text), f'negative matched: {text[:60]!r}')
+        # symbol-generic extraction, a non-imperative ask, and the
+        # trailing-clause cut, each on a shape that is not this route's
+        self.assertTrue(any('\\alpha' in text for text in firing))
+        self.assertTrue(any('What are' in text for text in firing))
+        self.assertTrue(any('for which' in text for text in firing))
+
+    def test_the_definite_analogue_is_refused_by_boundedness_alone(self):
+        """The sharpest of the new negatives: same identity, same boundary
+        term, same shift, same domain, same three unknowns — and DEFINITE
+        integrals. After symbol-generic matching, one predicate is all that
+        separates it from the positive, so that predicate is load-bearing."""
+        route = next(r for r in strategy_routes.load() if r['id'] == ROUTE)
+        definite = next(text for text in _corpus()['negative']
+                        if '\\int_0^{\\pi/2}' in text)
+        vector = strategy_routes.features(definite)
+        failing = [p['feature'] for p in route['match']['all']
+                   if not strategy_routes._holds(p, vector)]
+        self.assertEqual(failing, ['indefinite_integral_count'])
+        self.assertGreaterEqual(vector['asked_symbol_count'], 3)
+
+    def test_a_recorded_non_match_stays_unmatched_and_says_why(self):
+        """A deliberate limit, committed so it cannot change silently: an
+        instruction that DROPS the stated parameter domain is an ablation of
+        the shape's mathematical content, not a rewording of its phrasing,
+        and the record keeps requiring the domain."""
+        for entry in _corpus().get('unmatched') or ():
+            self.assertFalse(_matches(entry['instruction']),
+                             entry['instruction'][:60])
+            self.assertTrue(entry['why'].strip())
+        self.assertTrue(_corpus().get('unmatched'))
 
     def test_the_definite_family_stays_with_its_own_tactic(self):
         """The record tells the agent to AVOID `integrate_reduction`; a
@@ -375,8 +546,94 @@ class TestDelivery(unittest.TestCase):
     def test_a_non_matching_run_reports_an_empty_route_list(self):
         result, seen = _run('expand (x+1)^2')
         self.assertEqual(result['strategy_routes'], [])
+        self.assertEqual(result['strategy_route_stages'], [])
         self.assertNotIn('strategy_routes', seen['trace'])
         self.assertNotIn('Recorded strategy route', seen['instructions'])
+
+
+class TestRequiredStageReach(unittest.TestCase):
+    """Rank 1's own declared metric, computed from the finished ledger.
+
+    It was rendered as the word "required" and evaluated nowhere. The whole
+    risk of building it is one step away and forbidden: refusing a
+    designation because a required stage went unreached would make a
+    heuristic match over instruction TEXT into authority over what the
+    ledger admits. The non-gating property is therefore what these tests
+    check, not the arithmetic.
+    """
+
+    def setUp(self):
+        self.route = next(r for r in strategy_routes.load()
+                          if r['id'] == ROUTE)
+
+    def test_reach_is_measured_by_the_registry_op_not_the_stage_name(self):
+        """`diff` records `differentiate` and `apply` records
+        `apply_both_sides`; a route names tactics, a ledger holds ops, and
+        the registry is the only mapping between them."""
+        self.assertEqual(tactic_registry.BY_NAME['diff'].op, 'differentiate')
+        report = strategy_routes.required_stage_reach(
+            [self.route], ['differentiate', 'expand'])
+        self.assertEqual(report[0]['route'], ROUTE)
+        self.assertEqual(report[0]['required'], 3)
+        self.assertEqual(report[0]['reached'], 1)
+        self.assertEqual([s['stage'] for s in report[0]['stages'] if
+                          s['reached']], ['differentiate-boundary'])
+
+    def test_only_required_tactic_stages_are_counted(self):
+        """Optional stages are not failures, and a required CONTROL stage
+        records no step of its own — whether the run designated anything is
+        already in the run's own result."""
+        named = {s['stage'] for s in strategy_routes.required_stage_reach(
+            [self.route], [])[0]['stages']}
+        self.assertEqual(named, {'differentiate-boundary',
+                                 'form-coefficient-system',
+                                 'assemble-answer'})
+        self.assertNotIn('certify-algebra', named)   # optional
+        self.assertNotIn('designate', named)         # control
+
+    def test_no_match_no_report(self):
+        self.assertEqual(strategy_routes.required_stage_reach((), ['expand']),
+                         [])
+        self.assertEqual(strategy_routes.required_stage_reach(None, None), [])
+
+    def test_a_run_that_misses_every_required_stage_still_finishes(self):
+        """THE property. A matched route whose required stages never ran
+        must change NOTHING: the run still designates, the designation is
+        still verified, the ledger still replays, and no step of the reach
+        report reaches the ledger."""
+        ledger = ledger_module.Ledger()
+        result, _ = _run(
+            _corpus()['positive'][0],
+            calls=[('run_tactic', {'tactic': 'expand',
+                                   'arguments': ['(x+1)^2']}),
+                   ('set_result', {'expr': 'x^2+2x+1'})],
+            ledger=ledger)
+
+        self.assertEqual(result['strategy_routes'], [ROUTE])
+        report = result['strategy_route_stages']
+        self.assertEqual(report[0]['reached'], 0)
+        self.assertEqual(report[0]['required'], 3)
+
+        # ... and the run is untouched by that
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['final_result'], 'x^2+2x+1')
+        self.assertEqual(result['final_provenance']['status'], 'verified')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_the_reach_report_is_never_ledger_evidence(self):
+        """Metadata, not a record: nothing about routing may enter a step's
+        stored strings, its hash, or replay."""
+        ledger = ledger_module.Ledger()
+        result, _ = _run(
+            _corpus()['positive'][0],
+            calls=[('run_tactic', {'tactic': 'expand',
+                                   'arguments': ['(x+1)^2']})],
+            ledger=ledger)
+        self.assertTrue(result['strategy_route_stages'])
+        for step in ledger.steps:
+            self.assertNotIn('strategy', repr(step).lower())
+            self.assertNotIn('route', repr(step).lower())
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
 
 if __name__ == '__main__':

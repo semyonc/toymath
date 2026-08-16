@@ -108,6 +108,21 @@ Two layers coexist:
   DAG alone would have nothing to look at. LANDMINE: the stage field naming
   the sub-object is `target`, not `on` — YAML 1.1 resolves a bare `on:` key
   to the boolean `True`; the schema rejects it by name.
+  A record may NOT hardcode the `symbols` it matches (schema-rejected by name,
+  same defensive shape): matching is symbol-generic via `asked_symbol_count`,
+  because the shipped record's `[A, B, C]` made the same problem posed in
+  `\alpha,\beta,\gamma` a non-match. Matching carries TWO metrics and shipping
+  one without the other is the trap — precision was measured from the start
+  while RECALL was not, and a route that silently stops matching turns a
+  measured routed arm into an unrouted control that reports as noise. Both
+  corpora are committed (`fixtures:` in the YAML, exercised by
+  `unittests_routes.py`); every widening of the ask extractor owes a new hard
+  negative that FIRES it, and a deliberate non-match belongs in `unmatched`
+  with its reason rather than being tolerated silently. Required-stage reach
+  is run METADATA computed from the finished ledger's ops
+  (`required_stage_reach`, surfaced as `strategy_route_stages`) — never a
+  gate: refusing a designation because a required stage went unreached would
+  make a heuristic over instruction TEXT into authority over the ledger.
 - Core code is fair game: when a fix belongs in the parser grammar, lexer,
   writer, comparer, or replicator, make it there rather than layering
   workarounds. After grammar changes: regenerate the tables, check

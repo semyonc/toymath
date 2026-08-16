@@ -25,8 +25,12 @@ routes:
         - feature: relation_has_explicit_nonintegral_term
         - feature: shifted_integral_count
           min: 1
-        - feature: asks_for_symbols
-          symbols: [A, B, C]
+        # symbol-GENERIC on purpose. Naming `[A, B, C]` made the same
+        # problem posed in `\alpha,\beta,\gamma` a non-match, and a route
+        # that silently stops matching turns a measurement arm into a
+        # control. The plural is what the shape needs; the arity is not.
+        - feature: asked_symbol_count
+          min: 2
         - feature: parameter_constraint_count
           min: 1
     avoid:
@@ -156,6 +160,18 @@ routes:
 # reference to a notebook cell: notebooks are user-modified and a cell index
 # drifts. Negatives are chosen to be HARD - each shares surface features with
 # the positives and must still not match.
+#
+# The corpus measures TWO numbers, and shipping one without the other is the
+# failure mode this file guards against: recall over `positive` (natural
+# rewordings of the same problem) and precision over `negative`. Recall
+# matters because reach can only be measured on runs that MATCH - a
+# paraphrased instruction silently turns a routed arm into an unrouted
+# control and reports the difference as noise.
+#
+# `unmatched` is the third list and the honest one: instructions this record
+# deliberately does NOT match, each with its reason. It is not a negative
+# (these are not the wrong shape) and not a positive (they do not match).
+# Committing them keeps a known limit visible and stops it changing silently.
 fixtures:
   indefinite-reduction-boundary-v1:
     positive:
@@ -169,6 +185,38 @@ fixtures:
       # matcher must key on structure, not on `aligned`
       - |
         prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}} for n > 2. Find A, B and C
+      # --- rewordings of the ASK. Same mathematical content, different
+      # English; every one of these was a MEASURED miss before the recall
+      # round, and each names its miss shape.
+      # noun phrase between the ask verb and the letters
+      - |
+        prove \int \frac{dx}{(x^2+a^2)^n} = \frac{A x}{(x^2+a^2)^{n-1}} + B \int \frac{dx}{(x^2+a^2)^{n-1}} + C \int \frac{dx}{(x^2+a^2)^{n-2}} for n > 2. Find the constants A, B, C
+      # a longer noun phrase, ending in a preposition
+      - |
+        prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}} for n > 2. Find the values of A,B,C
+      # a NON-IMPERATIVE ask: the first vocabulary had imperatives only
+      - |
+        prove \int \frac{dx}{(a+b \cos x)^n} = \frac{A \sin x}{(a+b \cos x)^{n-1}} + B \int \frac{dx}{(a+b \cos x)^{n-1}} + C \int \frac{dx}{(a+b \cos x)^{n-2}} for n > 1. What are A, B and C?
+      # the stated domain trails the ask in the SAME sentence, which used to
+      # swallow the last symbol and drop the count below the bound
+      - |
+        prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}}. Determine A, B, C for n > 2
+      # the same problem posed in Greek letters: extraction AND matching must
+      # both be symbol-generic, which is why no record may name its symbols
+      - |
+        prove \int \frac{dx}{(1+x^2)^n} = \frac{\alpha x}{(1+x^2)^{n-1}} + \beta \int \frac{dx}{(1+x^2)^{n-1}} + \gamma \int \frac{dx}{(1+x^2)^{n-2}} for n > 2. Find \alpha, \beta and \gamma
+      # another ask verb, another noun
+      - |
+        prove \int \frac{dx}{(x^2+a^2)^n} = \frac{A x}{(x^2+a^2)^{n-1}} + B \int \frac{dx}{(x^2+a^2)^{n-1}} + C \int \frac{dx}{(x^2+a^2)^{n-2}} for n > 2. Calculate the coefficients A, B and C
+      # a two-word ask verb
+      - |
+        prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}} for n > 2. Solve for A, B and C
+      # a numeral inside the noun phrase
+      - |
+        prove \int \frac{dx}{(a+b \cos x)^n} = \frac{A \sin x}{(a+b \cos x)^{n-1}} + B \int \frac{dx}{(a+b \cos x)^{n-1}} + C \int \frac{dx}{(a+b \cos x)^{n-2}} for n > 1. Identify the three constants A, B and C
+      # subscripted unknowns
+      - |
+        prove \int \frac{dx}{(1+x^2)^n} = \frac{C_1 x}{(1+x^2)^{n-1}} + C_2 \int \frac{dx}{(1+x^2)^{n-1}} + C_3 \int \frac{dx}{(1+x^2)^{n-2}} for n > 2. Find the constants C_1, C_2 and C_3
     negative:
       # a DEFINITE reduction formula: integrate_reduction's own shape, which
       # this record explicitly tells the agent to avoid
@@ -187,3 +235,38 @@ fixtures:
       # an ordinary indefinite integral cell
       - |
         Integrate \int \frac{d x}{2 \sin x-\cos x+5} using verified tactics only.
+      # --- one hard negative per WIDENING made by the recall round. Each
+      # fires the widened feature and must still be refused on shape.
+      # non-imperative ask, on the DEFINITE analogue of the positive: the
+      # ask, the boundary term, the shift and the domain all fire, and the
+      # boundedness of the integrals is the only thing refusing it
+      - |
+        prove \int_0^{\pi/2} \frac{dx}{(a+b \cos x)^n} = \frac{A \sin x}{(a+b \cos x)^{n-1}} + B \int_0^{\pi/2} \frac{dx}{(a+b \cos x)^{n-1}} + C \int_0^{\pi/2} \frac{dx}{(a+b \cos x)^{n-2}} for n > 1. What are A, B and C?
+      # three GREEK unknowns in a different problem family: symbol-generic
+      # extraction must not make partial fractions look like a reduction
+      - |
+        \int \frac{dx}{(x-1)(x-2)(x-3)} by partial fractions \frac{\alpha}{x-1}+\frac{\beta}{x-2}+\frac{\gamma}{x-3} for x > 3. Find the constants \alpha, \beta and \gamma
+      # exactly TWO unknowns, reached through the trailing-clause cut: this
+      # is the negative for `asked_symbol_count: min 2` rather than min 3
+      - |
+        Determine the constants A and B for which \int (A f + B g)\,dx = 0 whenever n > 2.
+      # a noun-phrase lead-in the closed vocabulary must NOT swallow, on a
+      # problem with no integral at all
+      - |
+        What are the roots A and B of x^2 - 5x + 6 = 0 for x > 0?
+      # a definite reduction that names its constants: both the ask and the
+      # shift fire, and the family is still integrate_reduction's
+      - |
+        prove \int_0^1 x^n e^{-x} dx = A + B \int_0^1 x^{n-1} e^{-x} dx + C \int_0^1 x^{n-2} e^{-x} dx for n > 2. Find the values of A, B and C
+    unmatched:
+      - why: >-
+          the stated parameter domain is part of this shape's mathematical
+          content, not of its phrasing, so dropping it is an ablation rather
+          than a rewording and the record keeps requiring it. MEASURED
+          caveat, recorded so a later round can revisit with evidence rather
+          than taste: `parameter_constraint_count` refuses 3 of the 10 hard
+          negatives but is never the ONLY predicate refusing one, so its
+          marginal discrimination on this corpus is zero. It is also the
+          record's only predicate on the parser leg of the hybrid extractor.
+        instruction: |
+          prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}}. Find A, B and C

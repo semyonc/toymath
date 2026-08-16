@@ -14,7 +14,7 @@ stopped a live derivation from closing.
 A record moves the same knowledge into one committed file with a schema, so
 five things become testable that were implicit in prose: the schema itself,
 the tactic/control references, the matching, the delivery, and the historical
-effect. What stays prose is the strategy: `on` names the mathematical
+effect. What stays prose is the strategy: `target` names the mathematical
 sub-object a stage acts on and `why` says what the stage is for. This format
 does not mechanically prove that strategy good — it makes everything around it
 checkable.
@@ -33,6 +33,16 @@ outright and whose only parseable fragment is the trailing `n > 1`, so
 predicates over the notation DAG alone cannot see the integral relation. The
 extractor therefore reads brace-balanced structure off the raw command text and
 uses the parser for exactly what the parser can see.
+
+Matching has TWO metrics and only one of them is obvious. PRECISION is the
+design priority — a wrongly matched record spends a run's context steering a
+problem it does not fit — but RECALL is what makes the record measurable at
+all: reach can only be measured on runs that MATCH, so an instruction the
+matcher misses becomes an unrouted control whose difference reads as noise.
+Both are held by the committed corpus in the YAML (`positive` / `negative`,
+plus `unmatched` for deliberate limits with their reason), and a record may
+not name the symbols it matches — the same problem posed in `\\alpha,\\beta,
+\\gamma` is the same problem.
 """
 import os
 import re
@@ -48,7 +58,8 @@ import tactic_registry
 from notation import Notation
 
 __all__ = ['StrategyRouteError', 'FEATURES', 'CONTROLS', 'ROUTES_PATH',
-           'load', 'features', 'match', 'render', 'validate', 'fixtures']
+           'load', 'features', 'match', 'render', 'validate', 'fixtures',
+           'required_stage_reach']
 
 ROUTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'strategy_routes.yaml')
@@ -71,7 +82,23 @@ FEATURES = {
     'shifted_integral_count': 'count',
     'parameter_constraint_count': 'count',
     'relation_has_explicit_nonintegral_term': 'flag',
-    'asks_for_symbols': 'symbols',
+    'asked_symbol_count': 'count',
+}
+
+# Spellings a record may not use, each with the reason. Same defensive shape
+# as the bare `on:` YAML landmine below: a prohibition nobody can look up is
+# a prohibition a future record author rediscovers by debugging.
+_RETIRED_FEATURES = {
+    'asks_for_symbols': (
+        'matching is symbol-generic: count the asked-for symbols with '
+        '`asked_symbol_count` instead of naming them'),
+}
+_PROHIBITED_KEYS = {
+    'symbols': (
+        'a record may NOT name the symbols it matches - the same problem '
+        'posed in \\alpha,\\beta,\\gamma is the same problem, and a record '
+        'that hardcodes A,B,C silently stops matching it. Use '
+        '`asked_symbol_count` with a bound'),
 }
 
 _ACTIONS = ('tactic', 'tactic-loop', 'control')
@@ -91,10 +118,36 @@ _MACRO = re.compile(r'\\[A-Za-z]+')
 _WORD = re.compile(r'[A-Za-z]{3,}')
 _SHIFTED_POWER = re.compile(
     r'\^\s*\{\s*(?:[A-Za-z]\s*[-+]\s*\d+|\d+\s*[-+]\s*[A-Za-z])\s*\}')
-_ASK = re.compile(r'\b(?:find|determine|compute|obtain)\b([^.?!\n]*)',
-                  re.IGNORECASE)
-_IDENTIFIER = re.compile(r'\A[A-Za-z](?:_\{?\w+\}?)?\Z')
+_ASK = re.compile(
+    r'\b(?:find|determine|compute|calculate|obtain|identify|solve\s+for|'
+    r'what\s+(?:are|is))\b([^.?!\n]*)', re.IGNORECASE)
+# Greek spellings, so the same problem posed in `\alpha,\beta,\gamma` reads
+# as the same ask. An ALLOWLIST, not `\\[A-Za-z]+`: the latter would read
+# `\int`, `\sin` and `\frac` as unknowns. `\pi`/`\Pi` are deliberately absent
+# - a named constant is never what an instruction asks the agent to find.
+_GREEK = (r'alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta'
+          r'|iota|kappa|lambda|mu|nu|xi|rho|varrho|sigma|varsigma|tau'
+          r'|upsilon|phi|varphi|chi|psi|omega'
+          r'|Gamma|Delta|Theta|Lambda|Xi|Sigma|Upsilon|Phi|Psi|Omega')
+_IDENTIFIER = re.compile(r'\A(?:\\(?:' + _GREEK + r')|[A-Za-z])'
+                         r'(?:_\{?\w+\}?)?\Z')
 _ASK_SPLIT = re.compile(r'[,;]|\band\b|&', re.IGNORECASE)
+# A subordinate clause ends the list of asked-for symbols. Without this cut a
+# constraint stated in the SAME sentence ("determine A, B, C for n > 2")
+# silently drops the last symbol, because collection breaks at the token that
+# carries the clause.
+_ASK_CLAUSE = re.compile(
+    r'\b(?:for|when|whenever|where|if|given|assuming|provided|with|without'
+    r'|such|so|subject|satisfying|using|in|to|that|which|valid|holds)\b',
+    re.IGNORECASE)
+# A noun phrase between the ask verb and the letters ("the constants", "the
+# values of", "the three coefficients"). A CLOSED vocabulary of words that
+# introduce a list of unknowns - not "strip any prose", which would let
+# "find the area A of the triangle" read as an ask for A.
+_ASK_LEADIN = re.compile(
+    r'\A(?:(?:the|a|an|all|both|each|every|two|three|four|five|six|real'
+    r'|remaining|other|following|values?|constants?|coefficients?|numbers?'
+    r'|unknowns?|parameters?|quantit(?:y|ies)|of)\s+)+', re.IGNORECASE)
 _CONSTRAINT_OPS = frozenset(('<', '>', '<=', '>=', '\\le', '\\ge', '\\lt',
                              '\\gt', '\\ne', '\\neq', '\\leq', '\\geq'))
 
@@ -190,15 +243,29 @@ def _is_notation(term):
 
 
 def _asked_symbols(text):
-    """Identifiers an explicit imperative asks for ("find A, B and C").
+    """Identifiers an explicit ask names ("find A, B and C").
 
-    Conservative: collection stops at the first token that is not a bare
-    identifier, so "find the antiderivative of ..." yields nothing.
+    Three widenings over the first version, each measured against its own
+    hard negatives, because a wrongly matched route spends a run's context
+    steering it wrong: an ask may be non-imperative ("what are A, B and C?"),
+    may put a closed-vocabulary noun phrase in front of the letters ("find
+    the constants A, B, C"), and may trail a subordinate clause in the same
+    sentence ("determine A, B, C for n > 2").
+
+    Still conservative where it counts: collection stops at the first token
+    that is not a bare identifier once its lead-in is removed, so "find the
+    antiderivative of ..." yields nothing, and an identifier is a single
+    letter or an allowlisted Greek macro, never an arbitrary `\\macro`.
     """
     found = []
     for hit in _ASK.finditer(text):
-        for token in _ASK_SPLIT.split(hit.group(1)):
-            token = token.strip().strip('$').strip()
+        tail = hit.group(1)
+        clause = _ASK_CLAUSE.search(tail)
+        if clause is not None:
+            tail = tail[:clause.start()]
+        for token in _ASK_SPLIT.split(tail):
+            token = _ASK_LEADIN.sub('', token.strip().strip('$').strip(),
+                                    count=1).strip()
             if not token:
                 continue
             if not _IDENTIFIER.match(token):
@@ -262,7 +329,9 @@ def features(text):
         'shifted_integral_count': shifted,
         'parameter_constraint_count': _parameter_constraints(text),
         'relation_has_explicit_nonintegral_term': mixed,
-        'asks_for_symbols': _asked_symbols(text),
+        # a COUNT, never the names: a record that hardcoded `[A, B, C]`
+        # stopped matching the same problem posed in Greek letters
+        'asked_symbol_count': len(_asked_symbols(text)),
     }
 
 
@@ -277,12 +346,19 @@ def _require(condition, message):
 
 def _validate_predicate(predicate, where):
     _require(isinstance(predicate, dict), f'{where}: predicate must be a map')
+    # Prohibited spellings are refused BY NAME and before anything else, so
+    # the error says what the rule is rather than "unknown key".
+    for key, why in _PROHIBITED_KEYS.items():
+        _require(key not in predicate, f'{where}: `{key}` is not allowed - '
+                                       f'{why}')
     name = predicate.get('feature')
+    retired = _RETIRED_FEATURES.get(name)
+    _require(retired is None,
+             f'{where}: feature {name!r} was retired - {retired}')
     _require(name in FEATURES, f'{where}: unknown feature {name!r}')
     kind = FEATURES[name]
     keys = set(predicate) - {'feature'}
-    allowed = {'count': {'min', 'max', 'equals'},
-               'flag': {'is'}, 'symbols': {'symbols'}}[kind]
+    allowed = {'count': {'min', 'max', 'equals'}, 'flag': {'is'}}[kind]
     unknown = keys - allowed
     _require(not unknown,
              f'{where}: feature {name!r} takes {sorted(allowed)}, '
@@ -293,14 +369,9 @@ def _validate_predicate(predicate, where):
             _require(isinstance(predicate[key], int)
                      and not isinstance(predicate[key], bool),
                      f'{where}: {key} must be an integer')
-    elif kind == 'flag':
+    else:
         _require(isinstance(predicate.get('is', True), bool),
                  f'{where}: is must be a boolean')
-    else:
-        symbols = predicate.get('symbols')
-        _require(isinstance(symbols, list) and symbols
-                 and all(isinstance(s, str) for s in symbols),
-                 f'{where}: symbols must be a non-empty list of names')
 
 
 def _validate_stage(stage, index, produced, route_id):
@@ -427,6 +498,17 @@ def _validate_document(document):
                  and entry['negative'],
                  f'fixture {name!r}: needs non-empty positive and negative '
                  f'instruction lists')
+        # A deliberate non-match must carry its reason. Without the `why`
+        # this list would be indistinguishable from a silently tolerated
+        # recall miss, which is the exact thing it exists to prevent.
+        for entry_index, skipped in enumerate(entry.get('unmatched') or ()):
+            _require(isinstance(skipped, dict)
+                     and isinstance(skipped.get('instruction'), str)
+                     and skipped['instruction'].strip()
+                     and isinstance(skipped.get('why'), str)
+                     and skipped['why'].strip(),
+                     f'fixture {name!r}: unmatched entry {entry_index + 1} '
+                     f'needs an instruction and a why')
     for route in routes:
         fixture = (route.get('evidence') or {}).get('fixture')
         if fixture is not None:
@@ -489,9 +571,7 @@ def _holds(predicate, vector):
         if 'equals' in predicate and value != predicate['equals']:
             return False
         return True
-    if kind == 'flag':
-        return bool(value) is predicate.get('is', True)
-    return set(predicate['symbols']) <= set(value)
+    return bool(value) is predicate.get('is', True)
 
 
 def matches(route, vector):
@@ -548,6 +628,44 @@ def required_skills(route):
             if skill != 'core' and skill not in skills:
                 skills.append(skill)
     return skills
+
+
+def required_stage_reach(routes, ops):
+    """Which required stages of each matched route a finished run reached.
+
+    RUN METADATA, and the boundary is the point of the function: nothing
+    here may refuse a designation, bar a step, reach the ledger, or change
+    replay. A route match is a heuristic over instruction TEXT, and "refuse
+    the answer when a required stage was not reached" would turn that
+    heuristic into authority - which the record format forbids by design.
+    The metric exists so a later failure can be read ("the route was
+    delivered and stage 3 never ran"), never so the run can be judged.
+
+    Reach is measured over required TACTIC stages only, by the ledger `op`
+    the registry maps each tactic name to. A required CONTROL stage records
+    no step of its own; whether the run designated anything is already in
+    the run's own result, so counting it here would double-report it.
+    """
+    seen = set(ops or ())
+    report = []
+    for route in routes or ():
+        stages = []
+        for stage in route['stages']:
+            if not stage.get('required') or stage.get('action') == 'control':
+                continue
+            names = ([stage['tactic']] if stage.get('tactic')
+                     else stage.get('tactics') or [])
+            stages.append({
+                'stage': stage['id'],
+                'reached': any(tactic_registry.BY_NAME[name].op in seen
+                               for name in names if
+                               name in tactic_registry.BY_NAME),
+            })
+        if stages:
+            report.append({'route': route['id'], 'stages': stages,
+                           'required': len(stages),
+                           'reached': sum(1 for s in stages if s['reached'])})
+    return report
 
 
 def _stage_line(index, stage):

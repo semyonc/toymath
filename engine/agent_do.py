@@ -1126,7 +1126,11 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
 
     Returns {ok, status, steps, assumptions, premises, final_result,
     final_provenance, branch_topology, abandoned_paths, figures,
-    figure_error, summary[, error]}.
+    figure_error, summary, strategy_routes, strategy_route_stages[, error]}.
+    The last two are non-ledger run metadata: which recorded strategy routes
+    matched this instruction, and which of their required stages the finished
+    ledger reached. Descriptive only — a heuristic match over instruction
+    text gates nothing.
     `premises` are the inputs no recorded step of this run produced — the
     boundary of what it checked. An entry carrying `derived_from` is NOT a
     stated premise: it is a structural member (a system row, a conjunct) of
@@ -1219,8 +1223,14 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     observability.flush()
     result = finalize_session(session, outcome, max_turns=max_turns)
     # Non-ledger run metadata, always present: a later failure can then say
-    # whether guidance was absent, mismatched, or delivered and ignored.
+    # whether guidance was absent, mismatched, or delivered and ignored - and,
+    # with the reach report, whether a delivered route's required stages
+    # actually ran. Both are DESCRIPTIVE. Neither gates designation, admission
+    # or replay: a route match is a heuristic over instruction text, and this
+    # is exactly where such a heuristic must not become authority.
     result['strategy_routes'] = [route['id'] for route in matched]
+    result['strategy_route_stages'] = strategy_routes.required_stage_reach(
+        matched, [step.get('op') for step in result.get('steps') or ()])
     return result
 
 
