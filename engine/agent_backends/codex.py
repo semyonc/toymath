@@ -230,10 +230,16 @@ def role_policy(tool_names=None):
     are the isolated runtime, the exact tool-set contract, and a client
     that refuses anything outside the surface.
     """
-    allowed = ('the ToyMath dynamic tools supplied with each thread'
-               if tool_names is None else
-               'the client-provided ToyMath dynamic tools: '
-               + ', '.join(tool_names))
+    if tool_names is None:
+        allowed = 'the ToyMath dynamic tools supplied with each thread'
+    elif not tuple(tool_names):
+        # A harness stage (context preparation) runs on a thread with no
+        # tools at all. Saying "use only: " with an empty list reads as a
+        # truncated sentence; say what is true instead.
+        allowed = 'no tools - this thread supplies none, so answer directly'
+    else:
+        allowed = ('the client-provided ToyMath dynamic tools: '
+                   + ', '.join(tool_names))
     forbidden = ', '.join(RESIDUAL_NATIVE_TOOLS)
     return f"""# ToyMath Codex role
 

@@ -25,6 +25,7 @@ import re
 import threading
 
 import agent_config
+import context_prewarm
 import observability
 import primitives
 import strategy_routes
@@ -192,7 +193,8 @@ assumptions; results are
 
 
 def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
-                 proof_claim_id='c1', tikz=False, routes=()):
+                 proof_claim_id='c1', tikz=False, routes=(), preload='',
+                 preloaded=()):
     """Build the small always-on core prompt and skill catalog.
 
     `routes` are the strategy-route records whose shape matcher fired on this
@@ -202,6 +204,11 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
     instructions, rather than behind `load_skill`, because a route meant to
     prevent a premature open outcome cannot depend on the agent already having
     made the right discovery call.
+
+    `preload` is the subject-skill block a prewarm selection asked for,
+    already rendered through the same progressive renderer `load_skill` uses.
+    Conditional in exactly the same sense: with no selection the returned
+    prompt is byte-identical to the one this function has always built.
     """
     try:
         if os.path.abspath(skill_path) == os.path.abspath(_SKILL_PATH):
@@ -230,9 +237,14 @@ def build_prompt(skill_path=_SKILL_PATH, plotting=False, prove_mode=False,
         text += _TIKZ_RULES
     if prove_mode:
         text += _PROVE_RULES.replace('ROOT_CLAIM', proof_claim_id)
-    route_block = strategy_routes.render(routes)
+    # The route block names the subjects its stages need; a preloaded subject
+    # is already there, so it is dropped from that line rather than costing
+    # the executor a `load_skill` call that answers "already loaded".
+    route_block = strategy_routes.render(routes, loaded=preloaded)
     if route_block:
         text += '\n' + route_block
+    if preload:
+        text += '\n' + preload
     return text
 
 
@@ -1121,16 +1133,24 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                     max_turns=DEFAULT_MAX_TURNS, on_plot=None,
                     plot_backend=None, proof_goal=None, tikz_backend=None,
                     model_name=None, providers=(), chain_goal=None,
-                    budget=None, grace_period=None, backend=None, route=None):
+                    budget=None, grace_period=None, backend=None, route=None,
+                    prewarm=None):
     """Run one do! instruction through the agent.
 
     Returns {ok, status, steps, assumptions, premises, final_result,
     final_provenance, branch_topology, abandoned_paths, figures,
-    figure_error, summary, strategy_routes, strategy_route_stages[, error]}.
-    The last two are non-ledger run metadata: which recorded strategy routes
-    matched this instruction, and which of their required stages the finished
-    ledger reached. Descriptive only — a heuristic match over instruction
-    text gates nothing.
+    figure_error, summary, strategy_routes, strategy_route_stages,
+    context_prewarm[, error]}.
+    The last three are non-ledger run metadata: which recorded strategy routes
+    were delivered to this run, which of their required stages the finished
+    ledger reached, and what the preparation stage selected. Descriptive only
+    — a heuristic match over instruction text and a model's selection gate
+    nothing.
+
+    `prewarm` forces the preparation stage on or off for this run; by default
+    it follows `TOYMATH_PREWARM`. With it off, the executor's initial
+    developer instructions are byte-identical to what they were before the
+    stage existed.
     `premises` are the inputs no recorded step of this run produced — the
     boundary of what it checked. An entry carrying `derived_from` is NOT a
     stated premise: it is a structural member (a system row, a conjunct) of
@@ -1154,6 +1174,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     None, and a verified candidate appears only as a labelled
     `partial_result`.
     """
+    prewarm = context_prewarm.enabled() if prewarm is None else bool(prewarm)
     if route is not None:
         # notebook-local routing: backend, model, and provider order travel
         # together so a run cannot mix one backend with another's model
@@ -1185,6 +1206,38 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     if matched:
         trace_metadata['strategy_routes'] = ','.join(
             route['id'] for route in matched)
+    # The preparation stage: one selection call on this run's own backend and
+    # model, before the executor exists. It ADDS to the lexical match and can
+    # never subtract from it, it writes nothing the parser did not already
+    # know, and every failure path leaves the run exactly as it was before
+    # this stage existed.
+    selection = context_prewarm.prewarm(
+        instruction, backend, cancellation=cancellation,
+        routes=strategy_routes.load(), trace_metadata=dict(trace_metadata),
+        model=model_name) if prewarm else context_prewarm.disabled()
+    if cancellation.cancelled:
+        # Stop pressed during preparation: the executor is never started, and
+        # the cell ends as a clean interrupted run with nothing recorded.
+        session.close(cancellation.reason or USER)
+        observability.flush()
+        return _with_route_metadata(
+            finalize_session(
+                session,
+                agent_base.AgentOutcome(
+                    status=agent_base.status_for_reason(cancellation.reason)),
+                max_turns=max_turns),
+            matched, selection, (), ())
+    preload, preloaded, dropped = context_prewarm.preload_markdown(
+        selection.skills)
+    # a preloaded subject is loaded: its tactics must run without the
+    # executor first calling load_skill for content it already has
+    session.loaded_skills.update(preloaded)
+    delivered = context_prewarm.union(matched, selection.routes)
+    if delivered != matched:
+        trace_metadata['strategy_routes'] = ','.join(
+            route['id'] for route in delivered)
+    if preloaded:
+        trace_metadata['preloaded_skills'] = ','.join(preloaded)
     request = AgentRequest(
         instruction=instruction,
         developer_instructions=build_prompt(
@@ -1192,7 +1245,7 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
             tikz=session.tikz_backend is not None,
             prove_mode=proof_goal is not None,
             proof_claim_id=(session.proof_claim_id or 'c1'),
-            routes=matched),
+            routes=delivered, preload=preload, preloaded=preloaded),
         dispatcher=dispatcher,
         cancellation=cancellation,
         model=model_name,
@@ -1222,15 +1275,29 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
         session.close(cancellation.reason or USER)
     observability.flush()
     result = finalize_session(session, outcome, max_turns=max_turns)
-    # Non-ledger run metadata, always present: a later failure can then say
-    # whether guidance was absent, mismatched, or delivered and ignored - and,
-    # with the reach report, whether a delivered route's required stages
-    # actually ran. Both are DESCRIPTIVE. Neither gates designation, admission
-    # or replay: a route match is a heuristic over instruction text, and this
-    # is exactly where such a heuristic must not become authority.
-    result['strategy_routes'] = [route['id'] for route in matched]
+    return _with_route_metadata(result, delivered, selection, preloaded,
+                                dropped)
+
+
+def _with_route_metadata(result, delivered, selection, preloaded, dropped):
+    """Attach the run's non-ledger routing and preparation metadata.
+
+    Always present: a later failure can then say whether guidance was absent,
+    mismatched, or delivered and ignored - and, with the reach report,
+    whether a delivered route's required stages actually ran. All of it is
+    DESCRIPTIVE. None of it gates designation, admission or replay: a route
+    match is a heuristic over instruction text and a prewarm selection is a
+    model's guess, and this is exactly where such judgements must not become
+    authority.
+
+    `context_prewarm` is what makes the gen-32 scar attributable now that
+    every run's context can differ: it records which skills were preloaded,
+    which record the selection added, and - when the stage fell back - why.
+    """
+    result['strategy_routes'] = [route['id'] for route in delivered]
     result['strategy_route_stages'] = strategy_routes.required_stage_reach(
-        matched, [step.get('op') for step in result.get('steps') or ()])
+        delivered, [step.get('op') for step in result.get('steps') or ()])
+    result['context_prewarm'] = selection.metadata(preloaded, dropped)
     return result
 
 

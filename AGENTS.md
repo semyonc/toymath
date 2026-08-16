@@ -31,6 +31,7 @@ Two layers coexist:
 | `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
 | `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
 | `engine/strategy_routes.py`, `engine/strategy_routes.yaml` | Strategy route records: one schema-validated record per known problem shape, a hybrid shape matcher, and the conditional renderer that appends a matching route to a run's initial developer instructions |
+| `engine/context_prewarm.py` | The preparation stage: one tool-less model call selects the run's skills and route record from a library manifest before the executor starts; strict closed-set parser, union with the lexical match, fail-open fallback |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
 | `toymath_cli.py` | Agent-facing CLI; one deterministic JSON object per call |
@@ -123,6 +124,46 @@ Two layers coexist:
   (`required_stage_reach`, surfaced as `strategy_route_stages`) — never a
   gate: refusing a designation because a required stage went unreached would
   make a heuristic over instruction TEXT into authority over the ledger.
+- The **context-preparation stage** (`engine/context_prewarm.py`) runs one
+  model call — same backend, same model — before the executor on agent cells
+  (`do!` and committed agent commands; plain math cells never reach it). It
+  reads the resolved instruction plus a mechanically rendered library
+  manifest and returns a SELECTION: up to three skills to preload and one
+  route record id. Four properties are load-bearing and each is asserted in
+  `unittests_prewarm.py`, not merely intended:
+  **CHOOSE, DON'T WRITE, enforced by the parser** — the reply is matched
+  against the closed sets of known skill names and record ids and everything
+  else in it is discarded, so no text the prewarm model authors can reach the
+  executor's instructions; the stage reads the user's cell, so its reply is
+  untrusted input.
+  **It ADDS, never removes** — route delivery is the UNION of the lexical
+  match and the selection, so a record the deterministic matcher fired on is
+  delivered even when the prewarmer says `none`. The lexical extractor and
+  its corpora stay the offline floor and the regression harness.
+  **It fails open** — error, timeout, unusable backend or unreadable reply
+  all leave the run exactly as it is with the stage off, with the reason in
+  run metadata. `TOYMATH_PREWARM=off` disables it, and with it off the
+  executor's initial instructions are byte-identical to the pre-stage ones.
+  **Steering, never authority** — the selection is run metadata
+  (`context_prewarm` in the result, alongside `strategy_routes`), never
+  ledger content, never a stored or hashed string, and it gates nothing.
+  LANDMINE: the stage's own timeout must NOT be expressed on the run's
+  cancellation token. `wait_interruptibly` enforces a wall-clock budget by
+  CANCELLING the token it is handed, so a slow preparation call would arrive
+  at the executor as an already-cancelled run — the cell dying of the very
+  timeout meant to keep it alive. It waits on a child token instead: the
+  run's Stop propagates in, its own budget stop stays in. A second one-gate
+  rule: `enabled()` is read only at the run entry point, because two gates on
+  one switch is how an explicit `prewarm=True` gets silently vetoed by an
+  environment variable. The prewarm is NOT a tool and must never appear in
+  the model-visible tool list; its request carries an empty dispatcher, which
+  is also why both backends serve it with no new entry point.
+  Preloaded bodies render through `tactic_skills.render` — the same source
+  `load_skill` uses, so preload and in-run load cannot drift — and a preloaded
+  subject is added to `session.loaded_skills` or the registry would refuse its
+  tactics. Over-budget skills are dropped WHOLE and reported; measured
+  2026-08-16, `integration` renders at 14281 characters and `equations` at
+  10272, so a preload budget must be sized against the library's real units.
 - Core code is fair game: when a fix belongs in the parser grammar, lexer,
   writer, comparer, or replicator, make it there rather than layering
   workarounds. After grammar changes: regenerate the tables, check
@@ -214,6 +255,7 @@ pytest engine/unittests_primitives.py               # verified-derivation primit
 pytest engine/unittests_do.py                       # do! endpoint (offline scripted agent)
 pytest engine/unittests_tactics.py                  # registry/CLI/skill-gating surface
 pytest engine/unittests_routes.py                   # strategy route records
+pytest engine/unittests_prewarm.py                  # context-preparation stage
 pytest engine/unittests_cell_input.py               # cell readings and rendered input
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test
 ```

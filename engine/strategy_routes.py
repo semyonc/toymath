@@ -695,15 +695,23 @@ def _stage_line(index, stage):
     return line
 
 
-def render(routes):
-    """The Markdown block appended to a matching run's initial instructions."""
+def render(routes, loaded=()):
+    """The Markdown block appended to a matching run's initial instructions.
+
+    `loaded` names subjects the run already carries, so the "load first" line
+    asks only for what is actually missing. Empty by default: with nothing
+    preloaded the rendered block is byte-for-byte the one this function has
+    always produced.
+    """
     routes = [route for route in routes if route]
     if not routes:
         return ''
+    present = frozenset(loaded or ())
     blocks = [_PREAMBLE.strip()]
     for route in routes:
         block = [f"### {route['id']}", f"Shape: {route['summary'].strip()}"]
-        skills = required_skills(route)
+        skills = [skill for skill in required_skills(route)
+                  if skill not in present]
         if skills:
             names = ', '.join(f'`{s}`' for s in skills)
             block.append(f'Load first with `load_skill`: {names} - the '

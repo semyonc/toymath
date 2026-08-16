@@ -26,6 +26,12 @@ from unittest import mock
 # exporter and an HTTP-mocked model transport.
 os.environ['TOYMATH_OBSERVABILITY'] = 'off'
 os.environ['OPENAI_AGENTS_DISABLE_TRACING'] = 'true'
+# The context-preparation stage is ON by default in production, and it makes
+# one model call of its own before the executor. A scripted turn list is a
+# transcript of the EXECUTOR, so leaving the stage on would feed each script's
+# first turn to the preparation call instead. Tests that exercise the stage
+# pass `prewarm=True` explicitly and script that turn themselves.
+os.environ['TOYMATH_PREWARM'] = 'off'
 
 import agent_config
 import agent_do

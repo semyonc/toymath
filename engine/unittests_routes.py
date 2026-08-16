@@ -12,12 +12,17 @@ import tempfile
 import unittest
 from unittest import mock
 
-import agent_do
-import cell_input
-import ledger as ledger_module
-import primitives
-import strategy_routes
-import tactic_registry
+# Route delivery is what this file measures, and the preparation stage would
+# add a second model call in front of every `_run` below. It is exercised in
+# its own suite; here the lexical matcher must be the only thing speaking.
+os.environ['TOYMATH_PREWARM'] = 'off'
+
+import agent_do                                                    # noqa: E402
+import cell_input                                                  # noqa: E402
+import ledger as ledger_module                                     # noqa: E402
+import primitives                                                  # noqa: E402
+import strategy_routes                                             # noqa: E402
+import tactic_registry                                             # noqa: E402
 
 FIXTURE = 'indefinite-reduction-boundary-v1'
 ROUTE = 'indefinite-reduction-with-boundary-term'
