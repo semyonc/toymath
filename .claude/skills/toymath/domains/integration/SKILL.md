@@ -36,7 +36,10 @@ chain that lets the cell accept your final value.
    After the u-space integral closes, map back with core `substitute`
    (u := the expression in x).
 3. Use `integrate_by_parts` for one proposed `u·dv` split. Continue from its
-   `remaining_integral` handle.
+   `remaining_integral` handle, then CLOSE the split with
+   `integrate_by_parts_close` once that remaining integral has a value —
+   see "Closing a by-parts chain" below. A by-parts step alone is never an
+   answer: its result still contains an unevaluated integral.
 4. For algebraic massage, propose the new integrand with
    `integrate_rewrite`; core equality must confirm it. For PARTIAL
    FRACTIONS, do not propose the finished decomposition — a rejected guess
@@ -50,6 +53,42 @@ chain that lets the cell accept your final value.
    `substitute` (C := 0), then call `integrate_assemble` citing the PINNED
    per-piece step ids (the C := 0 results), in the exact piece order the
    linearity step returned.
+
+## Closing a by-parts chain
+
+`integrate_by_parts` leaves `u v - \int v\,du`. Nothing downstream can use
+that as an answer while the `\int` is still in it — the cell will refuse
+your final value because no recorded step ever produced it. Every by-parts
+split you open must be closed by `integrate_by_parts_close`, citing the
+by-parts step and the step that established its remaining integral's value.
+
+Two splits nest, so close them INNERMOST FIRST:
+
+- `\int x^{2}e^{x}dx`: split with `u = x^2`, `dv = e^x` (leaves
+  `\int e^{x}2x\,dx`); split THAT with `u = 2x`, `dv = e^x` (leaves
+  `\int e^{x}2\,dx`); close the constant-multiple integral with the table
+  rule; then `integrate_by_parts_close` the SECOND split from that table
+  step, and `integrate_by_parts_close` the FIRST split from the fold you
+  just recorded. The last fold's result is the antiderivative of the
+  original integral, and it is the value to designate.
+
+Notes that save turns:
+
+- The value step does not have to spell the remaining integral the way
+  by-parts wrote it. Reaching it through `integrate_rewrite` (to reorder
+  `e^{x}2` into `2e^{x}`, say) is fine — the link is checked on the
+  integrands, not on the letters.
+- Do not pin the sub-chain's constant to zero first, and do not add your
+  own. Each fold absorbs the constant riding on the value it consumes and
+  emits exactly one, so a two-deep chain still ends with a single `+ C`.
+- Cite the value step, never a retyped value. A fold whose cited step
+  evaluates a different integral is refused on provenance even when the
+  arithmetic would have worked out.
+- A wrong sign or a wrong sub-integral value is refused with the integrand
+  it failed against; re-read that message rather than guessing again.
+- This closes INDEFINITE chains. Over a definite or improper interval use
+  `integrate_by_parts_definite`, which consumes the boundary limits and the
+  remaining integral's value in one move instead.
 
 ## Hyperbolic reciprocals
 

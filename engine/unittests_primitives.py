@@ -2367,6 +2367,93 @@ class TestIntegration(unittest.TestCase):
         r = Integration.integrate_by_parts('a \\sin x', 'x', 'a', '\\sin x')
         self.assertFalse(r['ok'])
 
+    # ---- closing an indefinite by-parts chain (the fold) ----
+
+    #: the canonical nested case: two by-parts splits (x^2 -> 2x -> done)
+    #: and therefore two folds, innermost first.
+    def _closed_x2_exp(self):
+        inner = self.ok(Integration.integrate_by_parts_close(
+            '\\int e^{x} 2x \\, d x', 'x', '2x', 'e^x', '2 e^{x} + C'))
+        outer = self.ok(Integration.integrate_by_parts_close(
+            '\\int x^2 e^x dx', 'x', 'x^2', 'e^x', inner['result']))
+        return inner, outer
+
+    def test_by_parts_close_folds_a_nested_chain(self):
+        inner, outer = self._closed_x2_exp()
+        self.assertEqual(inner['result'], '2x e^{x} - 2e^x + C')
+        # the fold is checked as an antiderivative in its own right, by the
+        # leg that shares no algebra with the symbolic construction
+        self.assertEqual(outer['check']['status'], 'agree')
+        self.assertIn('central-difference', outer['check']['method'])
+        self.assertEqual(
+            Core.equal_exprs(outer['result'],
+                             'x^2 e^x - 2x e^x + 2 e^x + C')['verdict'],
+            'yes')
+        # no unevaluated integral survives the fold
+        self.assertNotIn('\\int', outer['result'])
+
+    def test_by_parts_close_carries_exactly_one_constant(self):
+        # CONVENTION: the sub-chain's constant of integration is ABSORBED
+        # into the single fresh constant of the fold, so a two-deep chain
+        # ends with one `+ C` rather than one per closed sub-integral.
+        inner, outer = self._closed_x2_exp()
+        for rec in (inner, outer):
+            self.assertEqual(rec['absorbed_constant'], 'C')
+            self.assertEqual(rec['constant'], 'C')
+            self.assertEqual(rec['result'].count('C'), 1)
+
+    def test_by_parts_close_adds_a_constant_when_the_value_had_none(self):
+        r = self.ok(Integration.integrate_by_parts_close(
+            '\\int e^{x} 2x \\, d x', 'x', '2x', 'e^x', '2 e^{x}'))
+        self.assertIsNone(r['absorbed_constant'])
+        self.assertEqual(r['result'], '2x e^{x} - 2 e^{x} + C')
+
+    def test_by_parts_close_never_absorbs_a_genuine_parameter(self):
+        # `a` is free in the integrand, so a trailing `+ a` is part of the
+        # value, not a constant of integration - it stays, and the fold
+        # adds its own fresh constant beside it. (`a` really is constant in
+        # x, so the value is a legitimate antiderivative either way; what
+        # is being pinned is that the absorber never eats a parameter.)
+        r = self.ok(Integration.integrate_by_parts_close(
+            '\\int a x e^{x} \\, d x', 'x', 'ax', 'e^x', 'a e^{x} + a'))
+        self.assertIsNone(r['absorbed_constant'])
+        self.assertIn('a e^{x} + a', r['result'])
+        self.assertEqual(r['constant'], 'C')
+
+    def test_by_parts_close_refuses_a_planted_wrong_fold(self):
+        # THE POINT OF THE CHECK. A wrong sign and a wrong sub-integral
+        # value must both be refused; neither may reach the ledger.
+        for bad in ('-2 e^{x} + C',       # wrong sign
+                    '3 e^{x} + C',        # wrong coefficient
+                    'e^{x} + C',          # the sub-integral of e^x, not 2e^x
+                    '2 e^{2x} + C'):      # a different function entirely
+            r = Integration.integrate_by_parts_close(
+                '\\int e^{x} 2x \\, d x', 'x', '2x', 'e^x', bad)
+            self.assertFalse(r['ok'], bad)
+            self.assertIn('not an antiderivative', r['error'], bad)
+
+    def test_the_oracle_leg_alone_refuses_a_planted_wrong_fold(self):
+        # The symbolic gate above and the numeric leg are INDEPENDENT: the
+        # oracle refuses the same planted folds on its own, sharing no
+        # algebra with the construction that built them.
+        for bad in ('2x e^{x} + 2 e^{x} + C', '2x e^{x} - 3 e^{x} + C'):
+            check = Differentiation._derivative_check(bad, 'e^{x} 2x', 'x')
+            self.assertEqual(check['status'], 'disagree', bad)
+
+    def test_by_parts_close_refuses_an_unevaluated_value(self):
+        r = Integration.integrate_by_parts_close(
+            '\\int x^2 e^x dx', 'x', 'x^2', 'e^x',
+            '2x e^x - \\int 2 e^x dx')
+        self.assertFalse(r['ok'])
+        self.assertIn('unevaluated integral', r['error'])
+
+    def test_by_parts_close_inherits_the_split_refusals(self):
+        # the fold re-derives the split mechanically, so a split that
+        # integrate_by_parts would refuse cannot be folded either
+        r = Integration.integrate_by_parts_close(
+            'x \\sin x', 'x', 'x', '\\cos x', '1')
+        self.assertFalse(r['ok'])
+
     def test_fresh_constant_avoids_collision(self):
         r = self.ok(Integration.integrate_power_rule('C x', 'x'))
         self.assertEqual(r['constant'], 'K')

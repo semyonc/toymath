@@ -221,6 +221,101 @@ def _integrate_improper_from_steps(context, args):
     return result
 
 
+def _by_parts_remaining_link(pieces, var, recorded_input):
+    """Whether a cited value step is ABOUT this by-parts step's remaining
+    integral, as a message naming the mismatch or None.
+
+    Spelling identity alone is too strict to be the bridge: a live chain
+    reaches the value THROUGH `integrate_rewrite`, so the step that finally
+    evaluates the remainder records `\\int 2e^x dx` where by-parts wrote
+    `\\int e^{x} 2 \\, dx`.  The link is therefore mechanical equality of
+    the two INTEGRANDS over the same variable — never a bare comparison of
+    values, which would let any step of the right shape stand in."""
+    if _same_spelling(recorded_input, pieces['remaining']):
+        return None
+    try:
+        rsym, rnotation = primitives.parse_latex(recorded_input)
+        inner = primitives._strip_integral(rsym, rnotation, var)
+    except primitives.PrimitiveError as exc:
+        return f'cannot read the cited step input: {exc}'
+    if inner is None:
+        return ('the cited step must evaluate the remaining integral '
+                f'{pieces["remaining"]!r}, but its input is not an '
+                f'integral in {var!r}')
+    want = integration._integrand(pieces['remaining'], var)[2]
+    got = primitives.write_latex(inner, rnotation)
+    eq = core.equal_exprs(got, want)
+    if not (eq.get('ok') and eq.get('verdict') == 'yes'):
+        return (f'the cited step evaluates {recorded_input!r}, not the '
+                f'remaining integral {pieces["remaining"]!r} (integrand '
+                f'verdict: {eq.get("verdict", "error")})')
+    return None
+
+
+def _integrate_by_parts_close_from_steps(context, args):
+    steps = _steps(context)
+    if steps is None:
+        return _error('integrate_by_parts_close',
+                      'integrate_by_parts_close requires a session')
+    by_id = {step['id']: step for step in steps}
+    bp_id = args['by_parts_step']
+    by_parts = by_id.get(bp_id)
+    if by_parts is None:
+        return _error('integrate_by_parts_close',
+                      f'unknown transforming step {bp_id!r}')
+    if by_parts.get('op') != 'integrate_by_parts':
+        return _error(
+            'integrate_by_parts_close',
+            f'{bp_id!r} is {by_parts.get("op")!r}, not integrate_by_parts')
+    bargs = by_parts.get('args') or {}
+    var = bargs.get('var', '')
+    pieces = integration._by_parts_pieces(
+        by_parts.get('input') or '', var, bargs.get('u', ''),
+        bargs.get('dv', ''))
+    if isinstance(pieces, str):
+        return _error('integrate_by_parts_close', pieces)
+    rem_id = args['remaining_step']
+    remaining = by_id.get(rem_id)
+    if remaining is None or remaining.get('result') is None:
+        return _error('integrate_by_parts_close',
+                      f'unknown transforming step {rem_id!r}')
+    problem = _by_parts_remaining_link(pieces, var,
+                                       remaining.get('input') or '')
+    if problem is not None:
+        return _error('integrate_by_parts_close', problem)
+    result = integration.integrate_by_parts_close(
+        by_parts.get('input') or '', var, bargs.get('u', ''),
+        bargs.get('dv', ''), remaining['result'])
+    if result.get('ok'):
+        result['sources'] = {'by_parts': bp_id, 'remaining': rem_id}
+    return result
+
+
+def _validate_integrate_by_parts_close(step, seen):
+    sources = step.get('sources') or {}
+    args = step.get('args', {})
+    by_parts = seen.get(sources.get('by_parts'))
+    if by_parts is None or by_parts.get('op') != 'integrate_by_parts':
+        return 'missing by-parts provenance'
+    bargs = by_parts.get('args') or {}
+    if (by_parts.get('input') != args.get('expr')
+            or bargs.get('var') != args.get('var')
+            or bargs.get('u') != args.get('u')
+            or bargs.get('dv') != args.get('dv')):
+        return 'by-parts provenance mismatch'
+    pieces = integration._by_parts_pieces(
+        args.get('expr', ''), args.get('var', ''), args.get('u', ''),
+        args.get('dv', ''))
+    if isinstance(pieces, str):
+        return pieces
+    remaining = seen.get(sources.get('remaining'))
+    if (remaining is None
+            or remaining.get('result') != args.get('remaining')):
+        return 'remaining-value provenance mismatch'
+    return _by_parts_remaining_link(pieces, args.get('var', ''),
+                                    remaining.get('input') or '')
+
+
 def _integrate_by_parts_definite_from_steps(context, args):
     steps = _steps(context)
     if steps is None:
@@ -968,6 +1063,31 @@ TACTICS = (
                integration.integrate_by_parts,
                (E, V, _arg('u', 'U', 'chosen u'),
                 _arg('dv', 'DV', 'chosen dv'))),
+    TacticSpec(
+        'integrate_by_parts_close', 'integrate_by_parts_close',
+        'integration',
+        'close an indefinite by-parts split by folding in the recorded '
+        'value of its remaining integral (one constant of integration)',
+        integration.integrate_by_parts_close,
+        (E, V, _arg('u', 'U', 'chosen u'),
+         _arg('dv', 'DV', 'chosen dv'),
+         _arg('remaining', 'REMAINING',
+              'recorded value of the remaining integral')),
+        agent_arguments=(
+            _arg('by_parts_step', 'STEP',
+                 'integrate_by_parts ledger step id to close'),
+            _arg('remaining_step', 'STEP',
+                 'step id recording the value of that step\'s remaining '
+                 'integral')),
+        agent_handler=_integrate_by_parts_close_from_steps,
+        cli_arguments=(
+            _arg('by_parts_step', 'STEP',
+                 'integrate_by_parts ledger step id to close'),
+            _arg('remaining_step', 'STEP',
+                 'step id recording the value of that step\'s remaining '
+                 'integral')),
+        cli_handler=_integrate_by_parts_close_from_steps,
+        provenance_validator=_validate_integrate_by_parts_close),
     TacticSpec('integrate_substitute', 'integrate_substitute',
                'integration', 'apply a checked u-substitution',
                integration.integrate_substitute,

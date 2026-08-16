@@ -275,6 +275,91 @@ class TestTacticRegistry(unittest.TestCase):
         self.assertEqual(report['status'], 'failed')
         self.assertIn('remaining', report['reason'])
 
+    def _by_parts_chain_session(self):
+        """The live `\\int x^2 e^x dx` chain, up to the table hit."""
+        from ledger import Ledger
+        from tactics import integration
+
+        path = os.path.join(tempfile.mkdtemp(), 'byparts-close.json')
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_by_parts(
+            '\\int x^2 e^x dx', 'x', 'x^2', 'e^x'))
+        ledger.record(integration.integrate_by_parts(
+            '\\int e^{x} 2x \\, d x', 'x', '2x', 'e^x'))
+        ledger.record(integration.integrate_rewrite(
+            '\\int e^{x} 2 \\, d x', 'x', '2e^x'))
+        ledger.record(integration.integrate_table(
+            '\\int 2e^x \\, d x', 'x'))
+        ledger.save()
+        return path
+
+    def _run_cli(self, argv):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = toymath_cli.main(argv)
+        return code, json.loads(output.getvalue())
+
+    def test_cli_by_parts_close_folds_and_replays(self):
+        from ledger import Ledger
+
+        path = self._by_parts_chain_session()
+        # the inner split's value is reached THROUGH integrate_rewrite, so
+        # the cited step's input (`\int 2e^x dx`) is not the by-parts
+        # remaining integral's spelling (`\int e^{x} 2 dx`) - the link is
+        # mechanical integrand equality, which is the shape live runs take
+        code, rec = self._run_cli([
+            'integrate_by_parts_close', 's2', 's4', '--session', path])
+        self.assertEqual(code, 0)
+        self.assertTrue(rec['ok'], rec.get('error'))
+        self.assertEqual(rec['result'], '2x e^{x} - 2e^x + C')
+        self.assertEqual(rec['sources'],
+                         {'by_parts': 's2', 'remaining': 's4'})
+        self.assertEqual(rec['check']['status'], 'agree')
+        code, outer = self._run_cli([
+            'integrate_by_parts_close', 's1', 's5', '--session', path])
+        self.assertEqual(code, 0)
+        self.assertTrue(outer['ok'], outer.get('error'))
+        self.assertNotIn('\\int', outer['result'])
+        self.assertEqual(outer['absorbed_constant'], 'C')
+        saved = Ledger(path)
+        self.assertEqual(saved.replay()['status'], 'verified')
+        # provenance is load-bearing: repoint the fold at another step and
+        # replay must refuse it
+        saved.steps[-1]['sources']['remaining'] = 's4'
+        report = saved.replay()
+        self.assertEqual(report['status'], 'failed')
+        self.assertIn('remaining', report['reason'])
+
+    def test_cli_by_parts_close_requires_a_by_parts_step(self):
+        path = self._by_parts_chain_session()
+        code, rec = self._run_cli([
+            'integrate_by_parts_close', 's3', 's4', '--session', path])
+        self.assertEqual(code, 1)
+        self.assertFalse(rec['ok'])
+        self.assertIn('integrate_by_parts', rec['error'])
+
+    def test_cli_by_parts_close_refuses_an_unrelated_value_step(self):
+        from ledger import Ledger
+        from tactics import integration
+
+        path = self._by_parts_chain_session()
+        ledger = Ledger(path)
+        ledger.record(integration.integrate_table(
+            '\\int \\sin x \\, d x', 'x'))
+        ledger.save()
+        code, rec = self._run_cli([
+            'integrate_by_parts_close', 's2', 's5', '--session', path])
+        self.assertEqual(code, 1)
+        self.assertFalse(rec['ok'])
+        self.assertIn('remaining integral', rec['error'])
+
+    def test_by_parts_close_is_gated_behind_its_own_skill(self):
+        integration = tactic_skills.render('integration')
+        self.assertIn('integrate_by_parts_close STEP STEP', integration)
+        self.assertIn('fold', integration)
+        self.assertNotIn('integrate_by_parts_close',
+                         tactic_skills.render('limits'))
+
     def test_cli_integrate_reduction_certifies(self):
         output = io.StringIO()
         with redirect_stdout(output):

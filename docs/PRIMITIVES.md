@@ -461,6 +461,22 @@ writer, comparer, and replicator landmines.
   divergence, and a divergent integral has no finite limit step to
   cite in the first place. Interior singularities and doubly-infinite
   intervals still have no closing tactic.
+- An INDEFINITE by-parts chain terminates through
+  `integrate_by_parts_close`, which folds the recorded value of a
+  by-parts step's remaining integral back into that step: `u v - ∫v du`
+  becomes `u v - (that value)`. It cites two ledger steps — the
+  `integrate_by_parts` step being closed and the step establishing its
+  remainder — and re-derives the split from u and dv rather than reading
+  a recorded `u v` back. The link between them is mechanical equality of
+  the two integrands, not of their spellings, so a remainder reached
+  through `integrate_rewrite` still counts; the folded result is then
+  checked as an antiderivative of the original integrand in its own
+  right, by the same independent central-difference leg. Constants of
+  integration do not accumulate: each fold absorbs the one riding on the
+  value it consumes and emits exactly one, and a trailing symbol that is
+  free in the integrand is a parameter, never absorbed. Nested splits
+  close innermost first. Reduction-shaped results (a remaining integral
+  carrying a coefficient) have no fold yet.
 - Integration by parts extends over a definite or improper interval
   through `integrate_by_parts_definite`, assembled from recorded
   pieces: an antiderivative of dv (re-verified by differentiation),

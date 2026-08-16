@@ -1510,6 +1510,86 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertFalse(_chains_to_goal(
             res['steps'], res['final_provenance'].get('step'), '(x+1)^2'))
 
+    # ---- closing an indefinite by-parts chain end to end ----
+
+    #: the same live run as BY_PARTS_SELF_CHECK up to the table hit, then
+    #: the two folds it had no tactic for, innermost first: s5 closes the
+    #: inner split from the table value, s6 closes the outer split from s5.
+    BY_PARTS_CLOSED = BY_PARTS_SELF_CHECK[:5] + [
+        [tool_call('integrate_by_parts_close',
+                   {'by_parts_step': 's2', 'remaining_step': 's4'}, 'c5')],
+        [tool_call('integrate_by_parts_close',
+                   {'by_parts_step': 's1', 'remaining_step': 's5'}, 'c6')],
+        [tool_call('set_result',
+                   {'expr': 'x^2 e^x - 2x e^x + 2 e^x + C'}, 'c7')],
+        [message('The by-parts chain closes.')],
+    ]
+
+    def _closes(self, res):
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['integrate_by_parts', 'integrate_by_parts',
+                          'integrate_rewrite', 'integrate_table',
+                          'integrate_by_parts_close',
+                          'integrate_by_parts_close'])
+        self.assertEqual(res['final_result'],
+                         'x^2 e^x - 2x e^x + 2 e^x + C')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        self.assertEqual(res['final_provenance']['source'], 'ledger')
+        self.assertEqual(res['final_provenance']['step'], 's6')
+
+    def test_a_bare_by_parts_chain_now_closes(self):
+        # THE DEFECT THIS TACTIC FIXES: every step of this run verified
+        # before, but the assembled antiderivative was no step's result, so
+        # `set_result` was refused - "value is not mechanically equivalent
+        # to any result in the shared ledger". The folds make it one.
+        res = self._bare(r'compute \int x^2 e^x dx', self.BY_PARTS_CLOSED)
+        self._closes(res)
+
+    def test_a_commanded_by_parts_chain_closes_through_its_goal(self):
+        # the int! path: the same chain must also close the resolved
+        # chain_goal, which means the fold has to be ABOUT the original
+        # integral, not merely equal to its value.
+        ledger = Ledger()
+        res = run_instruction(
+            r'\int x^2 e^x dx', ledger=ledger,
+            model=ScriptedModel([list(t) for t in self.BY_PARTS_CLOSED]),
+            chain_goal=r'\int x^2 e^x dx')
+        self.assertTrue(res['ok'], res.get('error'))
+        self._closes(res)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_the_fold_does_not_reconnect_a_trailing_self_check(self):
+        # NO INTERACTION with the bare-run guard: a model that folds and
+        # THEN differentiates its answer back still ends on a step whose
+        # result is the integrand, and that step must not be designated.
+        # The fold's own result is parenthesized and carries `+ C`, so it
+        # does not chain-link to the retyped self-check input.
+        res = self._bare(
+            r'compute \int x^2 e^x dx',
+            self.BY_PARTS_CLOSED[:-2] + [self.BY_PARTS_SELF_CHECK[5],
+                                         self.BY_PARTS_SELF_CHECK[6],
+                                         [message('checked it back')]])
+        self.assertEqual(res['steps'][-1]['op'], 'differentiate')
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['method'],
+                         'last-step-disconnected')
+
+    def test_the_fold_refuses_a_step_about_a_different_integral(self):
+        # PROVENANCE, not arithmetic: citing a step that evaluates some
+        # other integral is refused even though its value is well formed.
+        res = self._bare(r'compute \int x^2 e^x dx',
+                         self.BY_PARTS_CLOSED[:4] + [
+            [tool_call('integrate_table',
+                       {'expr': r'\int \sin x \, d x', 'var': 'x'}, 'cx')],
+            [tool_call('integrate_by_parts_close',
+                       {'by_parts_step': 's2',
+                        'remaining_step': 's5'}, 'c5')],
+            [message('done')]])
+        self.assertEqual([s['op'] for s in res['steps']][-1],
+                         'integrate_table')
+        self.assertNotIn('integrate_by_parts_close',
+                         [s['op'] for s in res['steps']])
+
     def test_an_abandoned_marker_does_not_leak_into_later_runs(self):
         # live: one cell ended open with its branch marker still pending,
         # and every later cell in the notebook was refused for not

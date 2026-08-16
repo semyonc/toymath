@@ -5,7 +5,7 @@ import math
 from fractions import Fraction
 
 from notation import Notation, Symbol
-from value import IntegerValue, FracValue
+from value import Value, IntegerValue, FracValue
 from polyrat import (Poly, NotInFragment, to_ratfunc, poly_to_notation,
                      FUNCTION_NAMES as FUNC_NAMES)
 
@@ -675,29 +675,29 @@ def integrate_table(expr, var):
                                integrand_latex, body, var, assumptions)
 
 
-def integrate_by_parts(expr, var, u, dv):
-    """One application of integration by parts with the agent's choice of
-    u and dv: returns u v - \\int v du. Requires u * dv == integrand; the
-    remaining integral is left for the next step."""
-    args = {'expr': expr, 'var': var, 'u': u, 'dv': dv}
+def _by_parts_pieces(expr, var, u, dv):
+    """The mechanical content of one indefinite by-parts split.
+
+    Shared by ``integrate_by_parts``, by the fold that closes it, and by
+    that fold's replay validator, so no consumer has to trust — or
+    re-spell — a recorded ``u v`` / remaining-integral string.  Returns a
+    dict of pieces, or a plain string naming why the split is unavailable
+    (the caller wraps it in its own op's error record)."""
     try:
         sym, notation, integrand_latex = _integrand(expr, var)
         usym, unotation = parse_latex(u)
         dvsym, dvnotation = parse_latex(dv)
     except PrimitiveError as e:
-        return _error('integrate_by_parts', args, str(e))
+        return str(e)
     if var not in free_symbols(usym, unotation):
-        return _error('integrate_by_parts', args,
-                      f'u must depend on {var!r}')
+        return f'u must depend on {var!r}'
     eq = equal_exprs(f'{_paren(u)} {_paren(dv)}', integrand_latex)
     if not (eq.get('ok') and eq.get('verdict') == 'yes'):
-        return _error('integrate_by_parts', args,
-                      f'u * dv must equal the integrand '
-                      f'(verdict: {eq.get("verdict", "error")})')
+        return (f'u * dv must equal the integrand '
+                f'(verdict: {eq.get("verdict", "error")})')
     du_rec = differentiate(u, var)
     if not du_rec.get('ok'):
-        return _error('integrate_by_parts', args,
-                      f'cannot differentiate u: {du_rec.get("error")}')
+        return f'cannot differentiate u: {du_rec.get("error")}'
     assumptions = []
     try:
         v = _table_integrate(dvsym, dvnotation, var, assumptions)
@@ -708,33 +708,188 @@ def integrate_by_parts(expr, var, u, dv):
             v = _symbolic_power_integrate(dvsym, dvnotation, var,
                                           assumptions)
         except PrimitiveError:
-            return _error('integrate_by_parts', args,
-                          f'cannot integrate dv mechanically: {e}; '
-                          'choose a simpler dv')
+            return (f'cannot integrate dv mechanically: {e}; '
+                    'choose a simpler dv')
     du = du_rec['result']
     uv = _d_mul(_paren(u) if _is_sum_str(u) else u,
                 _paren(v) if _is_sum_str(v) or v.startswith('-') else v)
     inner = _d_mul(_paren(v) if _is_sum_str(v) or v.startswith('-') else v,
                    _paren(du) if _is_sum_str(du) or du.startswith('-')
                    else du)
-    result = f'{uv} - \\int {inner} \\, d {var}'
+    return {'integrand': integrand_latex,
+            'dv_integrand': write_latex(dvsym, dvnotation),
+            'u': u, 'dv': dv, 'v': v, 'du': du, 'uv': uv,
+            'remaining': f'\\int {inner} \\, d {var}',
+            'assumptions': assumptions, 'du_rec': du_rec}
+
+
+def integrate_by_parts(expr, var, u, dv):
+    """One application of integration by parts with the agent's choice of
+    u and dv: returns u v - \\int v du. Requires u * dv == integrand; the
+    remaining integral is left for the next step."""
+    args = {'expr': expr, 'var': var, 'u': u, 'dv': dv}
+    pieces = _by_parts_pieces(expr, var, u, dv)
+    if isinstance(pieces, str):
+        return _error('integrate_by_parts', args, pieces)
+    result = f'{pieces["uv"]} - {pieces["remaining"]}'
     try:
         parse_latex(result)
     except PrimitiveError as e:
         return _error('integrate_by_parts', args,
                       f'internal: unparseable result: {e}')
     rec = _result('integrate_by_parts', args, expr, result,
-                  assumptions=assumptions,
-                  extra={'u': u, 'du': du, 'v': v, 'dv': dv,
-                         'remaining_integral': f'\\int {inner} \\, d {var}'})
+                  assumptions=pieces['assumptions'],
+                  extra={'u': u, 'du': pieces['du'], 'v': pieces['v'],
+                         'dv': dv,
+                         'remaining_integral': pieces['remaining']})
     # the whole result contains an unevaluated integral, so verify the
     # pieces: v' == dv (central differences) and du (already self-checked);
     # the by-parts identity itself is mechanical
-    v_check = _derivative_check(v, write_latex(dvsym, dvnotation), var)
-    rec['check'] = _merge_checks(v_check,
-                                 du_rec.get('check', {'status': 'skipped'}))
+    v_check = _derivative_check(pieces['v'], pieces['dv_integrand'], var)
+    rec['check'] = _merge_checks(
+        v_check, pieces['du_rec'].get('check', {'status': 'skipped'}))
     if rec['check'].get('status') == 'agree':
         rec['check']['method'] = 'per-piece (v and du verified)'
+    return rec
+
+
+def _mentions_integral(sym, notation, seen=None):
+    """Whether an integral sign occurs anywhere in a parsed expression.
+
+    A fold may only consume a value that no longer holds an unevaluated
+    integral; without this the refusal would arrive from the derivative
+    check, which cannot say what the agent should do instead."""
+    if seen is None:
+        seen = set()
+    if sym is None or isinstance(sym, Value):
+        return False
+    if isinstance(sym, (list, tuple)):
+        return any(_mentions_integral(s, notation, seen) for s in sym)
+    if isinstance(sym, Symbol):
+        if sym.name == '\\int':
+            return True
+        if id(sym) in seen:
+            return False
+        seen.add(id(sym))
+    f = notation.get(sym)
+    if f is None:
+        return False
+    if isinstance(f.sym, Symbol) and f.sym.name == '\\int':
+        return True
+    return _mentions_integral(list(f.args), notation, seen)
+
+
+def _split_integration_constant(value, var, integrand):
+    """Split a recorded antiderivative into its body and the constant of
+    integration riding on it, so a fold carries exactly ONE constant
+    instead of accumulating one per closed sub-integral.
+
+    A trailing signed term counts as the constant only when it is a bare
+    plain symbol that is neither the integration variable nor free in the
+    integrand being closed — a genuine parameter is never absorbed.
+    Returns ``(body, absorbed_name_or_None)``."""
+    try:
+        sym, notation = parse_latex(value)
+        isym, inotation = parse_latex(integrand)
+    except PrimitiveError:
+        return value, None
+    keep = free_symbols(isym, inotation) | {var}
+    f = notation.getf(sym, Notation.S_LIST)
+    if f is None or len(f.args) < 2:
+        return value, None
+    last = f.args[-1]
+    signed = notation.vgetf(last, [Notation.PLUS, Notation.MINUS])
+    inner = signed.args[0] if signed is not None else last
+    if not (isinstance(inner, Symbol) and notation.get(inner) is None):
+        return value, None
+    if inner.name in keep or inner.name in Notation.styles:
+        return value, None
+    rest = tuple(f.args[:-1])
+    body_sym = rest[0] if len(rest) == 1 \
+        else notation.setf(Notation.S_LIST, rest)
+    body = write_latex(body_sym, notation)
+    try:
+        parse_latex(body)
+    except PrimitiveError:
+        return value, None
+    return body, inner.name
+
+
+def integrate_by_parts_close(expr, var, u, dv, remaining):
+    """Close one indefinite by-parts split by folding the recorded value
+    of its remaining integral back in: ``u v - \\int v du`` becomes
+    ``u v - (that value)``, carrying exactly one constant of integration.
+
+    This is the move that lets a by-parts CHAIN terminate. It re-derives
+    the split mechanically from u and dv rather than reading a recorded
+    ``u v`` back, and the folded result is checked as an antiderivative of
+    the original integrand in its own right."""
+    args = {'expr': expr, 'var': var, 'u': u, 'dv': dv,
+            'remaining': remaining}
+    pieces = _by_parts_pieces(expr, var, u, dv)
+    if isinstance(pieces, str):
+        return _error('integrate_by_parts_close', args, pieces)
+    if not isinstance(remaining, str) or not remaining.strip():
+        return _error('integrate_by_parts_close', args,
+                      'the remaining integral has no recorded value')
+    try:
+        rsym, rnotation = parse_latex(remaining)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts_close', args,
+                      f'the recorded value is malformed: {e}')
+    if _mentions_integral(rsym, rnotation):
+        return _error(
+            'integrate_by_parts_close', args,
+            f'the recorded value of {pieces["remaining"]!r} still holds an '
+            'unevaluated integral; close that integral first, then fold')
+    body, absorbed = _split_integration_constant(remaining, var,
+                                                 pieces['integrand'])
+    if _is_sum_str(body) or body.lstrip().startswith('-'):
+        body = _paren(body)
+    assembled = f'{pieces["uv"]} - {body}'
+    try:
+        asym, anotation = parse_latex(assembled)
+        const = _fresh_constant(free_symbols(asym, anotation) | {var})
+        result = f'{assembled} + {const}'
+        parse_latex(result)
+    except PrimitiveError as e:
+        return _error('integrate_by_parts_close', args,
+                      f'internal: unparseable fold: {e}')
+
+    # Symbolic gate, mirroring integrate_assemble: a wrong recorded value
+    # (or a wrong sign) must be refused HERE, with the arithmetic named,
+    # rather than admitted with a disagreeing check.
+    derivative = differentiate(result, var)
+    if not derivative.get('ok'):
+        return _error('integrate_by_parts_close', args,
+                      'cannot differentiate the folded result: '
+                      + derivative.get('error', 'unknown error'))
+    if (derivative.get('check') or {}).get('status') == 'disagree':
+        return _error('integrate_by_parts_close', args,
+                      'internal: the derivative of the folded result failed '
+                      'its own numeric spot-check; the engine, not the fold, '
+                      'is suspect')
+    equality = equal_exprs(derivative['result'], pieces['integrand'])
+    if not (equality.get('ok') and equality.get('verdict') == 'yes'):
+        return _error(
+            'integrate_by_parts_close', args,
+            f'the folded result is not an antiderivative of '
+            f'{pieces["integrand"]!r} — check the recorded value of '
+            f'{pieces["remaining"]!r} (verdict: '
+            f'{equality.get("verdict", "error")})')
+
+    rec = _result('integrate_by_parts_close', args, expr, result,
+                  assumptions=pieces['assumptions'],
+                  extra={'u': u, 'du': pieces['du'], 'v': pieces['v'],
+                         'dv': dv,
+                         'remaining_integral': pieces['remaining'],
+                         'remaining_value': remaining,
+                         'constant': const,
+                         'absorbed_constant': absorbed})
+    rec['check'] = _derivative_check(result, pieces['integrand'], var)
+    if rec['check'].get('status') == 'agree':
+        rec['check']['method'] = (
+            'central-difference on the folded antiderivative')
     return rec
 
 
