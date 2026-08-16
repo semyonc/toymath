@@ -1219,6 +1219,46 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertEqual([p['input'] for p in res['premises']],
                          ['A = \\frac{1}{2}'])
 
+    ISOLATION_TARGET = '2A x^2 + 2B x + 2C = 4x^2 + 10'
+
+    def _isolation_run(self, row):
+        """The shipped route's shape: match the system, isolate one unknown.
+
+        `expand` refuses a C_LIST and `apply` divides EVERY row by the same
+        thing, so isolating one unknown forces the agent to RETYPE a row the
+        previous step just produced and the oracle just checked.
+        """
+        script = [
+            [tool_call('load_skill', {'skill': 'equations'}, 'sk1')],
+            [tool_call('match_coefficients',
+                       {'expr': self.ISOLATION_TARGET, 'var': 'x'}, 'c1')],
+            [tool_call('apply', {'equation': row, 'op': '/', 'arg': '2'},
+                       'c2')],
+            [message('isolated')],
+        ]
+        res = run_instruction('solve for A', model=ScriptedModel(script))
+        self.assertTrue(res['ok'], res.get('error'))
+        return res
+
+    def test_a_retyped_system_row_is_labelled_not_counted(self):
+        # the run payload must carry the distinction, or the reader counts
+        # the engine's own bookkeeping as an assertion
+        res = self._isolation_run('2A = 4')
+        self.assertEqual(
+            [(p['input'], p.get('derived_from')) for p in res['premises']],
+            [('2A = 4', 's1')])
+
+    def test_a_fabricated_row_is_still_reported_as_stated(self):
+        # THE DISCRIMINATOR, same shape as above: a fabricated row records
+        # IDENTICALLY to a correct one - every step 'agree' - but is not a
+        # member of any checked result, so it must keep counting against the
+        # boundary. Over-discharging here would hide the one thing the
+        # premise boundary exists to expose.
+        res = self._isolation_run('2A = 5')
+        self.assertEqual(
+            [(p['input'], p.get('derived_from')) for p in res['premises']],
+            [('2A = 5', None)])
+
     def test_premises_are_scoped_to_the_run_not_the_shared_ledger(self):
         ledger = Ledger()
         run_instruction('expand it', ledger=ledger, model=ScriptedModel(

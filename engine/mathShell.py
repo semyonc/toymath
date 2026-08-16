@@ -946,14 +946,29 @@ class MathShell(object):
         if not res.get('premises'):
             return
         import primitives
-        stated = ', '.join(
-            f'\\({primitives.display_latex(p["input"])}\\)'
-            for p in res['premises'])
-        count = len(res['premises'])
-        display(HTML(
-            f'<div style="color:#888">rests on {count} stated '
-            f'premise{"s" if count != 1 else ""}, not derived here: '
-            f'{stated}</div>'))
+        import ledger as ledger_mod
+        # a retyped row of a system this run itself produced and checked is
+        # the engine's own bookkeeping, not an assertion — it is shown on its
+        # own line rather than inflating the count the reader trusts
+        stated_premises, part_premises = ledger_mod.split_premises(
+            res['premises'])
+        if stated_premises:
+            stated = ', '.join(
+                f'\\({primitives.display_latex(p["input"])}\\)'
+                for p in stated_premises)
+            count = len(stated_premises)
+            display(HTML(
+                f'<div style="color:#888">rests on {count} stated '
+                f'premise{"s" if count != 1 else ""}, not derived here: '
+                f'{stated}</div>'))
+        if part_premises:
+            parts = ', '.join(
+                f'\\({primitives.display_latex(p["input"])}\\) '
+                f'(part of {p["derived_from"]})'
+                for p in part_premises)
+            display(HTML(
+                f'<div style="color:#888">retyped from checked results: '
+                f'{parts}</div>'))
 
     def _show_assumptions(self, assumptions):
         # alternative case hypotheses are listed apart: they hold one

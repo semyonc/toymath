@@ -1987,6 +1987,144 @@ class TestLedgerPremises(unittest.TestCase):
         self.assertEqual(ledger.premises(), [])
 
 
+class TestStructuralPremiseDischarge(unittest.TestCase):
+    r"""A retyped part of a CHECKED result is not an assertion.
+
+    A correct run manufactures its own premises: `expand` refuses a C_LIST
+    and `apply` divides every row by the same thing, so isolating one unknown
+    forces the agent to retype each row of the system the previous step just
+    produced. Those rows then reported as "stated premises" — the engine's
+    own bookkeeping presented as the boundary of what it checked.
+
+    The failure direction that matters here is OVER-discharge: relabeling a
+    genuine assertion as derived hides the one thing the premise boundary
+    exists to expose. Every test below that fixes a relation as NOT
+    discharging is guarding that direction, not documenting a limitation.
+    """
+
+    TARGET = '2A x^2 + 2B x + 2C = 4x^2 + 10'
+
+    def _isolation(self, rows):
+        """The shipped route's live shape: match, then isolate per unknown."""
+        ledger = Ledger()
+        ledger.record(Equations.match_coefficients(self.TARGET, 'x'))
+        for row in rows:
+            applied = ledger.record(Core.apply_both_sides(row, '/', '2'))
+            ledger.record(Core.expand(applied['result']))
+        return ledger
+
+    def test_the_system_rows_a_checked_step_produced_are_not_premises(self):
+        ledger = self._isolation(['2A = 4', '2B = 0', '2C = 10'])
+        self.assertEqual(ledger.steps[0]['result'], '2A = 4, 2B = 0, 2C = 10')
+        self.assertEqual(ledger.steps[0]['check']['status'], 'agree')
+        premises = ledger.premises()
+        # the problem statement is the only thing this run actually stated
+        stated, parts = ledger_module.split_premises(premises)
+        self.assertEqual([p['input'] for p in stated], [self.TARGET])
+        self.assertEqual([(p['input'], p['derived_from']) for p in parts],
+                         [('2A = 4', 's1'), ('2B = 0', 's1'),
+                          ('2C = 10', 's1')])
+
+    def test_a_fabricated_row_stays_a_premise(self):
+        # THE DISCRIMINATOR. A correct row and a fabricated one record
+        # IDENTICALLY today - same premise count, every step 'agree', one
+        # answer wrong - yet one IS a conjunct of a recorded result and the
+        # other is not, which is decidable with no oracle at all.
+        ledger = self._isolation(['2A = 5', '2B = 0', '2C = 10'])
+        stated, parts = ledger_module.split_premises(ledger.premises())
+        self.assertEqual([p['input'] for p in stated],
+                         [self.TARGET, '2A = 5'])
+        self.assertEqual([p['input'] for p in parts], ['2B = 0', '2C = 10'])
+
+    def test_the_two_shapes_are_reported_differently(self):
+        # the point of the round: the reported boundary must stop counting
+        # the engine's own artifacts, while still showing them
+        honest = self._isolation(['2A = 4', '2B = 0', '2C = 10'])
+        markdown = honest.render_markdown()
+        self.assertIn('Rests on 1 stated premise,', markdown)
+        self.assertNotIn('Rests on 4 stated premises', markdown)
+        # visible, relabeled - never silently dropped
+        self.assertIn('Retyped from checked results', markdown)
+        self.assertIn('part of `s1`', markdown)
+        self.assertIn('retyped from checked results: ', honest.render())
+        fabricated = self._isolation(['2A = 5', '2B = 0', '2C = 10'])
+        self.assertIn('Rests on 2 stated premises',
+                      fabricated.render_markdown())
+
+    def test_an_unchecked_step_discharges_nothing(self):
+        # a sub-object of a step whose own check never agreed is not
+        # evidence of anything
+        ledger = Ledger()
+        ledger.record({'ok': True, 'op': 'expand', 'input': 'stated',
+                       'result': '2A = 4, 2B = 0',
+                       'check': {'status': 'unknown'}})
+        ledger.record(Core.apply_both_sides('2A = 4', '/', '2'))
+        _, parts = ledger_module.split_premises(ledger.premises())
+        self.assertEqual(parts, [])
+
+    @staticmethod
+    def _recorded(ledger, result, status='agree', input_latex='stated',
+                  **extra):
+        """Record a step directly.
+
+        `cases_assemble` and `system_assemble` both refuse to record without
+        their session-side provenance, so the shapes below are pinned by
+        calling the real tactic for its spelling and recording that.
+        """
+        step = {'ok': True, 'op': 'expand', 'input': input_latex,
+                'result': result, 'check': {'status': status}}
+        step.update(extra)
+        return ledger.record(step)
+
+    def test_a_conjunct_of_a_checked_conjunction_is_not_a_premise(self):
+        # cases_assemble's bounded answer is a real \land result
+        assembled = Equations.cases_assemble(
+            r'x^2 \lt 1', r'-1 \lt x \lt 1', [r'x \lt 1'], [r'x \gt -1'])
+        self.assertEqual(assembled['result'], r'-1 \lt x \land x \lt 1')
+        ledger = Ledger()
+        self._recorded(ledger, assembled['result'])
+        ledger.record(Core.apply_both_sides(r'-1 \lt x', '+', '1'))
+        _, parts = ledger_module.split_premises(ledger.premises())
+        self.assertEqual([(p['input'], p['derived_from']) for p in parts],
+                         [(r'-1 \lt x', 's1')])
+
+    def test_only_conjunctive_containers_discharge(self):
+        # OVER-DISCHARGE GUARD for the relations left deliberately unbuilt.
+        # A checked sum does not make one term a fact; a set or a tuple is
+        # one object, and pulling a component out would let any premise
+        # spelled like it discharge against any pair in the ledger. A comma
+        # list of non-relations is an enumeration, not a system.
+        for result, member in ((r'x^{2}+3x+1', '3x'),
+                               (r'\{(-1,2),(1,-2)\}', '(-1,2)'),
+                               ('(1,-2)', '1'),
+                               ('1, 2, 3', '2'),
+                               (r'x = 1 \lor x = -1', 'x = 1')):
+            ledger = Ledger()
+            self._recorded(ledger, result)
+            self._recorded(ledger, 'consumed', input_latex=member)
+            _, parts = ledger_module.split_premises(ledger.premises())
+            self.assertEqual(parts, [], f'{member} discharged against '
+                                        f'{result}')
+
+    def test_provenance_ids_never_discharge_a_stated_target(self):
+        # `_validate_conclusion` accepts `previous['id'] in _source_ids(...)`
+        # for a DIFFERENT question (are these steps a connected chain).
+        # Answering the premise question the same way would relabel exactly
+        # the wrong input: system_assemble's `input` is the STATED target
+        # while its sources are the value steps, so a hand-typed identity -
+        # the boundary failure this seam exists to expose - would read as
+        # derived.
+        assemble = Equations.system_assemble(
+            ANSATZ, [r'A = \frac{1}{2}', r'B = -\frac{1}{2}'])
+        self.assertEqual(assemble['input'], ANSATZ)
+        ledger = Ledger()
+        first = self._recorded(ledger, r'A = \frac{1}{2}')
+        self._recorded(ledger, assemble['result'], input_latex=ANSATZ,
+                       sources={'assignments': [first['id']]})
+        stated, _ = ledger_module.split_premises(ledger.premises())
+        self.assertIn(ANSATZ, [p['input'] for p in stated])
+
+
 class TestParsingEdges(unittest.TestCase):
     def test_cdot_chain(self):
         r = Core.expand('2 \\cdot x \\cdot (x+1)')

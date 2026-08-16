@@ -408,7 +408,14 @@ writer, comparer, and replicator landmines.
   `derived-from-premise` shape and stays conditional on it. A run's own
   premise report covers only the steps that run recorded — a run that
   recorded no result-bearing step stated nothing, rather than inheriting
-  every earlier cell's givens from the shared ledger. A designated
+  every earlier cell's givens from the shared ledger. An input the session
+  itself already produced is not counted as an assertion: when a step's input
+  is a structural member of an earlier *checked* result — a row of a comma
+  system, a conjunct of a `\land` conjunction — it is reported as retyped
+  from that step rather than as a stated premise. That relabelling is
+  provenance, decided from the notation alone with no oracle and no value
+  equality, so a fabricated row that merely *resembles* a checked one still
+  counts against the boundary. It is listed, never hidden. A designated
   result that records no claim currently gets no equivalent marking, and a
   premise containing free variables cannot be refuted by evaluation. Prefer a
   derivation whose premises are the problem statement alone.

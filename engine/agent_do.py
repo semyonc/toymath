@@ -1127,8 +1127,12 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     Returns {ok, status, steps, assumptions, premises, final_result,
     final_provenance, branch_topology, abandoned_paths, figures,
     figure_error, summary[, error]}.
-    `premises` are the inputs this run stated rather than derived — the
-    boundary of what it checked.
+    `premises` are the inputs no recorded step of this run produced — the
+    boundary of what it checked. An entry carrying `derived_from` is NOT a
+    stated premise: it is a structural member (a system row, a conjunct) of
+    the named earlier step's CHECKED result, retyped only because the
+    per-unknown tactics cannot consume a whole system. Presentation must
+    count the two apart and drop neither (`ledger.split_premises`).
     `steps` are the ledger steps this run added; `final_result` is the
     cell's chainable value. Successful figures are returned as run-local
     illustration records and also reach the optional
@@ -1293,8 +1297,9 @@ def finalize_session(session, outcome, max_turns=None):
         final_assumptions = topology['spine_assumptions']
     else:
         final_assumptions = list(session.ledger.assumptions)
-    # premises this run STATED rather than derived: the boundary of what it
-    # checked. Restricted to steps this run recorded, so a shared notebook
+    # the boundary of what this run checked: inputs no recorded step produced,
+    # each already labelled by the ledger as stated or as a retyped part of an
+    # earlier checked result. Restricted to steps this run recorded, so a shared notebook
     # ledger does not re-attribute an earlier cell's givens to this one.
     run_ids = [s['id'] for s in steps if s.get('result') is not None]
     spine = [sid for sid in topology['spine'] if sid in set(run_ids)]

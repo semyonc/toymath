@@ -250,6 +250,121 @@ def _recorded_parts(step):
     return parts
 
 
+#: Container relations whose members a recorded result ASSERTS individually.
+#: Both are conjunctive by the parser's own typing, which is what makes the
+#: discharge below sound: a C_LIST of relations is the project's "comma
+#: system" (`tactics/core.py:_relation_system_items`), and an A_LIST is a
+#: `\land` conjunction — the shape chained comparisons desugar to (gen 70).
+#: Disjunction is a DIFFERENT node (`O_LIST`), so no alternative-bearing list
+#: can reach this path.
+_ASSERTED_MEMBER_CONTAINERS = ('C_LIST', 'A_LIST')
+
+
+def _structural_members(expr):
+    r"""Members a recorded result asserts individually, by notation shape.
+
+    A step whose result is `A = 2, B = 0, C = 5` asserted each row; a later
+    step consuming one row continued from recorded work even though no whole
+    result equals its input. That relation is decidable from the DAG alone —
+    no oracle, no value equality — which is why it can discharge a premise
+    without touching the trust machinery.
+
+    ONLY the two conjunctive containers qualify, and the scope is deliberate:
+
+    - **C_LIST of relations** — the measured live need. `expand` refuses a
+      C_LIST outright and `apply` divides every row by the same thing, so
+      per-unknown isolation MUST retype each row of a system the previous
+      step just produced and the oracle just checked. Non-relation comma
+      lists are excluded: a bare `1, 2, 3` asserts no member as a statement.
+    - **A_LIST** — a conjunction asserts each conjunct.
+
+    Deliberately NOT members, each for its own reason:
+
+    - **S_LIST term** — a checked sum says nothing that makes one term a
+      fact in its own right, and the member spelling carries the operator's
+      sign (`+3x`), so the relation is not even clean.
+    - **COLLECTION member / PAIR component** — a set or a tuple is one
+      object; pulling `1` out of a recorded pair would let any premise
+      spelled `1` discharge against any pair in the ledger.
+    - **O_LIST** — an alternative is precisely what is NOT asserted.
+
+    Returns [] for anything unparseable: a relation this cannot read is not
+    a relation it may discharge on.
+    """
+    import primitives
+    from notation import Notation
+    try:
+        sym, notation = primitives.parse_latex(expr)
+    except Exception:
+        return []
+    for name in _ASSERTED_MEMBER_CONTAINERS:
+        container = notation.getf(sym, getattr(Notation, name))
+        if container is None or len(container.args) < 2:
+            continue
+        if name == 'C_LIST' and not all(
+                notation.getf(item, Notation.COMP) is not None
+                for item in container.args):
+            # a comma system is a C_LIST of RELATIONS; anything else is a
+            # plain enumeration and asserts none of its items
+            continue
+        try:
+            return [primitives.write_latex(item, notation)
+                    for item in container.args]
+        except Exception:
+            return []
+    return []
+
+
+def _derived_part_source(step, earlier):
+    """Id of the earlier CHECKED step that already asserted this step's input
+    as a structural member of its own result, else ``None``.
+
+    This is PROVENANCE, not proof. It exists because a correct run
+    manufactures its own premises: the shipped route's six-step shape reports
+    one artifact premise per unknown, each a row of a system an earlier step
+    produced and the oracle checked, and a reader told the answer "rests on 3
+    stated premises" is being shown the engine's own bookkeeping as if it
+    were an unchecked assumption.
+
+    Two guards keep this out of the over-discharge direction, which is the
+    only dangerous one — relabeling a GENUINE assertion as derived hides
+    exactly what the premise boundary exists to expose:
+
+    1. The producing step's own check must have `agree`d or been `exact`.
+       A sub-object of an unchecked step is not evidence of anything.
+    2. Membership uses the same structural tolerance as `_recorded_parts`
+       above (`_chain_links`) — no value equality and no oracle, so a
+       FABRICATED row (`2A = 5` where the checked system says `2A = 4`)
+       stays a premise, which is the whole point.
+    """
+    current = step.get('input')
+    if current is None:
+        return None
+    for previous in earlier:
+        if (previous.get('check') or {}).get('status') not in ('agree',
+                                                               'exact'):
+            continue
+        result = previous.get('result')
+        if result is None:
+            continue
+        for member in _structural_members(result):
+            if member == current or _chain_links(member, current):
+                return previous.get('id')
+    return None
+
+
+def split_premises(premises):
+    """(stated, derived_as_part) split of a `premises()` listing.
+
+    Presentation must report the two differently but must never DROP the
+    second: recount comparability and "record, don't prove" both need the
+    reader to still see where the checking starts.
+    """
+    stated = [p for p in premises if not p.get('derived_from')]
+    derived = [p for p in premises if p.get('derived_from')]
+    return stated, derived
+
+
 def _is_derived(step, earlier):
     """True when a step's input came from recorded work, not from typing.
 
@@ -257,6 +372,14 @@ def _is_derived(step, earlier):
     is not an error — a derivation has to start somewhere, and a stated
     given is legitimate — but it is the boundary of what the session
     checked, so presentation must be able to name it.
+
+    NOTE what this deliberately does NOT consult: `sources`. `_validate_conclusion`
+    asks a different question with the same ids — are these steps a connected
+    chain — and answering THIS question from provenance ids would discharge
+    exactly the wrong input. `system_assemble`'s `input` is the STATED target
+    and its sources are the value steps, so a sources-aware reading would
+    relabel a hand-typed identity as derived: that identity, asserted with a
+    sign error, is the boundary failure this whole seam exists to expose.
     """
     current = step.get('input')
     if current is None:
@@ -1085,8 +1208,15 @@ class Ledger(object):
         A derivation must start somewhere, so a premise is not a fault — but
         it is exactly where the checking stops, and a reader who cannot see
         the premises cannot tell a derivation from a restatement. Returns
-        `[{step, input}]`, deduplicated by expression: the same given used
-        twice was stated once.
+        `[{step, input[, derived_from]}]`, deduplicated by expression: the
+        same given used twice was stated once.
+
+        An entry carrying `derived_from` is NOT a stated premise: its input
+        is a structural member of the named earlier step's checked result —
+        a row of a system this session produced, retyped because the tactics
+        that isolate one unknown cannot consume the whole system. It is
+        listed rather than dropped so the boundary stays readable, but it is
+        the engine's own artifact and must not be counted as an assertion.
         """
         wanted = None if step_ids is None else set(step_ids)
         premises = []
@@ -1101,7 +1231,14 @@ class Ledger(object):
                    or _all_bracket_normal_form_equal(seen['input'], current)
                    for seen in premises):
                 continue
-            premises.append({'step': step['id'], 'input': current})
+            entry = {'step': step['id'], 'input': current}
+            # `earlier` only grows, so a premise dischargeable at its first
+            # occurrence stays dischargeable later: keeping the first
+            # occurrence can only under-discharge, never over-discharge.
+            source = _derived_part_source(step, self.steps[:index])
+            if source is not None:
+                entry['derived_from'] = source
+            premises.append(entry)
         return premises
 
     def presentation_topology(self, final_provenance=None, marker_ids=None):
@@ -1322,15 +1459,26 @@ class Ledger(object):
 
         final_premises = (topology['spine_premises'] if topology['spine']
                           else self.premises())
-        if final_premises:
+        stated_premises, part_premises = split_premises(final_premises)
+        if stated_premises:
             # where the checking starts. A reader who cannot see this cannot
             # tell a derivation from a restatement of its own answer.
             stated = ', '.join(f'${_display_latex(p["input"])}$'
-                               for p in final_premises)
+                               for p in stated_premises)
             lines.append(
-                f'*Rests on {len(final_premises)} stated premise'
-                f'{"s" if len(final_premises) != 1 else ""}, not derived '
+                f'*Rests on {len(stated_premises)} stated premise'
+                f'{"s" if len(stated_premises) != 1 else ""}, not derived '
                 f'here: {stated}.*')
+            lines.append('')
+        if part_premises:
+            # listed apart, never dropped: these ARE checked, so counting
+            # them as assertions overstates the boundary — but hiding them
+            # would remove the reader's view of where the checking starts.
+            parts = ', '.join(
+                f'${_display_latex(p["input"])}$ (part of `{p["derived_from"]}`)'
+                for p in part_premises)
+            lines.append(
+                f'*Retyped from checked results, not stated: {parts}.*')
             lines.append('')
 
         final_assumptions = (topology['spine_assumptions']
@@ -1552,9 +1700,15 @@ class Ledger(object):
                 lines.append(f"      assumes {a['text']}")
         visible_premises = (topology['spine_premises'] if topology['spine']
                             else self.premises())
-        if visible_premises:
+        visible_stated, visible_parts = split_premises(visible_premises)
+        if visible_stated:
             lines.append('premises (stated, not derived here): '
-                         + '; '.join(p['input'] for p in visible_premises))
+                         + '; '.join(p['input'] for p in visible_stated))
+        if visible_parts:
+            lines.append('retyped from checked results: '
+                         + '; '.join(f'{p["input"]} (part of '
+                                     f'{p["derived_from"]})'
+                                     for p in visible_parts))
         visible_assumptions = (topology['spine_assumptions']
                                if topology['spine'] else self.assumptions)
         if visible_assumptions:
