@@ -1362,6 +1362,154 @@ class TestScriptedAgent(unittest.TestCase):
         self.assertNotIn('awaiting a continuing step', md)
         self.assertEqual(ledger.replay()['status'], 'verified')
 
+    # ---- a bare cell's implicit goal, consulted by the FALLBACK only ----
+
+    #: the live shape: two by-parts splits, a rewrite, a table hit, and the
+    #: model's own differentiate self-check LAST. `load_skill` first, or
+    #: `require_loaded` refuses every tactic and the run records no step at
+    #: all - a different signature that proves nothing about this guard.
+    BY_PARTS_SELF_CHECK = [
+        [tool_call('load_skill', {'skill': 'integration'}, 'c0')],
+        [tool_call('integrate_by_parts',
+                   {'expr': r'\int x^2 e^x dx', 'var': 'x', 'u': 'x^2',
+                    'dv': 'e^x'}, 'c1')],
+        [tool_call('integrate_by_parts',
+                   {'expr': r'\int e^{x} 2x \, d x', 'var': 'x', 'u': '2x',
+                    'dv': 'e^x'}, 'c2')],
+        [tool_call('integrate_rewrite',
+                   {'expr': r'\int e^{x} 2 \, d x', 'var': 'x',
+                    'new_integrand': '2e^x'}, 'c3')],
+        [tool_call('integrate_table',
+                   {'expr': r'\int 2e^x \, d x', 'var': 'x'}, 'c4')],
+        [tool_call('load_skill', {'skill': 'differentiation'}, 'c5')],
+        [tool_call('diff', {'expr': r'x^2 e^{x} - 2x e^{x} + 2e^{x}',
+                            'var': 'x'}, 'c6')],
+        [message('Checked it by differentiating the antiderivative back.')],
+    ]
+
+    def _bare(self, instruction, script, **kw):
+        ledger = Ledger()
+        res = run_instruction(instruction, ledger=ledger,
+                              model=ScriptedModel([list(t) for t in script]),
+                              **kw)
+        self.assertTrue(res['ok'], res.get('error'))
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        return res
+
+    def test_bare_run_fallback_refuses_the_self_check_as_the_answer(self):
+        # THE DEFECT (live n=2, offline reproduction): the model verifies its
+        # own antiderivative by differentiating it, that self-check is the
+        # last transforming step, and the fallback handed the cell
+        # `x^{2}{e}^x` - the INTEGRAND - as the value of the integral,
+        # labelled `status: verified, method: last-step`, replay verified.
+        # The question returned as its own answer. It comes out of GOOD
+        # practice, so it is likelier than the shape this item opened with.
+        res = self._bare(r'compute \int x^2 e^x dx', self.BY_PARTS_SELF_CHECK)
+        self.assertEqual([s['op'] for s in res['steps']],
+                         ['integrate_by_parts', 'integrate_by_parts',
+                          'integrate_rewrite', 'integrate_table',
+                          'differentiate'])
+        self.assertIsNone(res['final_result'])
+        prov = res['final_provenance']
+        # the SAME outcome shape a committed command already produces - no
+        # new category - with the compared expression named
+        self.assertEqual(prov['method'], 'last-step-disconnected')
+        self.assertEqual(prov['status'], 'unverified')
+        self.assertEqual(prov['step'], 's5')
+        self.assertEqual(prov['implicit_goal'], r'\int x^{2}e^xdx')
+        # the checked work is still there; only the designation is gone
+        self.assertEqual(res['steps'][-1]['result'], 'x^{2}{e}^x')
+
+    def test_bare_fallback_still_fires_when_the_last_step_chains(self):
+        # CONTROL: the run ends on a transformed form of the cell's own
+        # formula, so the fallback designates exactly as it did before.
+        res = self._bare('expand (x+1)^2', [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [message('done')]])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance'], {
+            'status': 'verified', 'source': 'ledger',
+            'step': 's1', 'method': 'last-step'})
+
+    def test_zero_and_multi_formula_bare_cells_keep_todays_behaviour(self):
+        # Precision over recall: no implicit goal is read out of a cell that
+        # names no formula, or several, so those cells are exactly as
+        # permissive as they were.
+        for instruction in ('explore this',
+                            'relate (x+1)^2 and (y+1)^2',
+                            'draw an example of the commutative diagram'):
+            res = self._bare(instruction, [
+                [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+                [message('done')]])
+            self.assertEqual(res['final_result'], 'x^{2}+2x+1', instruction)
+            self.assertEqual(res['final_provenance']['method'], 'last-step',
+                             instruction)
+
+    def test_an_uncorroborated_implicit_goal_guards_nothing(self):
+        # The extractor GUESSES fragment boundaries, so a wrong guess must
+        # cost nothing. Measured on this repository's own notebooks: an
+        # unreadable `aligned` block yields the stray side condition
+        # `n \gt 1` as the cell's only formula. No step of the run chains to
+        # it, so there is no evidence it is the ask - and the fallback is
+        # left alone rather than refused over a boundary error.
+        res = self._bare('expand (y+1)^2', [
+            [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+            [message('done')]])
+        self.assertEqual(res['final_result'], 'x^{2}+2x+1')
+        self.assertEqual(res['final_provenance']['method'], 'last-step')
+
+    def test_explicit_set_result_on_a_bare_run_stays_unguarded(self):
+        # The guard is scoped to the harness's GUESS. An explicit set_result
+        # is the model affirmatively designating during free-form
+        # exploration, which bare do! exists to allow.
+        res = self._bare(
+            r'compute \int x^2 e^x dx',
+            self.BY_PARTS_SELF_CHECK[:-1]
+            + [[tool_call('set_result', {'expr': 'x^{2}{e}^x'}, 'c7')],
+               [message('designated')]])
+        self.assertEqual(res['final_result'], 'x^{2}{e}^x')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+
+    def test_a_concluded_claim_endpoint_is_admitted_off_the_goal_chain(self):
+        # PINNING TEST for the hazard this guard had to route around:
+        # `_reaches_chain_goal` carries TWO short-circuits that look like one
+        # - `chain_goal is None`, and a concluded claim supplying its own
+        # closure evidence. The claim leg is live only here, at set_result
+        # admission in prove! mode with a chain_goal also set, and is
+        # structurally dead at the fallback (that provenance is built with
+        # `source: 'ledger'`). A bare-run guard written INTO that predicate
+        # would move this leg too. The endpoint below does not chain to the
+        # chain_goal and must still be admitted.
+        goal = r'\lim_{n \to \infty} \frac{n}{2^n} = 0'
+        start = r'\lim_{n \to \infty} \frac{n}{2^n}'
+        transformed = (r'\lim_{n \to \infty} \frac{1}'
+                       r'{({2}^n) \ln\left (2 \right )}')
+        ledger = Ledger()
+        res = run_instruction(
+            'prove the limit', ledger=ledger, proof_goal=goal,
+            chain_goal='(x+1)^2',          # deliberately unrelated
+            model=ScriptedModel([
+                [tool_call('load_skill', {'skill': 'limits'}, 'sk1')],
+                [tool_call('limit_lhopital', {'expr': start}, 'c1')],
+                [tool_call('limit_table', {'expr': transformed}, 'c2')],
+                [tool_call('conclude', {'claim_id': 'c1',
+                                        'step_ids': ['s1', 's2']}, 'c3')],
+                [tool_call('set_result', {'expr': goal}, 'c4')],
+                [message("Mechanically checked via l'Hopital.")],
+            ]))
+        self.assertTrue(res['ok'], res.get('error'))
+        # admitted on the claim's own closure evidence, and the endpoint it
+        # designates is the concluded value
+        self.assertEqual(res['final_provenance']['source'], 'claim')
+        self.assertEqual(res['final_result'], '0')
+        self.assertEqual(ledger.replay()['status'], 'verified')
+        # the pinning itself: that endpoint genuinely does NOT chain to the
+        # chain_goal, so it is the claim short-circuit - and nothing else -
+        # that admitted it
+        from expr_commands import _chains_to_goal
+        self.assertFalse(_chains_to_goal(
+            res['steps'], res['final_provenance'].get('step'), '(x+1)^2'))
+
     def test_an_abandoned_marker_does_not_leak_into_later_runs(self):
         # live: one cell ended open with its branch marker still pending,
         # and every later cell in the notebook was refused for not
@@ -5057,6 +5205,27 @@ class TestMathShellDo(unittest.TestCase):
         # the final result is chainable from later cells
         self.assertIn('2', self.shell.resolve_backrefs('[[2]]'))
         self.assertEqual(len(self.shell.ledger.steps), 2)
+
+    def test_refused_bare_fallback_names_the_outcome_in_the_cell(self):
+        # The guard must not fail silently: a cell that designates nothing
+        # has to SAY it designated nothing, and say what it compared
+        # against. Reuses the goal-disconnected rendering a committed
+        # command already produces rather than inventing an outcome.
+        with mock.patch.object(
+                openrouter_backend, 'build_model',
+                lambda model_name=None: ScriptedModel(
+                    [list(turn) for turn in
+                     TestScriptedAgent.BY_PARTS_SELF_CHECK])):
+            self.shell.exec(r'do! compute \int x^2 e^x dx', 4,
+                            add_to_history=True)
+        out = self._html()
+        self.assertIn('no goal-connected result', out)
+        self.assertIn('the expression this cell asked about', out)
+        # the checked steps are still shown - only the answer is withheld
+        self.assertIn('s5#', out)
+        # and nothing chainable was published for later cells
+        with self.assertRaises(ValueError):
+            self.shell.resolve_backrefs('[[4]]')
 
     def test_codex_plot_is_rendered_once_on_the_kernel_thread(self):
         import engine

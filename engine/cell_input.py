@@ -378,6 +378,25 @@ def formula_spans(text, bare_seeds=True):
     return spans
 
 
+def sole_formula(text, bare_seeds=True):
+    """The one formula in `text`, or None when it holds zero or several.
+
+    Answers a deliberately narrow question for a bare `do!` cell: is there
+    exactly ONE thing here that could be the ask? Zero formulas and several
+    formulas both give None, because the scan guesses fragment boundaries
+    and nothing downstream could pick between two candidates anyway.
+
+    A caller must treat the answer as a HINT about the instruction, never as
+    a statement of what the run is required to establish: `formula_spans`
+    can mis-split (`I_n=\\int...` comes back as `n=\\int...`) and can pick a
+    trailing side condition out of an environment it cannot read (`n \\gt 1`
+    out of an `aligned` block). Both shapes were measured on the repository's
+    own notebooks.
+    """
+    spans = formula_spans(text, bare_seeds)
+    return spans[0][2] if len(spans) == 1 else None
+
+
 def _prose_text(segments, text):
     """Append prose, keeping any result reference in it as a reference."""
     if not text:

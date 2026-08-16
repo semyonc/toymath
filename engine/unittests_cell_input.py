@@ -245,6 +245,34 @@ class TestProseSegmentation(unittest.TestCase):
                          'prove \\begin{aligned} a &= b \\end{aligned} if '
                          '[n \\gt 1]')
 
+    def test_sole_formula_reads_one_formula_or_nothing(self):
+        # The narrow question a bare `do!` cell's fallback asks. Zero and
+        # several both give None: the scan guesses fragment boundaries, and
+        # nothing downstream could choose between two candidates anyway.
+        self.assertEqual(cell_input.sole_formula(r'compute \int x^2 e^x dx'),
+                         r'\int x^{2}e^xdx')
+        self.assertEqual(cell_input.sole_formula('expand (x+1)^2'),
+                         '(x+1)^{2}')
+        self.assertIsNone(cell_input.sole_formula('explore this'))
+        self.assertIsNone(cell_input.sole_formula(
+            'draw an example of the commutative diagram'))
+        self.assertIsNone(cell_input.sole_formula(
+            'relate (x+1)^2 and (y+1)^2'))
+
+    def test_sole_formula_can_be_wrong_and_says_so_only_by_being_a_hint(self):
+        # BOTH shapes measured on this repository's own notebooks, and both
+        # are why a caller must corroborate the answer rather than trust it:
+        # an `aligned` block the parser cannot read leaves only its trailing
+        # side condition, and a subscripted name is mis-split.
+        self.assertEqual(
+            cell_input.sole_formula(
+                'prove \\begin{aligned} a &= b \\end{aligned} if n > 1'),
+            'n \\gt 1')
+        self.assertEqual(
+            cell_input.sole_formula(
+                r'eval I_n=\int_0^{+\infty} \frac{d x}{x^{n+1}}'),
+            'n= \\int_{0}^{+ \\infty}\\frac {dx} {x^{n+1}}')
+
     def test_a_long_prompt_stays_fast(self):
         # the backtracking retries parses; a pathological prompt must not
         # turn a keystroke-free render into a visible pause

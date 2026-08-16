@@ -25,6 +25,7 @@ import re
 import threading
 
 import agent_config
+import cell_input
 import context_prewarm
 import observability
 import primitives
@@ -283,6 +284,10 @@ class DoSession(object):
         self.open_selection = None
         self.current_goal = None
         self.chain_goal = None
+        #: a bare cell's one formula, when it has exactly one. Read ONLY by
+        #: the last-step fallback, never by designation or by any tactic: it
+        #: is a hint about the instruction, not a requirement on the run.
+        self.implicit_goal = None
         self.proof_claim_id = None
         self.claim_start = len(self.ledger.claims)
         self.loaded_skills = {'core'}
@@ -640,6 +645,14 @@ def _reaches_chain_goal(session, provenance, steps=None):
     concluded claim supplies its own closure evidence.  Every other
     value-producing command must carry an unbroken checked chain from the
     expression the user supplied.
+
+    SHARED BY TWO CALL SITES with different provenance shapes: `set_result`
+    admission, where the claim leg is live (prove! mode with a chain_goal
+    also set), and the last-step fallback, where it is structurally dead
+    (that provenance is built with ``source: 'ledger'``).  A bare run's
+    guard is deliberately NOT expressed here — see `_reaches_implicit_goal`,
+    which the fallback consults on its own.  Widening this predicate would
+    move the claim leg too.
     """
     if session.chain_goal is None or provenance.get('source') == 'claim':
         return True
@@ -647,6 +660,51 @@ def _reaches_chain_goal(session, provenance, steps=None):
     return _chains_to_goal(
         session.new_steps() if steps is None else steps,
         provenance.get('step'), session.chain_goal)
+
+
+_BARE_DISCONNECTED = (
+    'the last checked step is not connected to %s, the expression this cell '
+    'asked about; it is checked work about something else — designate a step '
+    'that continues the derivation, or record an open outcome')
+
+
+def _reaches_implicit_goal(session, steps, step_id):
+    """Whether a BARE run's fallback step answers the cell's own formula.
+
+    A committed command supplies a `chain_goal` and its fallback must close
+    it.  A bare `do!` cell supplies no goal, so the harness has been free to
+    hand back whichever step happened to be last — and that guess is what
+    presented the INTEGRAND `x^2 e^x` as the value of `\\int x^2 e^x dx`,
+    labelled verified, because the model's last move was to check its own
+    work by differentiating (measured; the same run under a committed
+    command was already refused as disconnected).
+
+    Applies to the FALLBACK only.  An explicit `set_result` on a bare run is
+    the model affirmatively designating during free-form exploration and
+    stays unguarded; this is the harness guessing, and only the guess needs
+    a reason to believe its answer is about the question.
+
+    Two conditions, and the second is what makes the first safe to use:
+
+    1.  The instruction holds exactly ONE formula (`cell_input.sole_formula`).
+        Zero or several, and there is no implicit goal.
+    2.  Some step of this run CORROBORATES that formula by chaining to it.
+        The extractor guesses fragment boundaries, so a wrong guess must
+        cost nothing: an uncorroborated goal is treated as no goal, leaving
+        today's behaviour.  Measured on this repository's own notebooks —
+        the stray `n \\gt 1` picked out of an unreadable `aligned` block is
+        corroborated by nothing, and a chain rooted at one SIDE of a
+        `show that A = B` cell does not cover the equation either, so both
+        keep the fallback they have today rather than losing it to a
+        boundary error.
+    """
+    if session.chain_goal is not None or session.implicit_goal is None:
+        return True
+    from expr_commands import _chains_to_goal
+    goal = session.implicit_goal
+    if not any(_chains_to_goal(steps, s['id'], goal) for s in steps):
+        return True                     # no evidence the goal is the real ask
+    return _chains_to_goal(steps, step_id, goal)
 
 
 def _with_figure_id(reply, delivery, replaces):
@@ -1189,6 +1247,17 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
                               on_plot=on_plot, plot_backend=plot_backend,
                               tikz_backend=tikz_backend,
                               proof_goal=proof_goal, chain_goal=chain_goal)
+    if chain_goal is None:
+        # A bare cell states no goal, so the fallback has nothing to check
+        # its guess against. Read the cell's own formula, when it has exactly
+        # one, purely so the fallback can ask whether its value is about the
+        # question. Never a requirement on the run: it gates no tactic, no
+        # designation and no replay, and a run whose steps do not corroborate
+        # it is left exactly as permissive as before.
+        try:
+            session.implicit_goal = cell_input.sole_formula(instruction)
+        except Exception:
+            session.implicit_goal = None
     budget = budget if budget is not None else AgentBudget()
     cancellation = CancellationToken()
     backend = resolve_backend(backend=backend, model=model,
@@ -1349,6 +1418,19 @@ def _designated_result(session, steps):
                 'step': last_transform['id'],
                 'method': 'last-step-disconnected',
                 'reason': _DISCONNECTED_RESULT,
+            }
+        if not _reaches_implicit_goal(session, steps, last_transform['id']):
+            # Same refusal for a bare cell whose one formula the run itself
+            # worked on: the guess that "last" means "the answer" has been
+            # contradicted by the run's own chaining.  Deliberately the same
+            # outcome shape as above — no new outcome category — with the
+            # compared expression named so the reason is checkable.
+            return None, {
+                'status': 'unverified', 'source': 'ledger',
+                'step': last_transform['id'],
+                'method': 'last-step-disconnected',
+                'implicit_goal': session.implicit_goal,
+                'reason': _BARE_DISCONNECTED % session.implicit_goal,
             }
         return last_transform['result'], provenance
     return None, None
