@@ -31,6 +31,7 @@ Two layers coexist:
 | `engine/tactic_registry.py` | Single allowlist/schema for tactic invocation, CLI generation, replay dispatch, provenance validation, and skill ownership |
 | `engine/tactic_skills.py` | Discovery and progressive rendering of committed domain skills |
 | `engine/strategy_routes.py`, `engine/strategy_routes.yaml` | Strategy route records: one schema-validated record per known problem shape, a hybrid shape matcher, and the conditional renderer that appends a matching route to a run's initial developer instructions |
+| `engine/stop_nudge.py` | The stop-reason nudge: lexical retrieval of the delivered route stage that answers a `set_open` reason, guarded by the refusal witness, and the advisory reply that quotes it |
 | `engine/context_prewarm.py` | The preparation stage: one tool-less model call selects the run's skills and route record from a library manifest before the executor starts; strict closed-set parser, union with the lexical match, fail-open fallback |
 | `engine/polyrat.py` | Canonical core for the rational fragment: sparse `Poly`, `RatFunc` with cancellation, `to_ratfunc`/`ratfunc_to_notation` |
 | `engine/ledger.py` | Step ledger: JSON persistence, assumption accumulation, replay verification |
@@ -124,6 +125,43 @@ Two layers coexist:
   (`required_stage_reach`, surfaced as `strategy_route_stages`) — never a
   gate: refusing a designation because a required stage went unreached would
   make a heuristic over instruction TEXT into authority over the ledger.
+- The **stop-reason nudge** (`engine/stop_nudge.py`) is the delivered route's
+  second and last moment of contact: when a run calls `set_open`, its stated
+  reason is matched lexically against the stages of the routes THAT RUN was
+  delivered, and on a hit the tool reply carries one advisory note quoting the
+  addressing stage verbatim (through `strategy_routes.stage_line`, so the quote
+  cannot drift from the block the run was given). Three live runs stopped at
+  6–8 green calls claiming no elimination move existed while the delivered
+  `isolate-assignments` stage refuted exactly that in the same prompt — a
+  premature open is an ATTENTION failure, not an information failure, so the
+  note is aimed at the one sentence where the model's attention is provably on
+  the blocker. **STEERING, NEVER AUTHORITY, and the ordering is what enforces
+  it**: the open outcome is committed by the ordinary path BEFORE the note is
+  composed, at most one note is issued per run, a second `set_open` is accepted
+  as a confirmation, and `set_result` superseding an earlier `set_open` is
+  behaviour this engine already had and tested. Nothing enters the ledger, the
+  oracle or replay; what fired is run metadata (`stop_nudge`) beside
+  `strategy_routes`. LANDMINE, measured and counter-intuitive: **the TEXT does
+  not separate the classes.** The two highest-scoring stop reasons on record
+  are both cases that must not be nudged — an honest open that recites the
+  route, and a FORCED open by a run that reached the correct answer and had
+  two tactics refuse it — and both outscore every real positive, so any
+  threshold admitting the positives admits them. What separates the forced
+  ones is the REFUSAL WITNESS: a refused move or refused `set_result` with no recorded step after
+  it. Positional on purpose — one recorded premature open had four refusals it
+  recovered from, with eleven green calls after the last, so "any refusal in
+  the run" would be the wrong rule. Three further guards, each with its own
+  hard negative in `unittests_nudge.py`: a stage the run already REACHED is
+  never quoted (its hard negative is a reason that RECITES the route, which
+  scores higher than two of the three positives), a CONTROL stage is never
+  quoted (`designate` would steer a model that just declined to designate
+  toward `set_result` — the one direction that could manufacture a wrong
+  answer), and a stage whose tactics record no ledger step is never quoted
+  (reach is then undecidable, which is what recitation exploits). The corpus is
+  the deliverable: verbatim recorded reasons plus authored negatives, each with
+  its `why`, and the verdict is identical for any threshold in 3.0–6.5 —
+  a round that finds itself tuning that number is being told the corpus
+  changed.
 - The **context-preparation stage** (`engine/context_prewarm.py`) runs one
   model call — same backend, same model — before the executor on agent cells
   (`do!` and committed agent commands; plain math cells never reach it). It
@@ -255,6 +293,7 @@ pytest engine/unittests_primitives.py               # verified-derivation primit
 pytest engine/unittests_do.py                       # do! endpoint (offline scripted agent)
 pytest engine/unittests_tactics.py                  # registry/CLI/skill-gating surface
 pytest engine/unittests_routes.py                   # strategy route records
+pytest engine/unittests_nudge.py                    # stop-reason nudge
 pytest engine/unittests_prewarm.py                  # context-preparation stage
 pytest engine/unittests_cell_input.py               # cell readings and rendered input
 TOYMATH_LIVE_TESTS=1 pytest engine/unittests_do.py  # + live OpenRouter test

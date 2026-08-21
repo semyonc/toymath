@@ -38,6 +38,7 @@ import agent_do
 import mathShell
 import observability
 import plot_sandbox
+import strategy_routes
 import tactic_registry
 from tactics import core as core_tactics
 from tactics import integration as integration_tactics
@@ -2031,6 +2032,195 @@ class TestScriptedAgent(unittest.TestCase):
             ledger=ledger)
         self.assertEqual(len(ledger.steps), 3)
         self.assertEqual(len(res['steps']), 1)  # only this run's slice
+
+
+#: a committed positive fixture of the reduction record: the lexical matcher
+#: fires on it, so a run of it is handed the route in its initial
+#: instructions - which is the only thing the nudge may quote from.
+ROUTED_INSTRUCTION = (
+    r'prove \int \frac{dx}{(1+x^2)^n} = \frac{A x}{(1+x^2)^{n-1}} + '
+    r'B \int \frac{dx}{(1+x^2)^{n-1}} + C \int \frac{dx}{(1+x^2)^{n-2}} '
+    r'for n > 2. Find A, B and C')
+
+#: verbatim from a recorded live run that stopped after 8 green calls with
+#: the refuting route stage in its own prompt
+PREMATURE_REASON = (
+    'The derivative and coefficient system were checked, but the available '
+    'tactics lack a certified row-extraction/elimination move to isolate '
+    '$A$, $B$, and $C$ from the coupled system.')
+
+
+class TestStopReasonNudge(unittest.TestCase):
+    """One advisory reply when a stop reason names a blocker the delivered
+    route already answers.
+
+    The whole surface is a tool RESULT: the open outcome is recorded first,
+    by the ordinary path, and nothing here may bar it. These tests pin that
+    boundary from both sides - a nudged run still ends open unless the model
+    itself designates, and a run an engine refusal stopped is never nudged
+    at all.
+    """
+
+    def _routed_session(self):
+        session = DoSession()
+        session.delivered_routes = strategy_routes.load()
+        return session, make_api(session)
+
+    def test_the_reply_quotes_the_delivered_stage_verbatim(self):
+        session, api = self._routed_session()
+        json.loads(api['rewrite_as']('(x+1)^2', 'x^2+2x+1'))
+        reply = json.loads(api['set_open'](PREMATURE_REASON))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(reply['outcome'], 'open')
+        line = next(line for line
+                    in strategy_routes.render(session.delivered_routes)
+                    .splitlines() if '**isolate-assignments**' in line)
+        self.assertIn(line, reply['nudge'])
+        # the outcome is recorded whatever the nudge says
+        self.assertEqual(session.open_selection['id'], reply['selection'])
+        self.assertEqual(session.ledger.selections[-1]['provenance']['reason'],
+                         PREMATURE_REASON)
+
+    def test_confirming_the_stop_is_accepted_and_records_nothing_new(self):
+        session, api = self._routed_session()
+        json.loads(api['rewrite_as']('(x+1)^2', 'x^2+2x+1'))
+        first = json.loads(api['set_open'](PREMATURE_REASON))
+        self.assertIn('nudge', first)
+        again = json.loads(api['set_open'](
+            'Confirmed: the isolation stage does not apply here.'))
+        self.assertTrue(again['ok'])
+        self.assertTrue(again['confirmed'])
+        self.assertNotIn('nudge', again)        # exactly one per run
+        self.assertEqual(again['selection'], first['selection'])
+        self.assertEqual([s['id'] for s in session.ledger.selections], ['r1'])
+        self.assertEqual(session.nudge_metadata()['response'], 'confirmed')
+        self.assertEqual(session.ledger.replay()['status'], 'verified')
+
+    def test_an_unnudged_second_open_is_still_refused(self):
+        # the acceptance above is scoped to the question the nudge asked;
+        # with no nudge the long-standing refusal is unchanged
+        session = DoSession()
+        api = make_api(session)
+        json.loads(api['expand']('(x+1)^2'))
+        self.assertTrue(json.loads(api['set_open']('stalled'))['ok'])
+        again = json.loads(api['set_open']('still stalled'))
+        self.assertFalse(again['ok'])
+        self.assertIn('already recorded', again['error'])
+
+    def test_only_one_nudge_per_run(self):
+        session, _ = self._routed_session()
+        self.assertTrue(session.consider_stop_nudge(PREMATURE_REASON))
+        self.assertEqual(session.consider_stop_nudge(PREMATURE_REASON), '')
+        self.assertEqual(session.nudge_suppressed, 'already-nudged')
+
+    def test_a_premature_open_is_nudged_and_still_ends_open(self):
+        ledger = Ledger()
+        res = run_instruction(
+            ROUTED_INSTRUCTION, ledger=ledger, prewarm=False,
+            model=ScriptedModel([
+                [tool_call('rewrite_as', {'expr': '(x+1)^2',
+                                          'new_expr': 'x^2+2x+1'}, 'c1')],
+                [tool_call('set_open', {'reason': PREMATURE_REASON}, 'c2')],
+                [message('Left open.')]]))
+        self.assertTrue(res['strategy_routes'], 'the fixture must match')
+        nudge = res['stop_nudge']
+        self.assertTrue(nudge['fired'])
+        self.assertEqual(nudge['stage'], 'isolate-assignments')
+        self.assertEqual(nudge['route'],
+                         'indefinite-reduction-with-boundary-term')
+        self.assertIsNone(nudge['suppressed'])
+        self.assertEqual(nudge['response'], 'none')
+        # STEERING, NEVER AUTHORITY: the outcome is exactly what it was
+        self.assertIsNone(res['final_result'])
+        self.assertEqual(res['final_provenance']['status'], 'open')
+        self.assertEqual(res['final_provenance']['reason'], PREMATURE_REASON)
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_nudged_run_that_continues_designates_normally(self):
+        ledger = Ledger()
+        res = run_instruction(
+            ROUTED_INSTRUCTION, ledger=ledger, prewarm=False,
+            model=ScriptedModel([
+                [tool_call('rewrite_as', {'expr': '(x+1)^2',
+                                          'new_expr': 'x^2+2x+1'}, 'c1')],
+                [tool_call('set_open', {'reason': PREMATURE_REASON}, 'c2')],
+                [tool_call('expand', {'expr': '(y+1)^2'}, 'c3')],
+                [tool_call('set_result', {'expr': 'y^{2}+2y+1'}, 'c4')],
+                [message('Closed after all.')]]))
+        self.assertEqual(res['stop_nudge']['response'], 'designated')
+        self.assertEqual(res['final_result'], 'y^{2}+2y+1')
+        self.assertEqual(res['final_provenance']['status'], 'verified')
+        # the superseding path is the one this engine already had: the open
+        # selection stays recorded and the result selection follows it
+        self.assertEqual([s['id'] for s in ledger.selections], ['r1', 'r2'])
+        self.assertEqual(ledger.replay()['status'], 'verified')
+
+    def test_a_forced_open_is_never_nudged(self):
+        # an engine refusal stands between the work and the stop: pressing
+        # such a run to continue is pure harm, and the words of a forced
+        # reason are the words of a premature one
+        res = run_instruction(
+            ROUTED_INSTRUCTION, prewarm=False,
+            model=ScriptedModel([
+                [tool_call('rewrite_as', {'expr': '(x+1)^2',
+                                          'new_expr': 'x^2+2x+1'}, 'c1')],
+                [tool_call('expand', {'expr': 'x=1,y=2'}, 'c2')],
+                [tool_call('set_open', {'reason': PREMATURE_REASON}, 'c3')],
+                [message('Left open.')]]))
+        self.assertTrue(res['strategy_routes'])
+        self.assertFalse(res['stop_nudge']['fired'])
+        self.assertEqual(res['stop_nudge']['suppressed'],
+                         'refusal-in-the-way')
+
+    def test_a_refusal_the_run_recovered_from_is_not_in_the_way(self):
+        # measured on a real premature open: four refusals, all recovered
+        # from, eleven green calls after the last one
+        session, api = self._routed_session()
+        json.loads(api['expand']('x=1,y=2'))            # refused
+        self.assertTrue(session.refusal_in_the_way())
+        json.loads(api['rewrite_as']('(x+1)^2', 'x^2+2x+1'))
+        self.assertFalse(session.refusal_in_the_way())
+
+    def test_a_refused_designation_is_a_refusal_in_the_way(self):
+        session, api = self._routed_session()
+        json.loads(api['rewrite_as']('(x+1)^2', 'x^2+2x+1'))
+        refused = json.loads(api['set_result']('\\sin x + 42'))
+        self.assertFalse(refused['ok'])
+        self.assertTrue(session.refusal_in_the_way())
+        self.assertNotIn('nudge', json.loads(api['set_open'](
+            PREMATURE_REASON)))
+        self.assertEqual(session.nudge_suppressed, 'refusal-in-the-way')
+
+    def test_an_unrouted_run_is_never_nudged(self):
+        res = run_instruction(
+            'expand it', prewarm=False,
+            model=ScriptedModel([
+                [tool_call('expand', {'expr': '(x+1)^2'}, 'c1')],
+                [tool_call('set_open', {'reason': PREMATURE_REASON}, 'c2')],
+                [message('Left open.')]]))
+        self.assertEqual(res['strategy_routes'], [])
+        self.assertFalse(res['stop_nudge']['fired'])
+        self.assertEqual(res['stop_nudge']['suppressed'], 'no-route')
+
+    def test_a_run_that_never_stopped_open_reports_no_nudge(self):
+        res = run_instruction('solve', model=ScriptedModel(SOLVE_SCRIPT),
+                              prewarm=False)
+        self.assertEqual(res['stop_nudge'],
+                         {'fired': False, 'suppressed': None})
+
+    def test_a_reason_no_stage_answers_is_not_nudged(self):
+        res = run_instruction(
+            ROUTED_INSTRUCTION, prewarm=False,
+            model=ScriptedModel([
+                [tool_call('rewrite_as', {'expr': '(x+1)^2',
+                                          'new_expr': 'x^2+2x+1'}, 'c1')],
+                [tool_call('set_open', {'reason': (
+                    'The task asks for a numerical plot of the coefficients '
+                    'against $n$, and no figure backend is configured.')},
+                    'c2')],
+                [message('Left open.')]]))
+        self.assertFalse(res['stop_nudge']['fired'])
+        self.assertEqual(res['stop_nudge']['suppressed'], 'no-match')
 
 
 class TestCanonicalToolBindings(unittest.TestCase):
@@ -4201,6 +4391,47 @@ class TestRunCancellation(unittest.TestCase):
     def _tactic(self, request, expr):
         return json.loads(request.dispatcher.dispatch(
             'run_tactic', {'tactic': 'expand', 'arguments': [expr]}))
+
+    def test_stop_after_a_nudge_still_ends_cleanly_with_its_reason(self):
+        # the nudge invites a decision the model may never get to make. The
+        # open outcome was committed under the session lock before the reply
+        # was written, so Stop can only end the run - never half-write it.
+        ledger = Ledger()
+        replies = []
+
+        def run(request, handle):
+            # `rewrite_as`, not `expand`: `expand` is one of the isolation
+            # stage's own tactics, so running it marks that stage reached
+            # and the nudge correctly has nothing to offer
+            request.dispatcher.dispatch(
+                'run_tactic', {'tactic': 'rewrite_as',
+                               'arguments': ['(x+1)^2', 'x^2+2x+1']})
+            replies.append(json.loads(request.dispatcher.dispatch(
+                'set_open', {'reason': PREMATURE_REASON})))
+            _thread.interrupt_main()
+            handle.stopped.wait(5)
+            return agent_base.AgentOutcome(final_text='never shown')
+
+        backend = self._backend(run)
+        with mock.patch.object(agent_do, 'resolve_backend',
+                               lambda **kwargs: backend):
+            try:
+                res = run_instruction(ROUTED_INSTRUCTION, ledger=ledger,
+                                      prewarm=False, grace_period=0.5)
+            except KeyboardInterrupt:  # pragma: no cover - bridge failure
+                self.fail('the interrupt escaped run_instruction')
+        self.assertIn('nudge', replies[0])
+        self.assertFalse(res['ok'])
+        self.assertEqual(res['status'], 'interrupted')
+        self.assertIsNone(res['final_result'])
+        self.assertIsNone(res['partial_result'])
+        # the reason survives where it was recorded, and the metadata says
+        # what the nudge did before the cell died
+        self.assertEqual(ledger.selections[-1]['provenance']['reason'],
+                         PREMATURE_REASON)
+        self.assertTrue(res['stop_nudge']['fired'])
+        self.assertEqual(res['stop_nudge']['response'], 'none')
+        self.assertEqual(ledger.replay()['status'], 'verified')
 
     def test_interrupted_run_keeps_its_steps_and_chains_nothing(self):
         ledger = Ledger()

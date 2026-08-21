@@ -59,7 +59,7 @@ from notation import Notation
 
 __all__ = ['StrategyRouteError', 'FEATURES', 'CONTROLS', 'ROUTES_PATH',
            'load', 'features', 'match', 'render', 'validate', 'fixtures',
-           'required_stage_reach']
+           'required_stage_reach', 'stage_line']
 
 ROUTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'strategy_routes.yaml')
@@ -668,7 +668,14 @@ def required_stage_reach(routes, ops):
     return report
 
 
-def _stage_line(index, stage):
+def stage_line(index, stage):
+    """One rendered stage line, exactly as a matching run receives it.
+
+    Public because the stop-reason nudge quotes a stage back to the model and
+    must quote the delivered words, not a second spelling of them: one
+    renderer means the quote can never drift from the block the run was
+    given.
+    """
     if stage.get('action') == 'control':
         head = f"control `{stage['tool']}`"
     elif stage.get('action') == 'tactic-loop':
@@ -718,7 +725,7 @@ def render(routes, loaded=()):
                          f'owning subjects of the tactics below.')
         block.append('Stages:')
         for index, stage in enumerate(route['stages'], start=1):
-            block.append(_stage_line(index, stage))
+            block.append(stage_line(index, stage))
         for entry in route.get('avoid') or []:
             block.append(f"Do not reach for `{entry['tactic']}`: "
                          f"{entry['why'].strip()}")

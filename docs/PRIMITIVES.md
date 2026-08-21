@@ -253,7 +253,13 @@ outcome (a selection that selects no value) whose only content is a capped
 reason naming the missing move. It is sound because it claims nothing about
 the mathematics — "this session exhibits no certified result" is decidable
 from the ledger itself — and a later certified selection supersedes it for
-display. An unresolved exploration marker at an open ending is presented as
+display. When a run was delivered a strategy route and its stated reason names
+a blocker one of that route's stages answers, the reply to `set_open` carries
+one advisory note quoting that stage verbatim. The outcome is recorded first,
+by the ordinary path: the note can never bar an open, at most one is issued
+per run, calling `set_open` again confirms the stop, and a run whose stated
+reason came after an engine refusal is never nudged at all. What fired is run
+metadata (`stop_nudge`), never ledger content. An unresolved exploration marker at an open ending is presented as
 left unresolved rather than awaiting continuation. A concluded claim or the
 latest selection determines the displayed spine. Markdown and notebook output
 collapse each marker-classified off-spine route behind its source and reason,

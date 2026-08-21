@@ -29,6 +29,7 @@ import cell_input
 import context_prewarm
 import observability
 import primitives
+import stop_nudge
 import strategy_routes
 import tactic_registry
 import tactic_skills
@@ -282,6 +283,23 @@ class DoSession(object):
         self.result_provenance = None
         self.result_selection = None
         self.open_selection = None
+        #: strategy-route records delivered to this run's initial developer
+        #: instructions. Read ONLY by the stop-reason nudge, which quotes one
+        #: of their stages back when a `set_open` reason names a blocker a
+        #: stage answers. Steering, exactly as the records themselves are.
+        self.delivered_routes = ()
+        #: the one nudge this run may issue, once issued
+        self.stop_nudge = None
+        #: why no nudge was issued, when `set_open` was called and none was
+        self.nudge_suppressed = None
+        # Progress-versus-refusal marks. A refusal "in the way" is a refused
+        # move with NO recorded step after it - measured: the recorded forced
+        # open had two refusals immediately before its `set_open`, while the
+        # premature ones had none at all, and a run that hits a refusal and
+        # recovers from it (eleven green calls after) is not blocked.
+        self._activity = 0
+        self._last_refusal = 0
+        self._last_progress = 0
         self.current_goal = None
         self.chain_goal = None
         #: a bare cell's one formula, when it has exactly one. Read ONLY by
@@ -420,6 +438,9 @@ class DoSession(object):
     def record(self, result):
         """Ledger a successful transforming result; always return the
         (possibly step-annotated) record."""
+        if result.get('ok') is False:
+            # a refused move: the engine declined to do what was asked
+            self.note_refusal()
         if result.get('ok') and result.get('op') in TRANSFORMING_OPS:
             with self._lock:
                 if self.closed:
@@ -437,12 +458,103 @@ class DoSession(object):
                     refused = dict(result)
                     refused['ok'] = False
                     refused['error'] = str(exc)
+                    self.note_refusal()
                     return refused
                 result = dict(result)
                 result['step'] = {'id': step['id'], 'hash': step['hash']}
+                self._activity += 1
+                self._last_progress = self._activity
                 if self.on_step is not None:
                     self.on_step(step)
         return result
+
+    # -- progress versus refusal ------------------------------------------
+    def note_refusal(self):
+        """Mark that a move or a designation was refused.
+
+        Called for every tactic result the engine handed back refused and
+        for every refused `set_result`. Deliberately NOT called for the
+        dispatcher's own bookkeeping refusals (an unloaded skill, an unknown
+        tactic name, a malformed argument list): those name their own repair
+        and stand between the agent and nothing. Narrative controls
+        (`comment`, `claim`, `conclude`) are out for the same reason - they
+        refuse the shape of the account, not a mathematical move, and the one
+        recorded run whose `conclude` was refused had refused tactics beside
+        it anyway.
+        """
+        with self._lock:
+            self._activity += 1
+            self._last_refusal = self._activity
+
+    def refusal_in_the_way(self):
+        """True when a refused move stands between the work and the stop.
+
+        The discriminator between a FORCED open (closure was mechanically
+        impossible, and pressing such a run to continue is pure harm) and a
+        premature one. Deliberately positional: a refusal the run recovered
+        from - a recorded step landed after it - is not in the way.
+        """
+        with self._lock:
+            return self._last_refusal > self._last_progress
+
+    def consider_stop_nudge(self, reason):
+        """At most one advisory retrieval per run, over delivered routes only.
+
+        Returns the rendered nudge text, or '' with `nudge_suppressed` set to
+        why there is none. Never raises, never records, and never affects the
+        open outcome, which is already committed by the time this runs.
+        """
+        with self._lock:
+            if self.stop_nudge is not None:
+                self.nudge_suppressed = 'already-nudged'
+                return ''
+            if not self.delivered_routes:
+                self.nudge_suppressed = 'no-route'
+                return ''
+        if self.refusal_in_the_way():
+            with self._lock:
+                self.nudge_suppressed = 'refusal-in-the-way'
+            return ''
+        ops = [step.get('op') for step in self.new_steps()]
+        try:
+            found = stop_nudge.retrieve(reason, self.delivered_routes, ops)
+            text = stop_nudge.render(found)
+        except Exception:
+            # steering must never be able to take a derivation down
+            found, text = None, ''
+        with self._lock:
+            if found is None or not text:
+                self.nudge_suppressed = 'no-match'
+                return ''
+            self.nudge_suppressed = None
+            self.stop_nudge = dict(found.metadata(),
+                                   steps_at=len(self.ledger.steps),
+                                   confirmed=False)
+            return text
+
+    def nudge_metadata(self):
+        """What the nudge did this run - descriptive run metadata only.
+
+        Always present, like the route metadata beside it, so a later reading
+        can tell an absent nudge from a suppressed one and a delivered one
+        from an ignored one.
+        """
+        with self._lock:
+            if self.stop_nudge is None:
+                return {'fired': False, 'suppressed': self.nudge_suppressed}
+            record = dict(self.stop_nudge)
+            confirmed = record.pop('confirmed', False)
+            steps_at = record.pop('steps_at', 0)
+            if self.result_override is not None:
+                response = 'designated'
+            elif confirmed:
+                response = 'confirmed'
+            elif len(self.ledger.steps) > steps_at:
+                response = 'continued'
+            else:
+                response = 'none'
+            record.update(fired=True, suppressed=None, response=response)
+            return record
 
     def new_steps(self):
         return self.ledger.steps[self.start:]
@@ -512,10 +624,19 @@ class DoSession(object):
                 'this run already designated a certified result; the '
                 'outcome is not open')
         if self.open_selection is not None:
-            raise ValueError(
-                f'open outcome already recorded '
-                f'({self.open_selection["id"]}); stop, or continue only '
-                'to certify a result')
+            if self.stop_nudge is None:
+                raise ValueError(
+                    f'open outcome already recorded '
+                    f'({self.open_selection["id"]}); stop, or continue only '
+                    'to certify a result')
+            # This run was nudged to confirm the stop or continue. Confirming
+            # is the answer the nudge asked for, so it is accepted as it
+            # stands - refusing it would make an advisory question feel like
+            # a demand. Nothing new is recorded: the outcome already is, and
+            # a second selection would double-report one decision.
+            with self._mutate():
+                self.stop_nudge['confirmed'] = True
+            return self.open_selection
         if self.proof_claim_id is not None:
             root = self.ledger.get_claim(self.proof_claim_id)
             if root is not None and root.get('verdict') != 'open':
@@ -845,6 +966,7 @@ def make_api(session):
         try:
             primitives.parse_latex(expr)
         except primitives.PrimitiveError as exc:
+            session.note_refusal()
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': str(exc)}, ensure_ascii=False)
         mapped = session.root_statement_endpoint(expr)
@@ -859,6 +981,7 @@ def make_api(session):
             # checked chain — refuse it HERE, while the agent can still
             # repair (live: a retyped final spelling severed the chain
             # and the run only learned after it had ended)
+            session.note_refusal()
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': (
                 'value is established but its step is not connected to '
@@ -882,6 +1005,7 @@ def make_api(session):
                 error = ('value is not mechanically equivalent to any '
                          'result in the shared ledger; use a tactic to '
                          'establish it or select an earlier ledger result')
+            session.note_refusal()
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': error}, ensure_ascii=False)
         try:
@@ -889,6 +1013,7 @@ def make_api(session):
                 session.result_selection = session.ledger.record_selection(
                     expr, provenance, goal=session.current_goal)
         except ValueError as exc:
+            session.note_refusal()
             return json.dumps({'ok': False, 'op': 'set_result',
                                'error': str(exc)}, ensure_ascii=False)
         session.result_override = expr
@@ -909,14 +1034,25 @@ def make_api(session):
                 move and what was tried; wrap each formula in $...$ so
                 the notebook renders it.
         """
+        already_open = session.open_selection is not None
         try:
             selection = session.set_open(reason)
         except ValueError as exc:
             return json.dumps({'ok': False, 'op': 'set_open',
                                'error': str(exc)}, ensure_ascii=False)
-        return json.dumps({'ok': True, 'op': 'set_open', 'outcome': 'open',
-                           'selection': selection['id']},
-                          ensure_ascii=False)
+        reply = {'ok': True, 'op': 'set_open', 'outcome': 'open',
+                 'selection': selection['id']}
+        if already_open:
+            # the second call of a nudged run: the stop stands as recorded
+            reply['confirmed'] = True
+            return json.dumps(reply, ensure_ascii=False)
+        # The outcome is committed above, by the ordinary path, BEFORE this
+        # runs: the nudge is a note riding the reply and can never bar an
+        # open. At most one per run.
+        nudge = session.consider_stop_nudge(reason)
+        if nudge:
+            reply['nudge'] = nudge
+        return json.dumps(reply, ensure_ascii=False)
 
     def plot(code: str, caption: str, replaces: str = '') -> str:
         """Render an unverified matplotlib/seaborn/plotly illustration.
@@ -1302,6 +1438,9 @@ def run_instruction(instruction, ledger=None, on_step=None, model=None,
     # executor first calling load_skill for content it already has
     session.loaded_skills.update(preloaded)
     delivered = context_prewarm.union(matched, selection.routes)
+    # what the run was actually given is what a stop reason may be answered
+    # from: the nudge quotes a delivered stage, never the wider library
+    session.delivered_routes = delivered
     if delivered != matched:
         trace_metadata['strategy_routes'] = ','.join(
             route['id'] for route in delivered)
@@ -1492,6 +1631,10 @@ def finalize_session(session, outcome, max_turns=None):
            'abandoned_paths': topology['abandoned_paths'],
            # Run-local UI artifacts only; never ledger evidence or replay.
            'figures': figures, 'figure_error': figure_error,
+           # what the stop-reason nudge did, if the run stopped open. Run
+           # metadata beside the route metadata, and read the same way: it
+           # gates nothing and appears in no step.
+           'stop_nudge': session.nudge_metadata(),
            'summary': None}
     if outcome.cancelled:
         return _finalize_cancelled(out, outcome, final, provenance)
